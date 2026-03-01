@@ -1,19 +1,32 @@
-local PetRigManager = {}
 
-function PetRigManager:SetModelPrimaryIfMissing(model)
-	if not model or not model:IsA("Model") then return end
-	if model.PrimaryPart then return end
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") then
-			pcall(function() model.PrimaryPart = d end)
-			if model.PrimaryPart then return end
+local PetRigManager = {}
+	local PhysicsService = game:GetService("PhysicsService")
+	
+	PetRigManager.PET_COLLISION_GROUP = "Pets"
+	PetRigManager.PLAYER_COLLISION_GROUP = "Players"
+	
+	function PetRigManager:EnsureCollisionGroups()
+			pcall(function() PhysicsService:RegisterCollisionGroup(self.PET_COLLISION_GROUP) end)
+			pcall(function() PhysicsService:RegisterCollisionGroup(self.PLAYER_COLLISION_GROUP) end)
+			pcall(function() PhysicsService:CollisionGroupSetCollidable(self.PET_COLLISION_GROUP, self.PLAYER_COLLISION_GROUP, false) end)
+		end
+	
+
+	function PetRigManager:SetModelPrimaryIfMissing(model)
+		if not model or not model:IsA("Model") then return end
+		if model.PrimaryPart then return end
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				pcall(function() model.PrimaryPart = d end)
+				if model.PrimaryPart then return end
+			end
 		end
 	end
-end
 
 function PetRigManager:EnsurePetRig(pet)
 	if not pet or not pet:IsA("Model") then return false end
 	self:SetModelPrimaryIfMissing(pet)
+		self:EnsureCollisionGroups()
 	local hrp = pet.PrimaryPart
 	if not hrp then return false end
 
@@ -55,11 +68,13 @@ function PetRigManager:EnsurePetRig(pet)
 			end
 			pcall(function() part.CanCollide = false end)
 			pcall(function() part.Massless = true end)
+							pcall(function() part.CollisionGroup = self.PET_COLLISION_GROUP end)
 		end
 	end
 
 	pcall(function() hrp.CanCollide = true end)
 	pcall(function() hrp.Massless = true end)
+			pcall(function() hrp.CollisionGroup = self.PET_COLLISION_GROUP end)
 
 	pet:SetAttribute("HasPetRig", true)
 	return true
