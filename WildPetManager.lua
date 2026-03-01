@@ -33,10 +33,12 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.spawnAreas = {} -- spawn area parts
 	self.adoptionMats = {} -- adoption mat parts
 	self.ownedPetPickupConns = {}  -- petModel -> connection for owned pets
+	self.petTemplates = {}
 
 	-- Initialize
 	self:FindSpawnAreas()
 	self:FindAdoptionMats()
+	self:RefreshPetTemplates()
 	self:StartSpawning()
 end
 
@@ -73,6 +75,67 @@ function WildPetManager:FindSpawnAreas()
 			end
 		end
 	end
+end
+
+function WildPetManager:RefreshPetTemplates()
+	self.petTemplates = {}
+
+	if not self.WILD_PET_MODELS then
+		warn("[WildPetManager] WildPetModels/PetModels folder was not found in ServerStorage")
+		return
+	end
+
+	for _, candidate in ipairs(self.WILD_PET_MODELS:GetDescendants()) do
+		if candidate:IsA("Model") then
+			-- Keep only top-level templates (directly under a folder/service, not nested inside another model)
+			if not candidate.Parent or not candidate.Parent:IsA("Model") then
+				local hasPhysicalPart = candidate.PrimaryPart ~= nil or candidate:FindFirstChildWhichIsA("BasePart", true) ~= nil
+				if hasPhysicalPart then
+					table.insert(self.petTemplates, candidate)
+				end
+			end
+		end
+	end
+
+	print(("[WildPetManager] Loaded %d pet templates for wild spawn"):format(#self.petTemplates))
+end
+
+function WildPetManager:GetWeightedRandomTemplate()
+	if #self.petTemplates == 0 then
+		return nil
+	end
+
+	local totalWeight = 0
+	for _, model in ipairs(self.petTemplates) do
+		local weight = tonumber(model:GetAttribute("SpawnWeight"))
+			or tonumber(model:GetAttribute("Weight"))
+			or tonumber(model:GetAttribute("RarityWeight"))
+			or 1
+		if weight > 0 then
+			totalWeight = totalWeight + weight
+		end
+	end
+
+	if totalWeight <= 0 then
+		return self.petTemplates[math.random(1, #self.petTemplates)]
+	end
+
+	local pick = math.random() * totalWeight
+	local running = 0
+	for _, model in ipairs(self.petTemplates) do
+		local weight = tonumber(model:GetAttribute("SpawnWeight"))
+			or tonumber(model:GetAttribute("Weight"))
+			or tonumber(model:GetAttribute("RarityWeight"))
+			or 1
+		if weight > 0 then
+			running = running + weight
+			if pick <= running then
+				return model
+			end
+		end
+	end
+
+	return self.petTemplates[#self.petTemplates]
 end
 
 function WildPetManager:FindAdoptionMats()
@@ -136,7 +199,7 @@ function WildPetManager:SpawnWildPet()
 
 	-- Get a random pet model
 	if not self.WILD_PET_MODELS then
-		print("[WildPetManager] No WildPetModels folder found in ServerStorage")
+		print("[WildPetManager] No WildPetModels/PetModels folder found in ServerStorage")
 		return
 	end
 
@@ -146,13 +209,20 @@ function WildPetManager:SpawnWildPet()
 			table.insert(petModels, child)
 		end
 	end
+	
+	if #self.petTemplates == 0 then
+		self:RefreshPetTemplates()
+	end
 
-	if #petModels == 0 then
-		print("[WildPetManager] No pet models found in WildPetModels folder")
+	if #self.petTemplates == 0 then
+		print("[WildPetManager] No pet models found in WildPetModels/PetModels folder")
 		return
 	end
 
-	local selectedModel = petModels[math.random(1, #petModels)]
+	local selectedModel = self:GetWeightedRandomTemplate()
+	if not selectedModel then
+		return
+	end
 	local pet = selectedModel:Clone()
 
 	-- Generate a random position within the spawn area
@@ -171,6 +241,11 @@ function WildPetManager:SpawnWildPet()
 	pet.Parent = workspace
 	pet.Name = "WildPet_" .. tostring(math.random(10000, 99999))
 	pet:SetAttribute("TemplateName", selectedModel.Name)
+	if pet.PrimaryPart then
+		pet:SetPrimaryPartCFrame(CFrame.new(randomPos))
+	else
+		pet:PivotTo(CFrame.new(randomPos))
+	end
 	
 	-- Get power and rarity multiplier from the template
 	local power = selectedModel:GetAttribute("Power") or 1
