@@ -283,6 +283,7 @@ function WildPetManager:SpawnWildPet()
 		scale = 1.0,
 		dirtiness = math.random(30, 80),
 		wetness = math.random(20, 60),
+		hunger = 100,
 		power = power,
 		rarityMultiplier = rarityMult
 	}
