@@ -85,6 +85,7 @@ function PetStateManager:SendStateToOwner(petModel)
 		scale = st.scale or 1,
 		dirtiness = tonumber(st.dirtiness) or 0,
 		wetness = tonumber(st.wetness) or 0,
+		hunger = tonumber(st.hunger) or 100,
 		petName = tostring(petModel.Name),
 		levelProgress = progress,
 		xpInLevel = xpInLevel,
