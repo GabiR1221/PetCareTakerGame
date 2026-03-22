@@ -1,6 +1,22 @@
 local PetAnimationManager = {}
 local ServerStorage = game:GetService("ServerStorage")
 
+local function findAnimationContainer(root, name)
+	if not root or not name or name == "" then return nil end
+	local direct = root:FindFirstChild(name)
+	if direct then
+		return direct
+	end
+
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant.Name == name and (descendant:IsA("Folder") or descendant:IsA("Model")) then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
 local ANIM_VELOCITY_THRESHOLD = 0.8
 local ANIM_CHECK_INTERVAL = 0.12
 local petAnimatorTasks = {}
@@ -8,6 +24,38 @@ local petAnimatorTasks = {}
 function PetAnimationManager:Initialize(stateTable)
 	self.petState = stateTable or {}
 	self:StartAnimationMonitor()
+end
+
+function PetAnimationManager:GetAnimationObjectForPet(pet, animationName)
+	if not pet or not animationName then return nil end
+
+	local animRoot = ServerStorage:FindFirstChild("PetAnimations")
+	if not animRoot then return nil end
+
+	local templateName = pet:GetAttribute("TemplateName")
+	local candidateNames = {}
+	for _, value in ipairs({templateName, pet.Name}) do
+		if typeof(value) == "string" and value ~= "" and not table.find(candidateNames, value) then
+			table.insert(candidateNames, value)
+		end
+	end
+
+	for _, candidateName in ipairs(candidateNames) do
+		local container = findAnimationContainer(animRoot, candidateName)
+		if container then
+			local animObject = container:FindFirstChild(animationName)
+			if animObject and animObject:IsA("Animation") then
+				return animObject
+			end
+		end
+	end
+
+	local fallback = animRoot:FindFirstChild(animationName)
+	if fallback and fallback:IsA("Animation") then
+		return fallback
+	end
+
+	return nil
 end
 
 function PetAnimationManager:SetupAnimatorForPet(pet)
@@ -21,10 +69,10 @@ function PetAnimationManager:SetupAnimatorForPet(pet)
 		animator.Parent = humanoid
 	end
 
-	local animFolder = ServerStorage:FindFirstChild("PetAnimations")
-	if not animFolder then return nil end
-	local animObject = animFolder:FindFirstChild("Walk")
-	if not (animObject and animObject:IsA("Animation")) then return nil end
+	local animObject = self:GetAnimationObjectForPet(pet, "Walk")
+	if not animObject then return nil end
+
+	self:TeardownAnimatorForPet(pet)
 
 	local ok, track = pcall(function() return animator:LoadAnimation(animObject) end)
 	if not ok or not track then return nil end
@@ -34,6 +82,8 @@ function PetAnimationManager:SetupAnimatorForPet(pet)
 	petAnimatorTasks[pet].walkTrack = track
 	petAnimatorTasks[pet].humanoid = humanoid
 	petAnimatorTasks[pet].hrp = pet.PrimaryPart
+	petAnimatorTasks[pet].animationName = animObject.Name
+	petAnimatorTasks[pet].animationSource = animObject:GetFullName()
 
 	return track
 end
@@ -56,10 +106,10 @@ function PetAnimationManager:StartAnimationMonitor()
 			for pet, state in pairs(petAnimatorTasks) do
 				pcall(function()
 					if not pet or not pet.Parent then
-						if state.walkTrack then 
-							pcall(function() 
-								if state.walkTrack.IsPlaying then state.walkTrack:Stop() end 
-							end) 
+						if state.walkTrack then
+							pcall(function()
+								if state.walkTrack.IsPlaying then state.walkTrack:Stop() end
+							end)
 						end
 						petAnimatorTasks[pet] = nil
 						return
