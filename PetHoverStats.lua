@@ -36,7 +36,7 @@ hoverLabel.Parent = screenGui
 -- Pet menu frame (center-ish, slightly lower)
 local menuFrame = Instance.new("Frame")
 menuFrame.Name = "PetMenu"
-menuFrame.Size = UDim2.new(0, 380, 0, 120)
+menuFrame.Size = UDim2.new(0, 380, 0, 150)
 menuFrame.Position = UDim2.new(0.5, -190, 0.6, -60) -- center horizontally, lower than center
 menuFrame.AnchorPoint = Vector2.new(0,0)
 menuFrame.BackgroundTransparency = 0.15
@@ -121,10 +121,10 @@ xpText.TextSize = 14
 xpText.Text = "XP"
 xpText.TextScaled = false
 
--- Wetness row (insert between dirtiness and level if you like)
+-- Wetness row
 local wetLabel = Instance.new("TextLabel", menuFrame)
 wetLabel.Size = UDim2.new(0, 80, 0, 22)
-wetLabel.Position = UDim2.new(0, 8, 0, 66) -- slightly below dirtiness
+wetLabel.Position = UDim2.new(0, 8, 0, 66)
 wetLabel.BackgroundTransparency = 1
 wetLabel.TextColor3 = Color3.fromRGB(220,220,220)
 wetLabel.Text = "Wetness"
@@ -154,26 +154,59 @@ wetBarText.TextSize = 14
 wetBarText.Text = "0 / 100"
 wetBarText.TextScaled = false
 
--- Adjust Level / XP row Y positions (shift them down if necessary)
-levelLabel.Position = UDim2.new(0, 8, 0, 96)
-xpBarBg.Position = UDim2.new(0, 96, 0, 96)
+-- Hunger row
+local hungerLabel = Instance.new("TextLabel", menuFrame)
+hungerLabel.Size = UDim2.new(0, 80, 0, 22)
+hungerLabel.Position = UDim2.new(0, 8, 0, 92)
+hungerLabel.BackgroundTransparency = 1
+hungerLabel.TextColor3 = Color3.fromRGB(220,220,220)
+hungerLabel.Text = "Hunger"
+hungerLabel.Font = Enum.Font.SourceSans
+hungerLabel.TextSize = 16
+hungerLabel.TextXAlignment = Enum.TextXAlignment.Left
 
--- Helper to update GUI (replace your existing updateMenuForPet)
+local hungerBarBg = Instance.new("Frame", menuFrame)
+hungerBarBg.Position = UDim2.new(0, 96, 0, 92)
+hungerBarBg.Size = UDim2.new(0, 276, 0, 22)
+hungerBarBg.BackgroundColor3 = Color3.fromRGB(60,60,60)
+hungerBarBg.BorderSizePixel = 0
+
+local hungerBarFill = Instance.new("Frame", hungerBarBg)
+hungerBarFill.AnchorPoint = Vector2.new(0,0)
+hungerBarFill.Size = UDim2.new(0,0,1,0)
+hungerBarFill.Position = UDim2.new(0,0,0,0)
+hungerBarFill.BackgroundColor3 = Color3.fromRGB(255,170,70)
+hungerBarFill.BorderSizePixel = 0
+
+local hungerBarText = Instance.new("TextLabel", hungerBarBg)
+hungerBarText.Size = UDim2.new(1,0,1,0)
+hungerBarText.BackgroundTransparency = 1
+hungerBarText.TextColor3 = Color3.fromRGB(255,255,255)
+hungerBarText.Font = Enum.Font.SourceSansBold
+hungerBarText.TextSize = 14
+hungerBarText.Text = "100 / 100"
+hungerBarText.TextScaled = false
+
+-- Adjust Level / XP row Y positions
+levelLabel.Position = UDim2.new(0, 8, 0, 122)
+xpBarBg.Position = UDim2.new(0, 96, 0, 122)
+
 local function updateMenuForPet(pet, payload)
 	if not pet or not payload then return end
 	titleLabel.Text = tostring(payload.petName or pet.Name)
 
-	-- Dirtiness
 	local dirt = tonumber(payload.dirtiness) or 0
 	dirtBarFill.Size = UDim2.new(math.clamp(dirt / 100, 0, 1), 0, 1, 0)
 	dirtBarText.Text = ("%d / 100"):format(dirt)
 
-	-- Wetness
 	local wet = tonumber(payload.wetness) or 0
 	wetBarFill.Size = UDim2.new(math.clamp(wet / 100, 0, 1), 0, 1, 0)
 	wetBarText.Text = ("%d / 100"):format(wet)
 
-	-- Level / XP
+	local hunger = tonumber(payload.hunger) or 100
+	hungerBarFill.Size = UDim2.new(math.clamp(hunger / 100, 0, 1), 0, 1, 0)
+	hungerBarText.Text = ("%d / 100"):format(hunger)
+
 	levelLabel.Text = ("Lv %d"):format(payload.level or 1)
 	local prog = tonumber(payload.levelProgress) or 0
 	xpBarFill.Size = UDim2.new(math.clamp(prog, 0, 1), 0, 1, 0)
@@ -185,33 +218,29 @@ local function updateMenuForPet(pet, payload)
 	end
 end
 
--- PetStateEvent handler
 petEvent.OnClientEvent:Connect(function(action, pet, payload)
 	if action ~= "UpdatePetState" then return end
 	if not pet or not payload then return end
 	knownPets[pet] = payload
-	-- if the menu is open for this pet, update it
 	if menuOpenPet == pet then
 		updateMenuForPet(pet, payload)
 	end
 end)
 
--- Hover detection
 RunService.RenderStepped:Connect(function()
 	local target = mouse.Target
 	local newHover = nil
 	if target then
 		local p = target
 		while p and p.Parent do
-			-- check if p.Parent is a known pet model (or p itself is a model part belonging to a known pet)
 			if p:IsA("Model") then
-				if knownPets[p] then newHover = p; break end
+				if knownPets[p] then newHover = p break end
 			else
 				local ancestor = p
 				while ancestor and not ancestor:IsA("Model") do
 					ancestor = ancestor.Parent
 				end
-				if ancestor and knownPets[ancestor] then newHover = ancestor; break end
+				if ancestor and knownPets[ancestor] then newHover = ancestor break end
 			end
 			p = p.Parent
 		end
@@ -227,7 +256,6 @@ RunService.RenderStepped:Connect(function()
 		end
 	end
 
-	-- position hover label near mouse
 	if hoverLabel.Visible then
 		local x = math.clamp(mouse.X + 16, 2, workspace.CurrentCamera.ViewportSize.X - hoverLabel.AbsoluteSize.X - 2)
 		local y = math.clamp(mouse.Y + 16, 2, workspace.CurrentCamera.ViewportSize.Y - hoverLabel.AbsoluteSize.Y - 2)
@@ -235,7 +263,6 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
--- Open menu on click when hovering a pet
 mouse.Button1Down:Connect(function()
 	if hoveredPet then
 		menuOpenPet = hoveredPet
@@ -243,13 +270,11 @@ mouse.Button1Down:Connect(function()
 		local payload = knownPets[menuOpenPet]
 		updateMenuForPet(menuOpenPet, payload)
 	else
-		-- close menu if click elsewhere
 		menuOpenPet = nil
 		menuFrame.Visible = false
 	end
 end)
 
--- Close menu on Escape or right-click
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	if input.KeyCode == Enum.KeyCode.Escape then
