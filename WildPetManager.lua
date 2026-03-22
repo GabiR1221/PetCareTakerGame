@@ -138,8 +138,26 @@ function WildPetManager:GetWeightedRandomTemplate()
 	return self.petTemplates[#self.petTemplates]
 end
 
+function WildPetManager:FindPetTemplateByName(templateName)
+	if not self.WILD_PET_MODELS or not templateName then
+		return nil
+	end
+
+	local direct = self.WILD_PET_MODELS:FindFirstChild(templateName)
+	if direct and direct:IsA("Model") then
+		return direct
+	end
+
+	for _, candidate in ipairs(self.WILD_PET_MODELS:GetDescendants()) do
+		if candidate:IsA("Model") and candidate.Name == templateName then
+			return candidate
+		end
+	end
+
+	return nil
+end
+
 function WildPetManager:FindAdoptionMats()
-	print("[WildPetManager] Scanning for adoption mats...")
 
 	-- Look for parts named "AdoptionMat" in Essentials folders
 	for _, model in ipairs(workspace:GetDescendants()) do
@@ -546,7 +564,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 
 	for _, petInfo in ipairs(petData) do
 		-- Find the pet model template
-		local template = self.WILD_PET_MODELS:FindFirstChild(petInfo.modelName)
+		local template = self:FindPetTemplateByName(petInfo.modelName)
 		if template then
 			local pet = template:Clone()
 			pet.Name = petInfo.modelName
