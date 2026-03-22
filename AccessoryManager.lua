@@ -145,7 +145,6 @@ function AccessoryManager:ConnectAccessoryPrompt(tablePart)
 end
 
 function AccessoryManager:ScanAndConnectAll()
-	print("[PetManager] Scanning for accessory tables...")
 
 	-- Method 1: Scan through common tycoon roots (same as old script)
 	local possibleRoots = {}
