@@ -57,6 +57,8 @@ function NPCManager:InitializeNPCWithPet(npcModel)
 			state.dirtiness = math.random(0, 20)
 		end
 
+		state.hunger = 100
+
 		local wantsDry = npcModel:GetAttribute("RequestDry") == true
 		if wantsDry then
 			state.wetness = 100
