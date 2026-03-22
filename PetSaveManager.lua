@@ -26,6 +26,7 @@ function PetSaveManager:SavePlayerPets(player, pets)
 				scale = state.scale or 1,
 				dirtiness = state.dirtiness or 0,
 				wetness = state.wetness or 0,
+				hunger = state.hunger == nil and 100 or state.hunger,
 				showered = state.showered or false,
 				dried = state.dried or false,
 				accessories = state.accessories or {A = false, B = false},
