@@ -17,8 +17,20 @@ function PetSaveManager:SavePlayerPets(player, pets)
 
 	for pet, state in pairs(self.petState) do
 		if state.ownerUserId == player.UserId and not state.wild then
-			-- Save relevant pet data
 			local templateName = pet:GetAttribute("TemplateName") or pet.Name
+
+			local standRoot = state.petstandRoot
+			local standId = nil
+			local storedMoney = nil
+
+			if standRoot then
+				standId = standRoot:GetAttribute("StandId")
+				local storedValue = standRoot:FindFirstChild("StoredMoney")
+				if storedValue and storedValue:IsA("NumberValue") then
+					storedMoney = storedValue.Value
+				end
+			end
+
 			local petInfo = {
 				modelName = templateName,
 				xp = state.xp or 0,
@@ -33,12 +45,17 @@ function PetSaveManager:SavePlayerPets(player, pets)
 				position = {x = 0, y = 0, z = 0},
 				power = state.power or 1,
 				rarityMultiplier = state.rarityMultiplier or 1,
+
+				-- new stand persistence fields
+				location = state.location or "free",
+				standId = standId,
+				standStoredMoney = storedMoney or 0,
 			}
+
 			table.insert(petData, petInfo)
 		end
 	end
 
-	-- Save to DataStore
 	local success, err = pcall(function()
 		self.dataStore:SetAsync(userId, petData)
 	end)
