@@ -115,6 +115,31 @@ function PetStandManager:GetDisplayLabel(standRoot)
 	return nil
 end
 
+function PetStandManager:EnsureStandId(standRoot)
+	if not standRoot then return nil end
+
+	local existing = standRoot:GetAttribute("StandId")
+	if existing and tostring(existing) ~= "" then
+		return tostring(existing)
+	end
+
+	local id = standRoot:GetFullName()
+	standRoot:SetAttribute("StandId", id)
+	return id
+end
+
+function PetStandManager:GetStandById(standId)
+	if not standId then return nil end
+
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if (inst:IsA("Model") or inst:IsA("BasePart")) and inst:GetAttribute("StandId") == standId then
+			return inst
+		end
+	end
+
+	return nil
+end
+
 function PetStandManager:GetStoredMoneyValue(standRoot)
 	if not standRoot then return nil end
 
@@ -140,6 +165,24 @@ function PetStandManager:UpdateStandDisplay(standRoot)
 	if stored then
 		label.Text = tostring(math.floor(stored.Value))
 	end
+end
+
+function PetStandManager:GetLevelIncomeMultiplier(level)
+	level = math.max(1, tonumber(level) or 1)
+	return 1 + (math.sqrt(level - 1) * 0.30) ----CHANGE THIS TO CHANGE INCOME PER LEVEL---------------------------------------
+end
+
+function PetStandManager:GetPetIncomePerSecond(petModel)
+	if not petModel then return 1 end
+
+	local state = self.petState[petModel] or {}
+	local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
+	local level = tonumber(state.level) or 1
+
+	local multiplier = self:GetLevelIncomeMultiplier(level)
+	local income = power * multiplier
+
+	return math.max(1, math.floor(income + 0.5))
 end
 
 function PetStandManager:AddCurrencyToPlayer(player, amount)
@@ -280,13 +323,11 @@ function PetStandManager:StartIncomeLoop(petModel, standRoot)
 			and self.petState[petModel].location == "petstand"
 			and self.petState[petModel].petstandRoot == standRoot do
 
-			local state = self.petState[petModel]
-			local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
-			power = math.max(1, math.floor(power))
+			local income = self:GetPetIncomePerSecond(petModel)
 
 			local stored = self:GetStoredMoneyValue(standRoot)
 			if stored then
-				stored.Value = stored.Value + power
+				stored.Value = stored.Value + income
 			end
 			self:UpdateStandDisplay(standRoot)
 
@@ -404,6 +445,8 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 	if not standRoot then return end
 	if self.standConnected[standRoot] then return end
 
+	self:EnsureStandId(standRoot)
+
 	local standPart = self:GetStandPlacementPart(standRoot)
 	if not standPart or not standPart:IsA("BasePart") then return end
 
@@ -478,6 +521,64 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		collectorPart = collectorPart,
 		connection = conn,
 	}
+end
+
+function PetStandManager:RestorePetToStand(petModel, player, standId, storedMoney)
+	if not petModel or not player or not standId then
+		return false
+	end
+
+	local standRoot = self:GetStandById(standId)
+	if not standRoot then
+		warn("[PetStandManager] Could not restore stand by StandId:", standId)
+		return false
+	end
+
+	local standPart = self:GetStandPlacementPart(standRoot)
+	if not standPart then
+		warn("[PetStandManager] Stand has no placement part for restore:", standRoot:GetFullName())
+		return false
+	end
+
+	-- prevent double occupancy
+	for otherPet, st in pairs(self.petState) do
+		if otherPet ~= petModel and st and st.location == "petstand" and st.petstandRoot == standRoot then
+			warn("[PetStandManager] Restore blocked, stand already occupied:", standRoot:GetFullName())
+			return false
+		end
+	end
+
+	self.PetAttachmentManager:SetModelPrimaryIfMissing(petModel)
+	if not petModel.PrimaryPart then
+		return false
+	end
+
+	self.PetAttachmentManager:ClearDirectModelWelds(petModel)
+	self.PetAttachmentManager:ClearWeldsOnPart(petModel.PrimaryPart)
+
+	local ok = self.PetAttachmentManager:AttachPetToPart(petModel, standPart)
+	if not ok then
+		return false
+	end
+
+	self.petState[petModel] = self.petState[petModel] or {}
+	self.petState[petModel].ownerUserId = player.UserId
+	self.petState[petModel].location = "petstand"
+	self.petState[petModel].petstand = standPart
+	self.petState[petModel].petstandRoot = standRoot
+
+	local stored = self:GetStoredMoneyValue(standRoot)
+	if storedMoney ~= nil and stored then
+		stored.Value = tonumber(storedMoney) or 0
+	end
+
+	self.PetMovement.StopWandering(petModel)
+	self:CreatePlacedPetPickupPrompt(petModel, standRoot, standPart)
+	self:StartIncomeLoop(petModel, standRoot)
+	self.PetStateManager:SendStateToOwner(petModel)
+	self:UpdateStandDisplay(standRoot)
+
+	return true
 end
 
 function PetStandManager:ScanAndConnectAll()
