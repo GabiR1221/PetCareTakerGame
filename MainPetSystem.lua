@@ -30,6 +30,7 @@ local WildPetManager = require(Modules:WaitForChild("WildPetManager"))
 local PetSaveManager = require(Modules:WaitForChild("PetSaveManager"))
 local PetFeedingManager = require(Modules:WaitForChild("PetFeedingManager"))
 local PetStandManager = require(Modules:WaitForChild("PetStandManager"))
+local PetMoodVisualManager = require(Modules:WaitForChild("PetMoodVisualManager"))
 -- Services
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -100,7 +101,8 @@ local petPickupPromptConns = {}
 	local saveManager = PetSaveManager:Initialize("PetData", petState, carryingPetByUserId)
 	PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
 	WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
-    PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
+	PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
+	PetMoodVisualManager:Initialize(petState)
 
 	-- Connect remote events
 	if accessoryEvent then
