@@ -20,6 +20,7 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
 	self.TycoonUtils:Initialize(config)  -- Initialize TycoonUtils with the config
 	self.SaveManager = saveManager
+	self.PetStandManager = require(script.Parent.PetStandManager)
 	-- Settings
 	self.WILD_PET_SPAWN_AREA_TAG = "WildPetSpawnArea"
 	self.MAX_WILD_PETS = 10
@@ -540,14 +541,12 @@ function WildPetManager:AddOwnedPetPickupPrompt(pet, ownerUserId)
 end
 
 function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
-	-- Find player's tycoon
 	local tycoonModel, _ = self.TycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
 	if not tycoonModel then
 		print(("[WildPetManager] Could not find tycoon for player %s"):format(player.Name))
 		return
 	end
 
-	-- Find adoption mat for this tycoon
 	local adoptionMat = nil
 	for mat, tModel in pairs(self.adoptionMats) do
 		if tModel == tycoonModel then
@@ -564,7 +563,6 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 	local matPos = adoptionMat.Position
 
 	for _, petInfo in ipairs(petData) do
-		-- Find the pet model template
 		local template = self:FindPetTemplateByName(petInfo.modelName)
 		if template then
 			local pet = template:Clone()
@@ -572,30 +570,43 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			pet:SetAttribute("TemplateName", petInfo.modelName)
 			pet.Parent = workspace
 
-			-- Place near adoption mat
-			self:PlacePetOnGround(pet, matPos)
-
-			-- Restore state
+			-- restore state
 			self.petState[pet] = petInfo
 			self.petState[pet].ownerUserId = player.UserId
 			self.petState[pet].wild = false
-			self.petState[pet].location = "free"
 
-			-- Ensure power and rarityMultiplier are present (they should be in petInfo)
-			if not self.petState[pet].power then self.petState[pet].power = petInfo.power or 1 end
-			if not self.petState[pet].rarityMultiplier then self.petState[pet].rarityMultiplier = petInfo.rarityMultiplier or 1 end
+			if not self.petState[pet].power then
+				self.petState[pet].power = petInfo.power or 1
+			end
+			if not self.petState[pet].rarityMultiplier then
+				self.petState[pet].rarityMultiplier = petInfo.rarityMultiplier or 1
+			end
 
-			-- Set attributes on the pet (optional, for consistency)
 			pet:SetAttribute("Power", self.petState[pet].power)
 			pet:SetAttribute("RarityMultiplier", self.petState[pet].rarityMultiplier)
 
-			-- Ensure rig and start wandering
 			self.PetRigManager:EnsurePetRig(pet)
 			self.PetAnimationManager:SetupAnimatorForPet(pet)
-			self.PetMovement.StartWandering(pet, matPos, 20)
 
-			-- Add pickup prompt for owned pet
-			self:AddOwnedPetPickupPrompt(pet, player.UserId)
+			local restoredToStand = false
+			if petInfo.location == "petstand" and petInfo.standId then
+				local ok = self.PetStandManager:RestorePetToStand(
+					pet,
+					player,
+					petInfo.standId,
+					petInfo.standStoredMoney
+				)
+				if ok then
+					restoredToStand = true
+				end
+			end
+
+			if not restoredToStand then
+				self:PlacePetOnGround(pet, matPos)
+				self.petState[pet].location = "free"
+				self.PetMovement.StartWandering(pet, matPos, 20)
+				self:AddOwnedPetPickupPrompt(pet, player.UserId)
+			end
 
 			print(("[WildPetManager] Spawned owned pet %s for %s"):format(pet.Name, player.Name))
 		else
