@@ -1,4 +1,3 @@
-
 local PetStandManager = {}
 
 function PetStandManager:Initialize(stateTable, carryingTable, playersService, petMovement, saveManager, config)
@@ -9,9 +8,11 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.SaveManager = saveManager
 	self.Config = config or {}
 
-	self.standConnected = {}
-	self.standIncomeTasks = {}
-	self.standPickupPromptConns = {}
+	self.standConnected = {}           -- [standRoot] = true
+	self.standData = {}                -- [standRoot] = data table
+	self.standIncomeTasks = {}         -- [petModel] = true
+	self.standPickupPromptConns = {}   -- [petModel] = RBXScriptConnection
+	self.collectorTouchDebounces = {}  -- [collectorPart] = {[userId] = true}
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
@@ -21,27 +22,91 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	return self
 end
 
-function PetStandManager:GetStandContainer(standPart)
-	if not standPart then return nil end
+function PetStandManager:GetStandRootFromInstance(inst)
+	if not inst then return nil end
 
-	local current = standPart.Parent
+	if inst:IsA("Model") then
+		if inst:FindFirstChild("PetStandPart", true) or inst:FindFirstChild("PetStand", true) then
+			return inst
+		end
+	end
+
+	local current = inst
 	while current do
-		if current:IsA("Model") or current:IsA("Folder") then
-			return current
+		if current:IsA("Model") then
+			if current:FindFirstChild("PetStandPart", true) or current:FindFirstChild("PetStand", true) then
+				return current
+			end
 		end
 		current = current.Parent
 	end
 
-	return standPart.Parent
+	return inst
 end
 
-function PetStandManager:GetDisplayLabel(standPart)
-	if not standPart then return nil end
+function PetStandManager:GetStandPlacementPart(standRoot)
+	if not standRoot then return nil end
 
-	local container = self:GetStandContainer(standPart)
-	if not container then return nil end
+	if standRoot:IsA("BasePart") then
+		return standRoot
+	end
 
-	for _, d in ipairs(container:GetDescendants()) do
+	local direct = standRoot:FindFirstChild("PetStandPart")
+	if direct and direct:IsA("BasePart") then
+		return direct
+	end
+
+	local direct2 = standRoot:FindFirstChild("PetStand")
+	if direct2 and direct2:IsA("BasePart") then
+		return direct2
+	end
+
+	for _, d in ipairs(standRoot:GetDescendants()) do
+		if d:IsA("BasePart") and (d.Name == "PetStandPart" or d.Name == "PetStand") then
+			return d
+		end
+	end
+
+	return nil
+end
+
+function PetStandManager:GetCollectorPart(standRoot)
+	if not standRoot or not standRoot.GetDescendants then return nil end
+
+	local direct = standRoot:FindFirstChild("CollectorPart")
+	if direct and direct:IsA("BasePart") then
+		return direct
+	end
+
+	local direct2 = standRoot:FindFirstChild("Collector")
+	if direct2 and direct2:IsA("BasePart") then
+		return direct2
+	end
+
+	for _, d in ipairs(standRoot:GetDescendants()) do
+		if d:IsA("BasePart") and (d.Name == "CollectorPart" or d.Name == "Collector") then
+			return d
+		end
+	end
+
+	return nil
+end
+
+function PetStandManager:GetDisplayLabel(standRoot)
+	if not standRoot or not standRoot.GetDescendants then return nil end
+
+	local displayPart = standRoot:FindFirstChild("SurfaceGuiPart", true) or standRoot:FindFirstChild("DisplayPart", true)
+	if displayPart then
+		local gui = displayPart:FindFirstChildWhichIsA("SurfaceGui")
+		if gui then
+			local label = gui:FindFirstChildWhichIsA("TextLabel", true)
+			if label then
+				return label
+			end
+		end
+	end
+
+	for _, d in ipairs(standRoot:GetDescendants()) do
 		if d:IsA("TextLabel") then
 			return d
 		end
@@ -50,13 +115,10 @@ function PetStandManager:GetDisplayLabel(standPart)
 	return nil
 end
 
-function PetStandManager:GetStoredMoneyValue(standPart)
-	if not standPart then return nil end
+function PetStandManager:GetStoredMoneyValue(standRoot)
+	if not standRoot then return nil end
 
-	local container = self:GetStandContainer(standPart)
-	if not container then return nil end
-
-	local stored = container:FindFirstChild("StoredMoney")
+	local stored = standRoot:FindFirstChild("StoredMoney")
 	if stored and stored:IsA("NumberValue") then
 		return stored
 	end
@@ -64,161 +126,49 @@ function PetStandManager:GetStoredMoneyValue(standPart)
 	stored = Instance.new("NumberValue")
 	stored.Name = "StoredMoney"
 	stored.Value = 0
-	stored.Parent = container
+	stored.Parent = standRoot
 	return stored
 end
 
-function PetStandManager:UpdateStandDisplay(standPart)
-	if not standPart then return end
+function PetStandManager:UpdateStandDisplay(standRoot)
+	if not standRoot then return end
 
-	local label = self:GetDisplayLabel(standPart)
+	local label = self:GetDisplayLabel(standRoot)
 	if not label then return end
 
-	local stored = self:GetStoredMoneyValue(standPart)
+	local stored = self:GetStoredMoneyValue(standRoot)
 	if stored then
 		label.Text = tostring(math.floor(stored.Value))
 	end
 end
 
 function PetStandManager:AddCurrencyToPlayer(player, amount)
-	if not player or not amount or amount <= 0 then return end
+	if not player or not amount or amount <= 0 then return 0 end
 
 	local dataFolder = player:FindFirstChild("Data")
 	if not dataFolder then
 		warn("[PetStandManager] Player has no Data folder:", player.Name)
-		return
+		return 0
 	end
 
 	local playerData = dataFolder:FindFirstChild("PlayerData")
 	if not playerData then
 		warn("[PetStandManager] Player has no PlayerData folder:", player.Name)
-		return
+		return 0
 	end
 
 	local currency = playerData:FindFirstChild("Currency")
 	if not currency then
 		warn("[PetStandManager] Player has no Currency value:", player.Name)
-		return
+		return 0
 	end
 
 	if currency:IsA("NumberValue") or currency:IsA("IntValue") then
 		currency.Value = currency.Value + amount
-	end
-end
-
-function PetStandManager:StartIncomeLoop(petModel, standPart)
-	if not petModel or not standPart then return end
-	if self.standIncomeTasks[petModel] then return end
-
-	self.standIncomeTasks[petModel] = true
-
-	task.spawn(function()
-		while self.standIncomeTasks[petModel]
-			and petModel
-			and petModel.Parent
-			and standPart
-			and standPart.Parent
-			and self.petState[petModel]
-			and self.petState[petModel].location == "petstand"
-			and self.petState[petModel].petstand == standPart do
-
-			local state = self.petState[petModel]
-			local ownerUserId = state.ownerUserId
-			local owner = ownerUserId and self.Players:GetPlayerByUserId(ownerUserId) or nil
-			local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
-			power = math.max(1, math.floor(power))
-
-			local stored = self:GetStoredMoneyValue(standPart)
-			if stored then
-				stored.Value = stored.Value + power
-			end
-			self:UpdateStandDisplay(standPart)
-
-			if owner then
-				self:AddCurrencyToPlayer(owner, power)
-				if self.SaveManager then
-					self.SaveManager:ScheduleSave(owner)
-				end
-			end
-
-			task.wait(1)
-		end
-
-		self.standIncomeTasks[petModel] = nil
-	end)
-end
-
-function PetStandManager:StopIncomeLoop(petModel)
-	self.standIncomeTasks[petModel] = nil
-end
-
-function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standPart)
-	if not petModel then return end
-
-	local existing = petModel:FindFirstChild("PetPickupPart")
-	if existing then
-		pcall(function() existing:Destroy() end)
+		return amount
 	end
 
-	local helper = Instance.new("Part")
-	helper.Name = "PetPickupPart"
-	helper.Size = Vector3.new(1,1,1)
-	helper.Anchored = false
-	helper.Transparency = 1
-	helper.CanCollide = false
-	helper.Parent = petModel
-
-	local pp = petModel.PrimaryPart
-	if pp then
-		helper.CFrame = pp.CFrame * CFrame.new(0, pp.Size.Y / 2 + 0.5, 0)
-		local w = Instance.new("WeldConstraint")
-		w.Part0 = helper
-		w.Part1 = pp
-		w.Parent = helper
-	end
-
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = "PetPrompt"
-	prompt.ActionText = "Pick Up Pet"
-	prompt.ObjectText = "Pet"
-	prompt.RequiresLineOfSight = false
-	prompt.MaxActivationDistance = 6
-	prompt.HoldDuration = 0
-	prompt.Parent = helper
-
-	local conn = prompt.Triggered:Connect(function(player)
-		local st = self.petState[petModel]
-		if not st then return end
-		if tostring(st.ownerUserId) ~= tostring(player.UserId) then return end
-
-		self:StopIncomeLoop(petModel)
-
-		if petModel.PrimaryPart then
-			self.PetAttachmentManager:ClearWeldsOnPart(petModel.PrimaryPart)
-		end
-
-		if player.Character and player.Character.PrimaryPart and not self.carryingPetByUserId[player.UserId] then
-			local ok, err = pcall(function()
-				self.PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false })
-			end)
-
-			if ok then
-				self.petState[petModel].location = "player"
-				self.petState[petModel].petstand = nil
-
-				pcall(function() helper:Destroy() end)
-
-				if self.standPickupPromptConns[petModel] then
-					pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
-					self.standPickupPromptConns[petModel] = nil
-				end
-			else
-				warn("[PetStandManager] Failed to pick pet back up:", err)
-			end
-		end
-	end)
-
-	self.standPickupPromptConns[petModel] = conn
+	return 0
 end
 
 function PetStandManager:ResolveTycoonForStandPart(standPart, player)
@@ -283,11 +233,179 @@ function PetStandManager:IsPlayerAllowedToUseStand(player, standPart)
 	return false
 end
 
-function PetStandManager:ConnectStandPrompt(standPart)
-	if not standPart or not standPart:IsA("BasePart") then return end
-	if self.standConnected[standPart] then return end
+function PetStandManager:CollectStandMoney(player, standRoot)
+	if not player or not standRoot then return 0 end
 
-	print("[PetStandManager] Connecting stand prompt for:", standPart:GetFullName())
+	local placementPart = self:GetStandPlacementPart(standRoot)
+	if not placementPart then return 0 end
+
+	if not self:IsPlayerAllowedToUseStand(player, placementPart) then
+		return 0
+	end
+
+	local stored = self:GetStoredMoneyValue(standRoot)
+	if not stored then return 0 end
+
+	local amount = math.floor(stored.Value)
+	if amount <= 0 then
+		return 0
+	end
+
+	local added = self:AddCurrencyToPlayer(player, amount)
+	if added > 0 then
+		stored.Value = math.max(0, stored.Value - added)
+		self:UpdateStandDisplay(standRoot)
+
+		if self.SaveManager then
+			self.SaveManager:ScheduleSave(player)
+		end
+	end
+
+	return added
+end
+
+function PetStandManager:StartIncomeLoop(petModel, standRoot)
+	if not petModel or not standRoot then return end
+	if self.standIncomeTasks[petModel] then return end
+
+	self.standIncomeTasks[petModel] = true
+
+	task.spawn(function()
+		while self.standIncomeTasks[petModel]
+			and petModel
+			and petModel.Parent
+			and standRoot
+			and standRoot.Parent
+			and self.petState[petModel]
+			and self.petState[petModel].location == "petstand"
+			and self.petState[petModel].petstandRoot == standRoot do
+
+			local state = self.petState[petModel]
+			local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
+			power = math.max(1, math.floor(power))
+
+			local stored = self:GetStoredMoneyValue(standRoot)
+			if stored then
+				stored.Value = stored.Value + power
+			end
+			self:UpdateStandDisplay(standRoot)
+
+			task.wait(1)
+		end
+
+		self.standIncomeTasks[petModel] = nil
+	end)
+end
+
+function PetStandManager:StopIncomeLoop(petModel)
+	self.standIncomeTasks[petModel] = nil
+end
+
+function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standPart)
+	if not petModel then return end
+
+	local existing = petModel:FindFirstChild("PetPickupPart")
+	if existing then
+		pcall(function() existing:Destroy() end)
+	end
+
+	local helper = Instance.new("Part")
+	helper.Name = "PetPickupPart"
+	helper.Size = Vector3.new(1,1,1)
+	helper.Anchored = false
+	helper.Transparency = 1
+	helper.CanCollide = false
+	helper.Parent = petModel
+
+	local pp = petModel.PrimaryPart
+	if pp then
+		helper.CFrame = pp.CFrame * CFrame.new(0, pp.Size.Y / 2 + 0.5, 0)
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = helper
+		w.Part1 = pp
+		w.Parent = helper
+	end
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "PetPrompt"
+	prompt.ActionText = "Pick Up Pet"
+	prompt.ObjectText = "Pet"
+	prompt.RequiresLineOfSight = false
+	prompt.MaxActivationDistance = 6
+	prompt.HoldDuration = 0
+	prompt.Parent = helper
+
+	local conn = prompt.Triggered:Connect(function(player)
+		local st = self.petState[petModel]
+		if not st then return end
+		if tostring(st.ownerUserId) ~= tostring(player.UserId) then return end
+
+		-- auto collect before pickup
+		self:CollectStandMoney(player, standRoot)
+		self:StopIncomeLoop(petModel)
+
+		if petModel.PrimaryPart then
+			self.PetAttachmentManager:ClearWeldsOnPart(petModel.PrimaryPart)
+		end
+
+		if player.Character and player.Character.PrimaryPart and not self.carryingPetByUserId[player.UserId] then
+			local ok, err = pcall(function()
+				self.PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false })
+			end)
+
+			if ok then
+				self.petState[petModel].location = "player"
+				self.petState[petModel].petstand = nil
+				self.petState[petModel].petstandRoot = nil
+
+				pcall(function() helper:Destroy() end)
+
+				if self.standPickupPromptConns[petModel] then
+					pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
+					self.standPickupPromptConns[petModel] = nil
+				end
+			else
+				warn("[PetStandManager] Failed to pick pet back up:", err)
+			end
+		end
+	end)
+
+	self.standPickupPromptConns[petModel] = conn
+end
+
+function PetStandManager:ConnectCollector(standRoot, collectorPart)
+	if not standRoot or not collectorPart or not collectorPart:IsA("BasePart") then return end
+
+	self.collectorTouchDebounces[collectorPart] = self.collectorTouchDebounces[collectorPart] or {}
+	local debounceTable = self.collectorTouchDebounces[collectorPart]
+
+	collectorPart.Touched:Connect(function(hit)
+		if not hit or not hit.Parent then return end
+
+		local player = self.Players:GetPlayerFromCharacter(hit.Parent)
+		if not player then return end
+
+		if debounceTable[player.UserId] then return end
+		debounceTable[player.UserId] = true
+
+		task.delay(0.75, function()
+			debounceTable[player.UserId] = nil
+		end)
+
+		local collected = self:CollectStandMoney(player, standRoot)
+		if collected > 0 then
+			print(("[PetStandManager] %s collected %d from stand %s"):format(
+				tostring(player.Name), collected, tostring(standRoot:GetFullName())))
+		end
+	end)
+end
+
+function PetStandManager:ConnectStandPrompt(standRoot)
+	if not standRoot then return end
+	if self.standConnected[standRoot] then return end
+
+	local standPart = self:GetStandPlacementPart(standRoot)
+	if not standPart or not standPart:IsA("BasePart") then return end
 
 	local prompt = standPart:FindFirstChildWhichIsA("ProximityPrompt")
 	if not prompt then
@@ -299,24 +417,31 @@ function PetStandManager:ConnectStandPrompt(standPart)
 		prompt.MaxActivationDistance = 6
 		prompt.RequiresLineOfSight = false
 		prompt.Parent = standPart
-		print("[PetStandManager] Created prompt on:", standPart:GetFullName())
-	else
-		print("[PetStandManager] Reusing existing prompt on:", standPart:GetFullName())
 	end
 
-	local conn = prompt.Triggered:Connect(function(player)
-		print(("[PetStandManager] Stand prompt triggered by %s on %s"):format(
-			tostring(player.Name), tostring(standPart:GetFullName())))
+	local collectorPart = self:GetCollectorPart(standRoot)
+	if collectorPart then
+		self:ConnectCollector(standRoot, collectorPart)
+	end
 
+	self:GetStoredMoneyValue(standRoot)
+	self:UpdateStandDisplay(standRoot)
+
+	local conn = prompt.Triggered:Connect(function(player)
 		if not self:IsPlayerAllowedToUseStand(player, standPart) then
-			print("[PetStandManager] Stand owner check failed for", player.Name)
 			return
 		end
 
 		local pet = self.carryingPetByUserId[player.UserId]
 		if not pet then
-			print("[PetStandManager] Player is not carrying a pet:", player.Name)
 			return
+		end
+
+		-- allow only one pet per stand
+		for otherPet, st in pairs(self.petState) do
+			if otherPet ~= pet and st and st.location == "petstand" and st.petstandRoot == standRoot then
+				return
+			end
 		end
 
 		self.PetAttachmentManager:SetModelPrimaryIfMissing(pet)
@@ -338,39 +463,43 @@ function PetStandManager:ConnectStandPrompt(standPart)
 		self.petState[pet] = self.petState[pet] or {}
 		self.petState[pet].location = "petstand"
 		self.petState[pet].petstand = standPart
+		self.petState[pet].petstandRoot = standRoot
 
 		self.PetMovement.StopWandering(pet)
-		self:CreatePlacedPetPickupPrompt(pet, standPart)
-		self:StartIncomeLoop(pet, standPart)
+		self:CreatePlacedPetPickupPrompt(pet, standRoot, standPart)
+		self:StartIncomeLoop(pet, standRoot)
 		self.PetStateManager:SendStateToOwner(pet)
-		self:UpdateStandDisplay(standPart)
-
-		print(("[PetStandManager] Pet %s placed on stand %s"):format(
-			tostring(pet.Name), tostring(standPart:GetFullName())))
+		self:UpdateStandDisplay(standRoot)
 	end)
 
-	self.standConnected[standPart] = conn
+	self.standConnected[standRoot] = true
+	self.standData[standRoot] = {
+		standPart = standPart,
+		collectorPart = collectorPart,
+		connection = conn,
+	}
 end
 
 function PetStandManager:ScanAndConnectAll()
 	local function scanContainer(container)
 		if not container then return end
 
+		local processed = {}
+
 		for _, inst in ipairs(container:GetDescendants()) do
 			if inst:IsA("BasePart") and (inst.Name == "PetStand" or inst.Name == "PetStandPart") then
-				print("[PetStandManager] Found stand part:", inst:GetFullName())
-				self:ConnectStandPrompt(inst)
+				local standRoot = self:GetStandRootFromInstance(inst)
+				if standRoot and not processed[standRoot] then
+					processed[standRoot] = true
+					self:ConnectStandPrompt(standRoot)
+				end
 			end
 		end
 	end
 
-	-- First: scan all folders/models named Essentials or PurchasedItems anywhere
 	for _, inst in ipairs(workspace:GetDescendants()) do
-		if inst:IsA("Folder") or inst:IsA("Model") then
-			if inst.Name == "Essentials" or inst.Name == "PurchasedItems" then
-				print("[PetStandManager] Scanning container:", inst:GetFullName())
-				scanContainer(inst)
-			end
+		if (inst:IsA("Folder") or inst:IsA("Model")) and (inst.Name == "Essentials" or inst.Name == "PurchasedItems") then
+			scanContainer(inst)
 		end
 	end
 end
