@@ -29,6 +29,7 @@ local PetGroundManager = require(Modules:WaitForChild("PetGroundManager"))
 local WildPetManager = require(Modules:WaitForChild("WildPetManager"))
 local PetSaveManager = require(Modules:WaitForChild("PetSaveManager"))
 local PetFeedingManager = require(Modules:WaitForChild("PetFeedingManager"))
+local PetStandManager = require(Modules:WaitForChild("PetStandManager"))
 -- Services
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -97,6 +98,7 @@ local petPickupPromptConns = {}
 	PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
 	local saveManager = PetSaveManager:Initialize("PetData", petState, carryingPetByUserId)
+	PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
 	WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
     PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
 
@@ -125,8 +127,9 @@ end
 		while true do
 			pcall(function()
 				ShowerDryerManager:ScanAndConnectAll()
-				AccessoryManager:ScanAndConnectAll()  -- Make sure this is here
+				AccessoryManager:ScanAndConnectAll()
 				PetGroundManager:ScanAndConnectAll()
+				PetStandManager:ScanAndConnectAll()
 				WildPetManager:ScanAndConnectAdoptionMats()
 			end)
 			task.wait(6)
