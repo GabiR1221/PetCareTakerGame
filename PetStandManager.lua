@@ -19,6 +19,8 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
 	self.TycoonUtils:Initialize(self.Config)
 
+	self:WatchPurchaseContainers()
+
 	return self
 end
 
@@ -165,6 +167,70 @@ function PetStandManager:UpdateStandDisplay(standRoot)
 	if stored then
 		label.Text = tostring(math.floor(stored.Value))
 	end
+end
+
+function PetStandManager:ScanContainer(container)
+	if not container then return end
+
+	local processed = {}
+
+	for _, inst in ipairs(container:GetDescendants()) do
+		if inst:IsA("BasePart") and (inst.Name == "PetStand" or inst.Name == "PetStandPart") then
+			local standRoot = self:GetStandRootFromInstance(inst)
+			if standRoot and not processed[standRoot] then
+				processed[standRoot] = true
+				self:ConnectStandPrompt(standRoot)
+			end
+		end
+	end
+end
+
+function PetStandManager:WatchPurchaseContainers()
+	if self._watchingPurchaseContainers then
+		return
+	end
+	self._watchingPurchaseContainers = true
+
+	local function hookContainer(container)
+		if not container or container:GetAttribute("__PetStandWatched") == true then
+			return
+		end
+
+		container:SetAttribute("__PetStandWatched", true)
+
+		self:ScanContainer(container)
+
+		container.ChildAdded:Connect(function()
+			task.wait(0.1)
+			self:ScanContainer(container)
+		end)
+
+		container.DescendantAdded:Connect(function()
+			task.wait(0.1)
+			self:ScanContainer(container)
+		end)
+	end
+
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("Folder") or inst:IsA("Model") then
+			if inst.Name == "Essentials"
+				or inst.Name == "PurchasedItems"
+				or inst.Name == "PurchasedObjects" then
+				hookContainer(inst)
+			end
+		end
+	end
+
+	workspace.DescendantAdded:Connect(function(inst)
+		if inst:IsA("Folder") or inst:IsA("Model") then
+			if inst.Name == "Essentials"
+				or inst.Name == "PurchasedItems"
+				or inst.Name == "PurchasedObjects" then
+				task.wait(0.1)
+				hookContainer(inst)
+			end
+		end
+	end)
 end
 
 function PetStandManager:GetLevelIncomeMultiplier(level)
