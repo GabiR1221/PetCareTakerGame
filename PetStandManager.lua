@@ -226,7 +226,7 @@ function PetStandManager:ResolveTycoonForStandPart(standPart, player)
 	local current = standPart.Parent
 
 	while current do
-		if current:IsA("Folder") then
+		if current:IsA("Folder") or current:IsA("Model") then
 			local essDirect = current:FindFirstChild("Essentials")
 			if essDirect then
 				local desk = self.TycoonUtils:FindDeskInEssentials(essDirect)
@@ -287,15 +287,21 @@ function PetStandManager:ConnectStandPrompt(standPart)
 	if not standPart or not standPart:IsA("BasePart") then return end
 	if self.standConnected[standPart] then return end
 
+	print("[PetStandManager] Connecting stand prompt for:", standPart:GetFullName())
+
 	local prompt = standPart:FindFirstChildWhichIsA("ProximityPrompt")
 	if not prompt then
 		prompt = Instance.new("ProximityPrompt")
+		prompt.Name = "PetStandPrompt"
 		prompt.ActionText = "Place Pet"
 		prompt.HoldDuration = 0
 		prompt.ObjectText = "Pet Stand"
 		prompt.MaxActivationDistance = 6
 		prompt.RequiresLineOfSight = false
 		prompt.Parent = standPart
+		print("[PetStandManager] Created prompt on:", standPart:GetFullName())
+	else
+		print("[PetStandManager] Reusing existing prompt on:", standPart:GetFullName())
 	end
 
 	local conn = prompt.Triggered:Connect(function(player)
@@ -344,52 +350,26 @@ function PetStandManager:ConnectStandPrompt(standPart)
 	end)
 
 	self.standConnected[standPart] = conn
-	print("[PetStandManager] Connected stand:", standPart:GetFullName())
 end
 
 function PetStandManager:ScanAndConnectAll()
-	local possibleRoots = {}
-	local tycoonRoot = workspace:FindFirstChild("Tycoon")
-	if tycoonRoot then table.insert(possibleRoots, tycoonRoot) end
-	local topTycoons = workspace:FindFirstChild("Tycoons")
-	if topTycoons then table.insert(possibleRoots, topTycoons) end
+	local function scanContainer(container)
+		if not container then return end
 
-	for _, root in ipairs(possibleRoots) do
-		for _, inst in ipairs(root:GetDescendants()) do
-			if inst:IsA("BasePart") then
-				if inst.Name == "PetStand" or inst.Name == "PetStandPart" then
-					self:ConnectStandPrompt(inst)
-				end
+		for _, inst in ipairs(container:GetDescendants()) do
+			if inst:IsA("BasePart") and (inst.Name == "PetStand" or inst.Name == "PetStandPart") then
+				print("[PetStandManager] Found stand part:", inst:GetFullName())
+				self:ConnectStandPrompt(inst)
 			end
 		end
 	end
 
-	for _, model in ipairs(workspace:GetDescendants()) do
-		if model:IsA("Model") then
-			local ess = model:FindFirstChild("Essentials")
-			if ess then
-				local stand = ess:FindFirstChild("PetStand")
-				if stand and stand:IsA("BasePart") then
-					self:ConnectStandPrompt(stand)
-				end
-
-				local stand2 = ess:FindFirstChild("PetStandPart")
-				if stand2 and stand2:IsA("BasePart") then
-					self:ConnectStandPrompt(stand2)
-				end
-			end
-
-			local purchased = model:FindFirstChild("PurchasedItems")
-			if purchased then
-				local stand = purchased:FindFirstChild("PetStand")
-				if stand and stand:IsA("BasePart") then
-					self:ConnectStandPrompt(stand)
-				end
-
-				local stand2 = purchased:FindFirstChild("PetStandPart")
-				if stand2 and stand2:IsA("BasePart") then
-					self:ConnectStandPrompt(stand2)
-				end
+	-- First: scan all folders/models named Essentials or PurchasedItems anywhere
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("Folder") or inst:IsA("Model") then
+			if inst.Name == "Essentials" or inst.Name == "PurchasedItems" then
+				print("[PetStandManager] Scanning container:", inst:GetFullName())
+				scanContainer(inst)
 			end
 		end
 	end
