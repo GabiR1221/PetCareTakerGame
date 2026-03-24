@@ -26,27 +26,6 @@ function PetMoodVisualManager:_getDefaultPetAnchorPart(petModel)
 	return petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
 end
 
-function PetMoodVisualManager:_getNamedAnchorPart(petModel, partName)
-	if not petModel or not partName then return nil end
-	local part = petModel:FindFirstChild(partName, true)
-	if part and part:IsA("BasePart") then
-		return part
-	end
-	return nil
-end
-
-function PetMoodVisualManager:_getDirtySmokeAnchorPart(petModel)
-	return self:_getNamedAnchorPart(petModel, "DirtySmokePart") or self:_getDefaultPetAnchorPart(petModel)
-end
-
-function PetMoodVisualManager:_getHappySmokeAnchorPart(petModel)
-	return self:_getNamedAnchorPart(petModel, "HappySmokePart") or self:_getDefaultPetAnchorPart(petModel)
-end
-
-function PetMoodVisualManager:_getMoodFaceAnchorPart(petModel)
-	return self:_getNamedAnchorPart(petModel, "MoodFacePart") or self:_getDefaultPetAnchorPart(petModel)
-end
-
 function PetMoodVisualManager:_ensureVisualFolder(petModel)
 	local folder = petModel:FindFirstChild("PetVisuals")
 	if folder then return folder end
@@ -72,32 +51,46 @@ function PetMoodVisualManager:_ensureAttachmentOnPart(part, attachmentName, yOff
 	return attachment
 end
 
-function PetMoodVisualManager:_ensureDirtySmoke(petModel)
+function PetMoodVisualManager:_ensurePartEffect(petModel, effectName, template, offset)
 	local visuals = self:_ensureVisualFolder(petModel)
-	local smoke = visuals:FindFirstChild("DirtySmoke")
-	if smoke then
-		return smoke
+	local existing = visuals:FindFirstChild(effectName)
+	if existing then
+		return existing
 	end
 
-	smoke = self.dirtySmokeTemplate:Clone()
-	smoke.Name = "DirtySmoke"
-	smoke.Parent = visuals
+	local primary = self:_getDefaultPetAnchorPart(petModel)
+	if not primary then return nil end
 
-	return smoke
+	local clone = template:Clone()
+	clone.Name = effectName
+	clone.Parent = visuals
+
+	if clone:IsA("BasePart") then
+		clone.Anchored = false
+		clone.CanCollide = false
+		clone.CanTouch = false
+		clone.CanQuery = false
+		clone.Massless = true
+		clone.Transparency = 1
+
+		clone.CFrame = primary.CFrame * (offset or CFrame.new())
+
+		local weld = Instance.new("WeldConstraint")
+		weld.Name = effectName .. "Weld"
+		weld.Part0 = clone
+		weld.Part1 = primary
+		weld.Parent = clone
+	end
+
+	return clone
+end
+
+function PetMoodVisualManager:_ensureDirtySmoke(petModel)
+	return self:_ensurePartEffect(petModel, "DirtySmoke", self.dirtySmokeTemplate, CFrame.new(0, 2, 0))
 end
 
 function PetMoodVisualManager:_ensureHappySmoke(petModel)
-	local visuals = self:_ensureVisualFolder(petModel)
-	local smoke = visuals:FindFirstChild("HappySmoke")
-	if smoke then
-		return smoke
-	end
-
-	smoke = self.happySmokeTemplate:Clone()
-	smoke.Name = "HappySmoke"
-	smoke.Parent = visuals
-
-	return smoke
+	return self:_ensurePartEffect(petModel, "HappySmoke", self.happySmokeTemplate, CFrame.new(0, 2.5, 0))
 end
 
 function PetMoodVisualManager:_ensureBillboard(petModel)
@@ -113,35 +106,18 @@ function PetMoodVisualManager:_ensureBillboard(petModel)
 	return billboard
 end
 
-function PetMoodVisualManager:_moveVisualToAttachment(visualObj, attachment)
-	if not visualObj or not attachment then return end
-
-	if visualObj:IsA("ParticleEmitter") or visualObj:IsA("Trail") then
-		if visualObj.Parent ~= attachment then
-			visualObj.Parent = attachment
-		end
-	elseif visualObj:IsA("Smoke") or visualObj:IsA("Fire") or visualObj:IsA("Sparkles") then
-		if visualObj.Parent ~= attachment.Parent then
-			visualObj.Parent = attachment.Parent
-		end
-	elseif visualObj:IsA("BillboardGui") then
-		if visualObj.Adornee ~= attachment.Parent then
-			visualObj.Adornee = attachment.Parent
-		end
-	end
-end
-
 function PetMoodVisualManager:_setSmokeEnabled(smokeObj, isEnabled)
 	if not smokeObj then return end
 
-	if smokeObj:IsA("ParticleEmitter") then
-		smokeObj.Enabled = isEnabled
-	elseif smokeObj:IsA("Smoke") then
-		smokeObj.Enabled = isEnabled
-	elseif smokeObj:IsA("Fire") then
-		smokeObj.Enabled = isEnabled
-	elseif smokeObj:IsA("Sparkles") then
-		smokeObj.Enabled = isEnabled
+	local function setEffectEnabled(obj)
+		if obj:IsA("ParticleEmitter") or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+			obj.Enabled = isEnabled
+		end
+	end
+
+	setEffectEnabled(smokeObj)
+	for _, d in ipairs(smokeObj:GetDescendants()) do
+		setEffectEnabled(d)
 	end
 end
 
@@ -149,7 +125,7 @@ function PetMoodVisualManager:_setMoodFace(petModel, moodName)
 	local billboard = self:_ensureBillboard(petModel)
 	if not billboard then return end
 
-	local facePart = self:_getMoodFaceAnchorPart(petModel)
+	local facePart = self:_getDefaultPetAnchorPart(petModel)
 	if not facePart then return end
 
 	local faceAttachment = self:_ensureAttachmentOnPart(
@@ -158,7 +134,9 @@ function PetMoodVisualManager:_setMoodFace(petModel, moodName)
 		(facePart.Size.Y / 2) + 1
 	)
 
-	self:_moveVisualToAttachment(billboard, faceAttachment)
+	if billboard.Adornee ~= faceAttachment.Parent then
+		billboard.Adornee = faceAttachment.Parent
+	end
 
 	local imageLabel = billboard:FindFirstChild("FaceImage", true)
 	if not imageLabel or not imageLabel:IsA("ImageLabel") then return end
@@ -219,27 +197,6 @@ function PetMoodVisualManager:UpdatePetVisuals(petModel)
 
 	local dirtySmoke = self:_ensureDirtySmoke(petModel)
 	local happySmoke = self:_ensureHappySmoke(petModel)
-
-	local dirtyPart = self:_getDirtySmokeAnchorPart(petModel)
-	local happyPart = self:_getHappySmokeAnchorPart(petModel)
-
-	if dirtyPart then
-		local dirtyAttachment = self:_ensureAttachmentOnPart(
-			dirtyPart,
-			"DirtySmokeAttachment",
-			(dirtyPart.Size.Y / 2)
-		)
-		self:_moveVisualToAttachment(dirtySmoke, dirtyAttachment)
-	end
-
-	if happyPart then
-		local happyAttachment = self:_ensureAttachmentOnPart(
-			happyPart,
-			"HappySmokeAttachment",
-			(happyPart.Size.Y / 2)
-		)
-		self:_moveVisualToAttachment(happySmoke, happyAttachment)
-	end
 
 	local mood = self:_getMoodFromState(state)
 
