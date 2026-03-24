@@ -21,9 +21,30 @@ function PetMoodVisualManager:Initialize(stateTable)
 	return self
 end
 
-function PetMoodVisualManager:_getPetAnchorPart(petModel)
+function PetMoodVisualManager:_getDefaultPetAnchorPart(petModel)
 	if not petModel or not petModel:IsA("Model") then return nil end
 	return petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+end
+
+function PetMoodVisualManager:_getNamedAnchorPart(petModel, partName)
+	if not petModel or not partName then return nil end
+	local part = petModel:FindFirstChild(partName, true)
+	if part and part:IsA("BasePart") then
+		return part
+	end
+	return nil
+end
+
+function PetMoodVisualManager:_getDirtySmokeAnchorPart(petModel)
+	return self:_getNamedAnchorPart(petModel, "DirtySmokePart") or self:_getDefaultPetAnchorPart(petModel)
+end
+
+function PetMoodVisualManager:_getHappySmokeAnchorPart(petModel)
+	return self:_getNamedAnchorPart(petModel, "HappySmokePart") or self:_getDefaultPetAnchorPart(petModel)
+end
+
+function PetMoodVisualManager:_getMoodFaceAnchorPart(petModel)
+	return self:_getNamedAnchorPart(petModel, "MoodFacePart") or self:_getDefaultPetAnchorPart(petModel)
 end
 
 function PetMoodVisualManager:_ensureVisualFolder(petModel)
@@ -36,49 +57,31 @@ function PetMoodVisualManager:_ensureVisualFolder(petModel)
 	return folder
 end
 
-function PetMoodVisualManager:_ensureAttachment(petModel)
-	local anchor = self:_getPetAnchorPart(petModel)
-	if not anchor then return nil end
+function PetMoodVisualManager:_ensureAttachmentOnPart(part, attachmentName, yOffset)
+	if not part or not part:IsA("BasePart") then return nil end
 
-	local attachment = anchor:FindFirstChild("MoodAttachment")
-	if attachment then return attachment end
-
-	attachment = Instance.new("Attachment")
-	attachment.Name = "MoodAttachment"
-	attachment.Position = Vector3.new(0, (anchor.Size.Y / 2) + 1.5, 0)
-	attachment.Parent = anchor
-	return attachment
-end
-
-function PetMoodVisualManager:_ensureBillboard(petModel)
-	local visuals = self:_ensureVisualFolder(petModel)
-	local billboard = visuals:FindFirstChild("MoodBillboard")
-	if billboard then return billboard end
-
-	billboard = self.moodBillboardTemplate:Clone()
-	billboard.Name = "MoodBillboard"
-
-	local attachment = self:_ensureAttachment(petModel)
-	if attachment then
-		billboard.Adornee = attachment.Parent
+	local attachment = part:FindFirstChild(attachmentName)
+	if attachment and attachment:IsA("Attachment") then
+		return attachment
 	end
 
-	billboard.Parent = visuals
-	return billboard
+	attachment = Instance.new("Attachment")
+	attachment.Name = attachmentName
+	attachment.Position = Vector3.new(0, yOffset or 0, 0)
+	attachment.Parent = part
+	return attachment
 end
 
 function PetMoodVisualManager:_ensureDirtySmoke(petModel)
 	local visuals = self:_ensureVisualFolder(petModel)
 	local smoke = visuals:FindFirstChild("DirtySmoke")
-	if smoke then return smoke end
+	if smoke then
+		return smoke
+	end
 
 	smoke = self.dirtySmokeTemplate:Clone()
 	smoke.Name = "DirtySmoke"
-
-	local attachment = self:_ensureAttachment(petModel)
-	if attachment then
-		smoke.Parent = attachment
-	end
+	smoke.Parent = visuals
 
 	return smoke
 end
@@ -86,17 +89,46 @@ end
 function PetMoodVisualManager:_ensureHappySmoke(petModel)
 	local visuals = self:_ensureVisualFolder(petModel)
 	local smoke = visuals:FindFirstChild("HappySmoke")
-	if smoke then return smoke end
+	if smoke then
+		return smoke
+	end
 
 	smoke = self.happySmokeTemplate:Clone()
 	smoke.Name = "HappySmoke"
-
-	local attachment = self:_ensureAttachment(petModel)
-	if attachment then
-		smoke.Parent = attachment
-	end
+	smoke.Parent = visuals
 
 	return smoke
+end
+
+function PetMoodVisualManager:_ensureBillboard(petModel)
+	local visuals = self:_ensureVisualFolder(petModel)
+	local billboard = visuals:FindFirstChild("MoodBillboard")
+	if billboard then
+		return billboard
+	end
+
+	billboard = self.moodBillboardTemplate:Clone()
+	billboard.Name = "MoodBillboard"
+	billboard.Parent = visuals
+	return billboard
+end
+
+function PetMoodVisualManager:_moveVisualToAttachment(visualObj, attachment)
+	if not visualObj or not attachment then return end
+
+	if visualObj:IsA("ParticleEmitter") or visualObj:IsA("Trail") then
+		if visualObj.Parent ~= attachment then
+			visualObj.Parent = attachment
+		end
+	elseif visualObj:IsA("Smoke") or visualObj:IsA("Fire") or visualObj:IsA("Sparkles") then
+		if visualObj.Parent ~= attachment.Parent then
+			visualObj.Parent = attachment.Parent
+		end
+	elseif visualObj:IsA("BillboardGui") then
+		if visualObj.Adornee ~= attachment.Parent then
+			visualObj.Adornee = attachment.Parent
+		end
+	end
 end
 
 function PetMoodVisualManager:_setSmokeEnabled(smokeObj, isEnabled)
@@ -106,12 +138,27 @@ function PetMoodVisualManager:_setSmokeEnabled(smokeObj, isEnabled)
 		smokeObj.Enabled = isEnabled
 	elseif smokeObj:IsA("Smoke") then
 		smokeObj.Enabled = isEnabled
+	elseif smokeObj:IsA("Fire") then
+		smokeObj.Enabled = isEnabled
+	elseif smokeObj:IsA("Sparkles") then
+		smokeObj.Enabled = isEnabled
 	end
 end
 
 function PetMoodVisualManager:_setMoodFace(petModel, moodName)
 	local billboard = self:_ensureBillboard(petModel)
 	if not billboard then return end
+
+	local facePart = self:_getMoodFaceAnchorPart(petModel)
+	if not facePart then return end
+
+	local faceAttachment = self:_ensureAttachmentOnPart(
+		facePart,
+		"MoodFaceAttachment",
+		(facePart.Size.Y / 2) + 1
+	)
+
+	self:_moveVisualToAttachment(billboard, faceAttachment)
 
 	local imageLabel = billboard:FindFirstChild("FaceImage", true)
 	if not imageLabel or not imageLabel:IsA("ImageLabel") then return end
@@ -170,13 +217,31 @@ function PetMoodVisualManager:UpdatePetVisuals(petModel)
 	local state = self.petState[petModel]
 	if not state then return end
 
-	local anchor = self:_getPetAnchorPart(petModel)
-	if not anchor then return end
-
-	local mood = self:_getMoodFromState(state)
-
 	local dirtySmoke = self:_ensureDirtySmoke(petModel)
 	local happySmoke = self:_ensureHappySmoke(petModel)
+
+	local dirtyPart = self:_getDirtySmokeAnchorPart(petModel)
+	local happyPart = self:_getHappySmokeAnchorPart(petModel)
+
+	if dirtyPart then
+		local dirtyAttachment = self:_ensureAttachmentOnPart(
+			dirtyPart,
+			"DirtySmokeAttachment",
+			(dirtyPart.Size.Y / 2)
+		)
+		self:_moveVisualToAttachment(dirtySmoke, dirtyAttachment)
+	end
+
+	if happyPart then
+		local happyAttachment = self:_ensureAttachmentOnPart(
+			happyPart,
+			"HappySmokeAttachment",
+			(happyPart.Size.Y / 2)
+		)
+		self:_moveVisualToAttachment(happySmoke, happyAttachment)
+	end
+
+	local mood = self:_getMoodFromState(state)
 
 	self:_setSmokeEnabled(dirtySmoke, mood.dirtySmoke)
 	self:_setSmokeEnabled(happySmoke, mood.happySmoke)
