@@ -78,8 +78,7 @@ local savedCameraSubject = nil
 local cameraPart = nil
 local controlWall = nil
 local cameraConn = nil
-local dragConn = nil
-local dragging = false
+local cursorTrackConn = nil
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -88,17 +87,16 @@ local function clearCameraFollow()
 	end
 end
 
-local function clearDragLoop()
-	if dragConn then
-		dragConn:Disconnect()
-		dragConn = nil
+local function clearCursorTracking()
+	if cursorTrackConn then
+		cursorTrackConn:Disconnect()
+		cursorTrackConn = nil
 	end
-	dragging = false
 end
 
 local function endShowerView()
 	clearCameraFollow()
-	clearDragLoop()
+	clearCursorTracking()
 	if savedCameraType then
 		camera.CameraType = savedCameraType
 		savedCameraType = nil
@@ -142,7 +140,7 @@ local function getMovePoint()
 	if controlWall and controlWall:IsA("BasePart") then
 		local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
 		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Whitelist
+		params.FilterType = Enum.RaycastFilterType.Exclude
 		params.FilterDescendantsInstances = {controlWall}
 		local result = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
 		if result then
@@ -157,12 +155,10 @@ local function getMovePoint()
 	return nil
 end
 
-local function startDragging()
-	if dragging then return end
-	dragging = true
-	clearDragLoop()
-	dragConn = RunService.RenderStepped:Connect(function()
-		if not dragging then return end
+local function startCursorTracking()
+	clearCursorTracking()
+	cursorTrackConn = RunService.RenderStepped:Connect(function()
+		if not gui.Enabled then return end
 		local worldPos = getMovePoint()
 		if worldPos then
 			showerRemote:FireServer("ToolMove", { worldPos = worldPos })
@@ -173,13 +169,13 @@ end
 UserInputService.InputBegan:Connect(function(input, processed)
 	if processed or not gui.Enabled then return end
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		startDragging()
+		startCursorTracking()
 	end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		clearDragLoop()
+		clearCursorTracking()
 	end
 end)
 
@@ -192,6 +188,7 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		updateBar(payload.progress or 0)
 		controlWall = payload.controlWall
 		startShowerView(payload.cameraPart)
+		startCursorTracking()
 	elseif action == "Progress" then
 		if payload.stageText then
 			stageLabel.Text = tostring(payload.stageText)
