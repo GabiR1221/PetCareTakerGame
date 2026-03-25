@@ -189,6 +189,31 @@ function PetMoodVisualManager:_getMoodFromState(state)
 	}
 end
 
+function PetMoodVisualManager:_getDirtTransparencyFromDirtiness(dirtiness)
+	local d = math.clamp(tonumber(dirtiness) or 0, 0, 100)
+	if d <= 10 then
+		return 1
+	end
+	local alpha = (d - 10) / 90
+	return math.clamp(1 - alpha, 0, 1)
+end
+
+function PetMoodVisualManager:_applyDirtVisuals(petModel, state)
+	if not petModel or not state then return end
+	local dirtFolder = petModel:FindFirstChild("Dirt")
+	if not dirtFolder then return end
+
+	local targetTransparency = self:_getDirtTransparencyFromDirtiness(state.dirtiness)
+
+	for _, item in ipairs(dirtFolder:GetDescendants()) do
+		if item:IsA("BasePart") then
+			item.Transparency = targetTransparency
+		elseif item:IsA("Decal") or item:IsA("Texture") then
+			item.Transparency = targetTransparency
+		end
+	end
+end
+
 function PetMoodVisualManager:UpdatePetVisuals(petModel)
 	if not petModel or not petModel.Parent then return end
 
@@ -203,6 +228,7 @@ function PetMoodVisualManager:UpdatePetVisuals(petModel)
 	self:_setSmokeEnabled(dirtySmoke, mood.dirtySmoke)
 	self:_setSmokeEnabled(happySmoke, mood.happySmoke)
 	self:_setMoodFace(petModel, mood.face)
+	self:_applyDirtVisuals(petModel, state)
 end
 
 function PetMoodVisualManager:_cleanupRemovedPets()
