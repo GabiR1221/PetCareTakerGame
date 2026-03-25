@@ -1,8 +1,10 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
+local mouse = player:GetMouse()
 local camera = workspace.CurrentCamera
 local showerRemote = ReplicatedStorage:WaitForChild("ShowerMinigameEvent")
 
@@ -74,7 +76,10 @@ percentLabel.Parent = barBg
 local savedCameraType = nil
 local savedCameraSubject = nil
 local cameraPart = nil
+local controlWall = nil
 local cameraConn = nil
+local dragConn = nil
+local dragging = false
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -83,8 +88,17 @@ local function clearCameraFollow()
 	end
 end
 
+local function clearDragLoop()
+	if dragConn then
+		dragConn:Disconnect()
+		dragConn = nil
+	end
+	dragging = false
+end
+
 local function endShowerView()
 	clearCameraFollow()
+	clearDragLoop()
 	if savedCameraType then
 		camera.CameraType = savedCameraType
 		savedCameraType = nil
@@ -94,6 +108,7 @@ local function endShowerView()
 		savedCameraSubject = nil
 	end
 	cameraPart = nil
+	controlWall = nil
 	gui.Enabled = false
 end
 
@@ -123,6 +138,51 @@ local function updateBar(progress)
 	percentLabel.Text = ("%d%%"):format(math.floor(progress * 100 + 0.5))
 end
 
+local function getMovePoint()
+	if controlWall and controlWall:IsA("BasePart") then
+		local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Whitelist
+		params.FilterDescendantsInstances = {controlWall}
+		local result = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+		if result then
+			return result.Position
+		end
+	end
+
+	if mouse and mouse.Hit then
+		return mouse.Hit.Position
+	end
+
+	return nil
+end
+
+local function startDragging()
+	if dragging then return end
+	dragging = true
+	clearDragLoop()
+	dragConn = RunService.RenderStepped:Connect(function()
+		if not dragging then return end
+		local worldPos = getMovePoint()
+		if worldPos then
+			showerRemote:FireServer("ToolMove", { worldPos = worldPos })
+		end
+	end)
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not gui.Enabled then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		startDragging()
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		clearDragLoop()
+	end
+end)
+
 showerRemote.OnClientEvent:Connect(function(action, payload)
 	payload = payload or {}
 
@@ -130,6 +190,7 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		gui.Enabled = true
 		stageLabel.Text = tostring(payload.stageText or "Scrub with Sponge")
 		updateBar(payload.progress or 0)
+		controlWall = payload.controlWall
 		startShowerView(payload.cameraPart)
 	elseif action == "Progress" then
 		if payload.stageText then
