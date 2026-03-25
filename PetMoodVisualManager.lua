@@ -200,6 +200,7 @@ end
 
 function PetMoodVisualManager:_applyDirtVisuals(petModel, state)
 	if not petModel or not state then return end
+	if state.location == "shower" then return end
 	local dirtFolder = petModel:FindFirstChild("Dirt")
 	if not dirtFolder then return end
 
@@ -207,12 +208,18 @@ function PetMoodVisualManager:_applyDirtVisuals(petModel, state)
 
 	for _, item in ipairs(dirtFolder:GetDescendants()) do
 		if item:IsA("BasePart") then
-			item.Transparency = targetTransparency
+			local baseTransparency = item:GetAttribute("BaseDirtTransparency")
+			if baseTransparency == nil then
+				baseTransparency = item.Transparency
+				item:SetAttribute("BaseDirtTransparency", baseTransparency)
+			end
+			item.Transparency = math.clamp(math.max(baseTransparency, targetTransparency), 0, 1)
 		elseif item:IsA("Decal") or item:IsA("Texture") then
 			item.Transparency = targetTransparency
 		end
 	end
 end
+
 
 function PetMoodVisualManager:UpdatePetVisuals(petModel)
 	if not petModel or not petModel.Parent then return end
