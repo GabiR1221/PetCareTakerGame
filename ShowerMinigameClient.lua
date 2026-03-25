@@ -18,7 +18,7 @@ local panel = Instance.new("Frame")
 panel.Name = "Panel"
 panel.AnchorPoint = Vector2.new(1, 0.5)
 panel.Position = UDim2.new(1, -30, 0.5, 0)
-panel.Size = UDim2.new(0, 260, 0, 120)
+panel.Size = UDim2.new(0, 260, 0, 170)
 panel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
@@ -72,6 +72,42 @@ percentLabel.TextSize = 16
 percentLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 percentLabel.Text = "0%"
 percentLabel.Parent = barBg
+
+local rotateLabel = Instance.new("TextLabel")
+rotateLabel.Name = "RotateLabel"
+rotateLabel.BackgroundTransparency = 1
+rotateLabel.Position = UDim2.new(0, 12, 0, 105)
+rotateLabel.Size = UDim2.new(1, -24, 0, 22)
+rotateLabel.Font = Enum.Font.SourceSansSemibold
+rotateLabel.TextSize = 18
+rotateLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
+rotateLabel.TextXAlignment = Enum.TextXAlignment.Left
+rotateLabel.Text = "Rotate Pet"
+rotateLabel.Parent = panel
+
+local rotateLeft = Instance.new("TextButton")
+rotateLeft.Name = "RotateLeft"
+rotateLeft.Position = UDim2.new(0, 12, 0, 132)
+rotateLeft.Size = UDim2.new(0.5, -18, 0, 28)
+rotateLeft.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+rotateLeft.TextColor3 = Color3.new(1, 1, 1)
+rotateLeft.Font = Enum.Font.SourceSansBold
+rotateLeft.TextSize = 20
+rotateLeft.Text = "⟵"
+rotateLeft.AutoButtonColor = true
+rotateLeft.Parent = panel
+
+local rotateRight = Instance.new("TextButton")
+rotateRight.Name = "RotateRight"
+rotateRight.Position = UDim2.new(0.5, 6, 0, 132)
+rotateRight.Size = UDim2.new(0.5, -18, 0, 28)
+rotateRight.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+rotateRight.TextColor3 = Color3.new(1, 1, 1)
+rotateRight.Font = Enum.Font.SourceSansBold
+rotateRight.TextSize = 20
+rotateRight.Text = "⟶"
+rotateRight.AutoButtonColor = true
+rotateRight.Parent = panel
 
 local savedCameraType = nil
 local savedCameraSubject = nil
@@ -166,17 +202,14 @@ local function startCursorTracking()
 	end)
 end
 
-UserInputService.InputBegan:Connect(function(input, processed)
-	if processed or not gui.Enabled then return end
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		startCursorTracking()
-	end
+rotateLeft.MouseButton1Click:Connect(function()
+	if not gui.Enabled then return end
+	showerRemote:FireServer("Rotate", { direction = -1 })
 end)
 
-UserInputService.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		clearCursorTracking()
-	end
+rotateRight.MouseButton1Click:Connect(function()
+	if not gui.Enabled then return end
+	showerRemote:FireServer("Rotate", { direction = 1 })
 end)
 
 showerRemote.OnClientEvent:Connect(function(action, payload)
