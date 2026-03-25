@@ -108,6 +108,56 @@ function ShowerDryerManager:_getDirtPartsForPet(pet)
 	return dirtParts
 end
 
+
+function ShowerDryerManager:_getNearestDirtPart(session, handle)
+	if not session or not handle then return nil end
+	if #(session.dirtParts or {}) == 0 then return nil end
+
+	local nearestPart = nil
+	local nearestDistance = 2.75
+	for _, dirtPart in ipairs(session.dirtParts or {}) do
+		if dirtPart and dirtPart.Parent then
+			local distance = (dirtPart.Position - handle.Position).Magnitude
+			if distance <= nearestDistance then
+				nearestDistance = distance
+				nearestPart = dirtPart
+			end
+		end
+	end
+
+	return nearestPart
+end
+
+function ShowerDryerManager:_getStainState(session, dirtPart)
+	session.stainStateByPart = session.stainStateByPart or {}
+	local state = session.stainStateByPart[dirtPart]
+	if state then return state end
+
+	state = { stage1 = 0, stage2 = 0 }
+	session.stainStateByPart[dirtPart] = state
+	return state
+end
+
+function ShowerDryerManager:_getStageProgressFromStains(session, stage)
+	local dirtParts = session.dirtParts or {}
+	if #dirtParts == 0 then
+		return math.clamp(session.progress or 0, 0, 1)
+	end
+
+	local total = 0
+	local count = 0
+	for _, dirtPart in ipairs(dirtParts) do
+		if dirtPart and dirtPart.Parent then
+			local stainState = self:_getStainState(session, dirtPart)
+			total += (stage == 1) and stainState.stage1 or stainState.stage2
+			count += 1
+		end
+	end
+
+	if count <= 0 then return 0 end
+	return math.clamp(total / count, 0, 1)
+end
+
 function ShowerDryerManager:_isToolTouchingDirt(session, handle)
 	if not session or not handle then return false end
 	if #(session.dirtParts or {}) == 0 then return true end
@@ -128,12 +178,6 @@ end
 
 function ShowerDryerManager:_updateDirtVisualForSession(session)
 	if not session then return end
-	local stageProgress = 0
-	if session.stage == 1 then
-		stageProgress = 0.6 * math.clamp(session.progress, 0, 1)
-	else
-		stageProgress = 0.6 + (0.4 * math.clamp(session.progress, 0, 1))
-	end
 
 	for _, dirtPart in ipairs(session.dirtParts or {}) do
 		if dirtPart and dirtPart.Parent then
@@ -142,7 +186,9 @@ function ShowerDryerManager:_updateDirtVisualForSession(session)
 				startTransparency = dirtPart.Transparency
 				dirtPart:SetAttribute("ShowerStartTransparency", startTransparency)
 			end
-			dirtPart.Transparency = math.clamp(math.max(startTransparency, stageProgress), 0, 1)
+			local stainState = self:_getStainState(session, dirtPart)
+			local perStainTransparency = (0.6 * stainState.stage1) + (0.4 * stainState.stage2)
+			dirtPart.Transparency = math.clamp(math.max(startTransparency, perStainTransparency), 0, 1)
 		end
 	end
 end
@@ -154,7 +200,6 @@ function ShowerDryerManager:_clearDirtSessionAttributes(session)
 		end
 	end
 end
-
 function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if not player then return end
 	local session = self.activeShowerSessions[player.UserId]
@@ -182,12 +227,12 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if (now - (session.lastProgressTick or 0)) < 0.05 then return end
 	session.lastProgressTick = now
 	
-	if not self:_isToolTouchingDirt(session, activePart) then
+	local touchedPart = self:_getNearestDirtPart(session, activePart)
+	if #(session.dirtParts or {}) > 0 and not touchedPart then
 		return
 	end
 
-
-	self:_advanceShowerSession(session, 0.02)
+	self:_advanceShowerSession(session, 0.04, touchedPart)
 end
 
 function ShowerDryerManager:_findObjectNearShower(showerPart, preferredName)
@@ -390,10 +435,24 @@ function ShowerDryerManager:_clampToWall(session, worldPos)
 	return wall.CFrame:PointToWorldSpace(Vector3.new(x, y, z))
 end
 
-function ShowerDryerManager:_advanceShowerSession(session, amount)
+function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart)
 	if not session then return end
+	local hasDirtParts = #(session.dirtParts or {}) > 0
+	if touchedPart and touchedPart.Parent then
+		local stainState = self:_getStainState(session, touchedPart)
+		if session.stage == 1 then
+			stainState.stage1 = math.clamp(stainState.stage1 + amount, 0, 1)
+		else
+			stainState.stage2 = math.clamp(stainState.stage2 + amount, 0, 1)
+		end
+	end
+
 	if session.stage == 1 then
-		session.progress = math.clamp(session.progress + amount, 0, 1)
+		if hasDirtParts then
+			session.progress = self:_getStageProgressFromStains(session, 1)
+		else
+			session.progress = math.clamp((session.progress or 0) + amount, 0, 1)
+		end
 		local stageOneFloorDirtiness = tonumber(session.stageOneFloorDirtiness) or math.min(46, session.startingDirtiness)
 		local reducedDirt = math.floor(session.startingDirtiness - ((session.startingDirtiness - stageOneFloorDirtiness) * session.progress))
 		reducedDirt = math.clamp(reducedDirt, stageOneFloorDirtiness, 100)
@@ -421,7 +480,11 @@ function ShowerDryerManager:_advanceShowerSession(session, amount)
 			end
 		end
 	else
-		session.progress = math.clamp(session.progress + amount, 0, 1)
+		if hasDirtParts then
+			session.progress = self:_getStageProgressFromStains(session, 2)
+		else
+			session.progress = math.clamp((session.progress or 0) + amount, 0, 1)
+		end
 		self.petState[session.pet] = self.petState[session.pet] or {}
 		local stageOneFloorDirtiness = tonumber(session.stageOneFloorDirtiness) or 46
 		self.petState[session.pet].dirtiness = math.floor(stageOneFloorDirtiness * (1 - session.progress))
