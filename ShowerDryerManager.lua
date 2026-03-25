@@ -216,55 +216,6 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 		self.PetStateManager:SendStateToOwner(pet)
 		
 		self:_startShowerMinigame(player, pet, showerPart)
-
-		-- Hold for SHOWER_HOLD_TIME (defined in main script)
-		local SHOWER_HOLD_TIME = 3
-		task.delay(SHOWER_HOLD_TIME, function()
-			if not pet or not pet.PrimaryPart or not showerPart then return end
-			self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
-			self.PetMovement.StopWandering(pet)
-
-			-- Award XP
-			self.PetStateManager:AddXP(pet, 20) -- SHOWER_XP
-
-			-- Reset dirtiness and set wetness
-			self.petState[pet] = self.petState[pet] or {}
-			self.petState[pet].dirtiness = 0
-			self.petState[pet].wetness = 100
-			self.petState[pet].showered = true
-
-			-- Try to reattach to owner
-			local state = self.petState[pet] or {}
-			local ownerId = state.ownerUserId
-			local reattached = false
-
-			if ownerId then
-				local owner = self.Players:GetPlayerByUserId(ownerId)
-				if owner and owner.Character and owner.Character.PrimaryPart and not self.carryingPetByUserId[ownerId] then
-					local ok2, err = pcall(function() 
-						self.PetAttachmentManager:AttachPetToPlayer(pet, owner) 
-					end)
-					if ok2 then
-						self.petState[pet].location = "player"
-						self.petState[pet].shower = showerPart
-						reattached = true
-						self.PetStateManager:SendStateToOwner(pet)
-					else
-						warn(("[PetManager] Shower: reattach attempt failed: %s"):format(tostring(err)))
-					end
-				end
-			end
-
-			-- Fallback: release to world
-			if not reattached then
-				pet:SetPrimaryPartCFrame(showerPart.CFrame * CFrame.new(0, showerPart.Size.Y/2 + 1, 0))
-				pet.Parent = workspace
-				self.petState[pet] = self.petState[pet] or {}
-				self.petState[pet].location = "free"
-				self.petState[pet].shower = showerPart
-				self.PetStateManager:SendStateToOwner(pet)
-			end
-		end)
 	end)
 	
 
@@ -378,15 +329,6 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 			progress = 0,
 			stageText = "Scrub with Sponge",
 		})
-	end
-
-	-- Fallback to old timed behavior if tool parts are missing
-	if not spongePart or not showerHeadPart then
-		task.delay(3, function()
-			if self.activeShowerSessions[player.UserId] == session then
-				self:_finishShowerForPet(player, pet, showerPart)
-			end
-		end)
 	end
 end
 
