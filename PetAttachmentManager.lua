@@ -16,6 +16,18 @@ function PetAttachmentManager:SetModelPrimaryIfMissing(model)
 	if model.PrimaryPart then return end
 	for _, d in ipairs(model:GetDescendants()) do
 		if d:IsA("BasePart") then
+			local inDirtFolder = d:FindFirstAncestor("Dirt") ~= nil
+			local inVisualsFolder = d:FindFirstAncestor("PetVisuals") ~= nil
+			if inDirtFolder or inVisualsFolder then
+				continue
+			end
+			pcall(function() model.PrimaryPart = d end)
+			if model.PrimaryPart then return end
+		end
+	end
+	-- Fallback if every part was in an excluded folder
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
 			pcall(function() model.PrimaryPart = d end)
 			if model.PrimaryPart then return end
 		end
