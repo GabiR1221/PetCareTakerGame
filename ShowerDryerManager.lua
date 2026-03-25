@@ -19,25 +19,70 @@ function ShowerDryerManager:Initialize(stateTable, carryingTable, playersService
 		self.showerRemote.Parent = ReplicatedStorage
 	end
 
+	if not self.showerRemoteConnection then
+		self.showerRemoteConnection = self.showerRemote.OnServerEvent:Connect(function(player, action, payload)
+			if action == "ToolMove" then
+				self:_handleToolMoveFromClient(player, payload)
+			end
+		end)
+	end
+
 	-- Load dependencies
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
 end
 
+function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
+	if not player then return end
+	local session = self.activeShowerSessions[player.UserId]
+	if not session then return end
+	if not session.pet or not session.pet.Parent then return end
+	if (self.petState[session.pet] or {}).location ~= "shower" then return end
+	if type(payload) ~= "table" then return end
+	local worldPos = payload.worldPos
+	if typeof(worldPos) ~= "Vector3" then return end
+
+	local activePart = (session.stage == 1) and session.spongePart or session.showerHeadPart
+	if not activePart or not activePart:IsA("BasePart") then return end
+
+	local clampedPos = self:_clampToWall(session, worldPos)
+	activePart.Anchored = true
+	activePart.CanCollide = false
+	activePart.CFrame = CFrame.new(clampedPos)
+
+	local petPrimary = session.pet.PrimaryPart
+	if not petPrimary then return end
+
+	local distance = (activePart.Position - petPrimary.Position).Magnitude
+	if distance > 6 then return end
+
+	local now = tick()
+	if (now - (session.lastProgressTick or 0)) < 0.05 then return end
+	session.lastProgressTick = now
+
+	self:_advanceShowerSession(session, 0.02)
+end
+
 function ShowerDryerManager:_findPartNearShower(showerPart, preferredName)
 	if not showerPart then return nil end
+
+	local roots = {showerPart}
 	local parent = showerPart.Parent
-	if not parent then return nil end
+	if parent then table.insert(roots, parent) end
+	if parent and parent.Parent then table.insert(roots, parent.Parent) end
 
-	local direct = parent:FindFirstChild(preferredName)
-	if direct and direct:IsA("BasePart") then
-		return direct
-	end
-
-	for _, d in ipairs(parent:GetDescendants()) do
-		if d:IsA("BasePart") and d.Name == preferredName then
-			return d
+	for _, root in ipairs(roots) do
+		if root and root.FindFirstChild then
+			local direct = root:FindFirstChild(preferredName)
+			if direct and direct:IsA("BasePart") then
+				return direct
+			end
+			for _, d in ipairs(root:GetDescendants()) do
+				if d:IsA("BasePart") and d.Name == preferredName then
+					return d
+				end
+			end
 		end
 	end
 
@@ -169,6 +214,8 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 		self.petState[pet].location = "shower"
 		self.petState[pet].shower = showerPart
 		self.PetStateManager:SendStateToOwner(pet)
+		
+		self:_startShowerMinigame(player, pet, showerPart)
 
 		-- Hold for SHOWER_HOLD_TIME (defined in main script)
 		local SHOWER_HOLD_TIME = 3
@@ -219,8 +266,70 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 			end
 		end)
 	end)
+	
 
 	self.showerConnected[showerPart] = conn
+end
+
+function ShowerDryerManager:_clampToWall(session, worldPos)
+	if not session.controlWallPart or not session.controlWallPart:IsA("BasePart") then
+		return worldPos
+	end
+
+	local wall = session.controlWallPart
+	local localPos = wall.CFrame:PointToObjectSpace(worldPos)
+	local x = math.clamp(localPos.X, -wall.Size.X / 2, wall.Size.X / 2)
+	local y = math.clamp(localPos.Y, -wall.Size.Y / 2, wall.Size.Y / 2)
+	local z = math.clamp(localPos.Z, -wall.Size.Z / 2, wall.Size.Z / 2)
+	return wall.CFrame:PointToWorldSpace(Vector3.new(x, y, z))
+end
+
+function ShowerDryerManager:_advanceShowerSession(session, amount)
+	if not session then return end
+	if session.stage == 1 then
+		session.progress = math.clamp(session.progress + amount, 0, 1)
+		local reducedDirt = math.floor(session.startingDirtiness * (1 - session.progress))
+		self.petState[session.pet] = self.petState[session.pet] or {}
+		self.petState[session.pet].dirtiness = reducedDirt
+		self.PetStateManager:SendStateToOwner(session.pet)
+
+		if self.showerRemote then
+			self.showerRemote:FireClient(session.player, "Progress", {
+				stage = 1,
+				progress = session.progress,
+				stageText = "Scrub with Sponge",
+			})
+		end
+
+		if session.progress >= 1 then
+			session.stage = 2
+			session.progress = 0
+			if self.showerRemote then
+				self.showerRemote:FireClient(session.player, "Stage", {
+					stage = 2,
+					progress = 0,
+					stageText = "Rinse with Shower Head",
+				})
+			end
+		end
+	else
+		session.progress = math.clamp(session.progress + amount, 0, 1)
+		self.petState[session.pet] = self.petState[session.pet] or {}
+		self.petState[session.pet].wetness = math.floor(100 * session.progress)
+		self.PetStateManager:SendStateToOwner(session.pet)
+
+		if self.showerRemote then
+			self.showerRemote:FireClient(session.player, "Progress", {
+				stage = 2,
+				progress = session.progress,
+				stageText = "Rinse with Shower Head",
+			})
+		end
+
+		if session.progress >= 1 then
+			self:_finishShowerForPet(session.player, session.pet, session.showerPart)
+		end
+	end
 end
 
 function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
@@ -231,136 +340,54 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 	local cameraPart = self:_findPartNearShower(showerPart, "CameraPart")
 	local spongePart = self:_findPartNearShower(showerPart, "SpongePart")
 	local showerHeadPart = self:_findPartNearShower(showerPart, "ShowerHeadPart")
+	local controlWallPart = self:_findPartNearShower(showerPart, "ShowerControlWall")
 
 	local session = {
 		player = player,
 		pet = pet,
 		showerPart = showerPart,
 		cameraPart = cameraPart,
+		spongePart = spongePart,
+		showerHeadPart = showerHeadPart,
+		controlWallPart = controlWallPart,
 		stage = 1,
 		progress = 0,
 		startingDirtiness = math.clamp(tonumber((self.petState[pet] or {}).dirtiness) or 0, 0, 100),
 		connections = {},
+		lastProgressTick = 0,
 	}
 
 	self.activeShowerSessions[player.UserId] = session
 
+	if spongePart then
+		spongePart.Anchored = true
+		spongePart.CanCollide = false
+	end
+	if showerHeadPart then
+		showerHeadPart.Anchored = true
+		showerHeadPart.CanCollide = false
+	end
+
 	if self.showerRemote then
 		self.showerRemote:FireClient(player, "Start", {
 			cameraPart = cameraPart,
+			controlWall = controlWallPart,
+			spongePart = spongePart,
+			showerHeadPart = showerHeadPart,
 			stage = 1,
 			progress = 0,
 			stageText = "Scrub with Sponge",
 		})
 	end
 
-	-- Fallback to old timed behavior if either tool part is missing
+	-- Fallback to old timed behavior if tool parts are missing
 	if not spongePart or not showerHeadPart then
 		task.delay(3, function()
 			if self.activeShowerSessions[player.UserId] == session then
 				self:_finishShowerForPet(player, pet, showerPart)
 			end
 		end)
-		return
 	end
-
-	local spongePrompt = spongePart:FindFirstChild("SpongePrompt")
-	if not spongePrompt then
-		spongePrompt = Instance.new("ProximityPrompt")
-		spongePrompt.Name = "SpongePrompt"
-		spongePrompt.ActionText = "Scrub Pet"
-		spongePrompt.ObjectText = "Sponge"
-		spongePrompt.HoldDuration = 0.1
-		spongePrompt.MaxActivationDistance = 10
-		spongePrompt.RequiresLineOfSight = false
-		spongePrompt.Parent = spongePart
-	end
-
-	local showerHeadPrompt = showerHeadPart:FindFirstChild("ShowerHeadPrompt")
-	if not showerHeadPrompt then
-		showerHeadPrompt = Instance.new("ProximityPrompt")
-		showerHeadPrompt.Name = "ShowerHeadPrompt"
-		showerHeadPrompt.ActionText = "Rinse Pet"
-		showerHeadPrompt.ObjectText = "Shower Head"
-		showerHeadPrompt.HoldDuration = 0.1
-		showerHeadPrompt.MaxActivationDistance = 10
-		showerHeadPrompt.RequiresLineOfSight = false
-		showerHeadPrompt.Parent = showerHeadPart
-	end
-
-	self:_setPromptEnabled(spongePrompt, true)
-	self:_setPromptEnabled(showerHeadPrompt, false)
-
-	local function isValidSession(reqPlayer)
-		local active = self.activeShowerSessions[reqPlayer.UserId]
-		if not active then return false end
-		if active ~= session then return false end
-		if session.pet ~= pet then return false end
-		if not pet.Parent then return false end
-		if (self.petState[pet] or {}).location ~= "shower" then return false end
-		return true
-	end
-
-	local spongeConn = spongePrompt.Triggered:Connect(function(reqPlayer)
-		if reqPlayer ~= player then return end
-		if not isValidSession(reqPlayer) then return end
-		if session.stage ~= 1 then return end
-
-		session.progress = math.clamp(session.progress + 0.1, 0, 1)
-		local reducedDirt = math.floor(session.startingDirtiness * (1 - session.progress))
-		self.petState[pet] = self.petState[pet] or {}
-		self.petState[pet].dirtiness = reducedDirt
-		self.PetStateManager:SendStateToOwner(pet)
-
-		if self.showerRemote then
-			self.showerRemote:FireClient(player, "Progress", {
-				stage = 1,
-				progress = session.progress,
-				stageText = "Scrub with Sponge",
-			})
-		end
-
-		if session.progress >= 1 then
-			session.stage = 2
-			session.progress = 0
-			self:_setPromptEnabled(spongePrompt, false)
-			self:_setPromptEnabled(showerHeadPrompt, true)
-			if self.showerRemote then
-				self.showerRemote:FireClient(player, "Stage", {
-					stage = 2,
-					progress = 0,
-					stageText = "Rinse with Shower Head",
-				})
-			end
-		end
-	end)
-
-	local showerHeadConn = showerHeadPrompt.Triggered:Connect(function(reqPlayer)
-		if reqPlayer ~= player then return end
-		if not isValidSession(reqPlayer) then return end
-		if session.stage ~= 2 then return end
-
-		session.progress = math.clamp(session.progress + 0.1, 0, 1)
-		self.petState[pet] = self.petState[pet] or {}
-		self.petState[pet].wetness = math.floor(100 * session.progress)
-		self.PetStateManager:SendStateToOwner(pet)
-
-		if self.showerRemote then
-			self.showerRemote:FireClient(player, "Progress", {
-				stage = 2,
-				progress = session.progress,
-				stageText = "Rinse with Shower Head",
-			})
-		end
-
-		if session.progress >= 1 then
-			self:_setPromptEnabled(showerHeadPrompt, false)
-			self:_finishShowerForPet(player, pet, showerPart)
-		end
-	end)
-
-	table.insert(session.connections, spongeConn)
-	table.insert(session.connections, showerHeadConn)
 end
 
 function ShowerDryerManager:_setPromptEnabled(prompt, isEnabled)
