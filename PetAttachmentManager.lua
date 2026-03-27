@@ -6,10 +6,40 @@ function PetAttachmentManager:Initialize(stateTable, carryingTable, playersServi
 	self.carryingPetByUserId = carryingTable or {}
 	self.Players = playersService
 	self.PetMovement = petMovement
+	self.petCarryRemote = self.petCarryRemote or nil
 
 	-- Reference to animation functions (if needed)
 	self.teardownAnimatorForPet = require(script.Parent.PetAnimationManager).TeardownAnimatorForPet
 end
+
+function PetAttachmentManager:SetCarryRemote(remoteEvent)
+	self.petCarryRemote = remoteEvent
+end
+
+function PetAttachmentManager:_notifyCarryState(userId, isCarrying, petModel)
+	if not self.petCarryRemote or not self.Players or not userId then return end
+	local player = self.Players:GetPlayerByUserId(tonumber(userId) or -1)
+	if not player then return end
+	local petName = nil
+	if petModel and petModel.Name then
+		petName = tostring(petModel.Name)
+	end
+	pcall(function()
+		self.petCarryRemote:FireClient(player, "CarryState", isCarrying == true, petName)
+	end)
+end
+
+function PetAttachmentManager:_findCarrierUserIdForPet(petModel)
+	if not petModel then return nil end
+	for uid, carriedPet in pairs(self.carryingPetByUserId) do
+		if carriedPet == petModel then
+			return uid
+		end
+	end
+	return nil
+end
+
+
 
 function PetAttachmentManager:SetModelPrimaryIfMissing(model)
 	if not model or not model:IsA("Model") then return end
@@ -78,8 +108,9 @@ function PetAttachmentManager:DetachPetFromPlayer(petModel)
 	end
 
 	if self.petState[petModel] then
-		local owner = self.petState[petModel].ownerUserId
+		local owner = self.petState[petModel].ownerUserId or self:_findCarrierUserIdForPet(petModel)
 		if owner then self.carryingPetByUserId[owner] = nil end
+		if owner then self:_notifyCarryState(owner, false, nil) end
 		self.petState[petModel].npc = nil
 		self.petState[petModel].shower = nil
 		self.petState[petModel].location = "free"
@@ -104,7 +135,9 @@ function PetAttachmentManager:AttachPetToPart(petModel, part)
 	pcall(function() self:WeldParts(ppart, part) end)
 
 	if self.petState[petModel] and self.petState[petModel].ownerUserId then
-		self.carryingPetByUserId[self.petState[petModel].ownerUserId] = nil
+		local ownerId = self.petState[petModel].ownerUserId
+		self.carryingPetByUserId[ownerId] = nil
+		self:_notifyCarryState(ownerId, false, nil)
 	end
 
 	self.petState[petModel] = self.petState[petModel] or {}
@@ -124,6 +157,7 @@ function PetAttachmentManager:AttachWildPetToPlayer(petModel, player)
 	self:SetModelPrimaryIfMissing(petModel)
 	local ppart = petModel.PrimaryPart
 	if not ppart then return false, "pet has no PrimaryPart" end
+	self.PetMovement.StopWandering(petModel)
 	local teardownAnimatorForPet = require(script.Parent.PetAnimationManager).TeardownAnimatorForPet
 
 	-- STOP/TEARDOWN any pet animator before we move the pet into the player's character
@@ -159,6 +193,10 @@ function PetAttachmentManager:AttachWildPetToPlayer(petModel, player)
 	-- position pet in front of HRP
 	local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
 	if hrp then
+		pcall(function()
+			ppart.AssemblyLinearVelocity = Vector3.zero
+			ppart.AssemblyAngularVelocity = Vector3.zero
+		end)
 		petModel:SetPrimaryPartCFrame(hrp.CFrame * CFrame.new(0, 0, -2))
 	end
 
@@ -168,6 +206,7 @@ function PetAttachmentManager:AttachWildPetToPlayer(petModel, player)
 	-- update maps (but don't set ownerUserId yet)
 	local uid = player.UserId
 	self.carryingPetByUserId[uid] = petModel
+	self:_notifyCarryState(uid, true, petModel)
 	self.petState[petModel] = self.petState[petModel] or {}
 	self.petState[petModel].location = "player_wild"
 	self.petState[petModel].npc = nil
@@ -187,6 +226,7 @@ function PetAttachmentManager:AttachPetToPlayer(petModel, player, opts)
 	self:SetModelPrimaryIfMissing(petModel)
 	local ppart = petModel.PrimaryPart
 	if not ppart then return false, "pet has no PrimaryPart" end
+	self.PetMovement.StopWandering(petModel)
 
 	local petHum = petModel:FindFirstChildOfClass("Humanoid")
 	if petHum then
@@ -208,6 +248,10 @@ function PetAttachmentManager:AttachPetToPlayer(petModel, player, opts)
 
 	local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
 	if hrp then
+		pcall(function()
+			ppart.AssemblyLinearVelocity = Vector3.zero
+			ppart.AssemblyAngularVelocity = Vector3.zero
+		end)
 		petModel:SetPrimaryPartCFrame(hrp.CFrame * CFrame.new(0, 0, -2))
 	end
 
@@ -215,6 +259,7 @@ function PetAttachmentManager:AttachPetToPlayer(petModel, player, opts)
 
 	local uid = player.UserId
 	self.carryingPetByUserId[uid] = petModel
+	self:_notifyCarryState(uid, true, petModel)
 	self.petState[petModel] = self.petState[petModel] or {}
 	self.petState[petModel].ownerUserId = uid
 	self.petState[petModel].location = "player"
