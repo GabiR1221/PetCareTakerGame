@@ -13,6 +13,9 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
 gui.ResetOnSpawn = false
 gui.Enabled = false
+gui.DisplayOrder = 100
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
@@ -23,6 +26,8 @@ panel.Size = UDim2.new(0, 260, 0, 170)
 panel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
+panel.Active = true
+panel.ZIndex = 10
 panel.Parent = gui
 
 local title = Instance.new("TextLabel")
@@ -35,6 +40,7 @@ title.TextSize = 22
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Text = "Shower"
+title.ZIndex = 11
 title.Parent = panel
 
 local stageLabel = Instance.new("TextLabel")
@@ -47,6 +53,7 @@ stageLabel.TextSize = 18
 stageLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
 stageLabel.TextXAlignment = Enum.TextXAlignment.Left
 stageLabel.Text = "Scrub with Sponge"
+stageLabel.ZIndex = 11
 stageLabel.Parent = panel
 
 local barBg = Instance.new("Frame")
@@ -62,6 +69,7 @@ barFill.Name = "BarFill"
 barFill.Size = UDim2.new(0, 0, 1, 0)
 barFill.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
 barFill.BorderSizePixel = 0
+barFill.ZIndex = 12
 barFill.Parent = barBg
 
 local percentLabel = Instance.new("TextLabel")
@@ -72,6 +80,7 @@ percentLabel.Font = Enum.Font.SourceSansBold
 percentLabel.TextSize = 16
 percentLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 percentLabel.Text = "0%"
+percentLabel.ZIndex = 13
 percentLabel.Parent = barBg
 
 local rotateLabel = Instance.new("TextLabel")
@@ -84,6 +93,7 @@ rotateLabel.TextSize = 18
 rotateLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
 rotateLabel.TextXAlignment = Enum.TextXAlignment.Left
 rotateLabel.Text = "Rotate Pet"
+rotateLabel.ZIndex = 11
 rotateLabel.Parent = panel
 
 local rotateLeft = Instance.new("TextButton")
@@ -97,6 +107,8 @@ rotateLeft.TextSize = 20
 rotateLeft.Text = "⟵"
 rotateLeft.AutoButtonColor = false
 rotateLeft.Active = true
+rotateLeft.Selectable = true
+rotateLeft.ZIndex = 12
 rotateLeft.Parent = panel
 
 local rotateRight = Instance.new("TextButton")
@@ -110,6 +122,8 @@ rotateRight.TextSize = 20
 rotateRight.Text = "⟶"
 rotateRight.AutoButtonColor = false
 rotateRight.Active = true 
+rotateRight.Selectable = true
+rotateRight.ZIndex = 12
 rotateRight.Parent = panel
 
 local savedCameraType = nil
@@ -118,6 +132,7 @@ local cameraPart = nil
 local controlWall = nil
 local cameraConn = nil
 local cursorTrackConn = nil
+local lastToolMoveFireAt = 0
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -198,6 +213,20 @@ local function startCursorTracking()
 	clearCursorTracking()
 	cursorTrackConn = RunService.RenderStepped:Connect(function()
 		if not gui.Enabled then return end
+		local mousePos = UserInputService:GetMouseLocation()
+		local isOverPanel = mousePos and (
+			mousePos.X >= panel.AbsolutePosition.X
+				and mousePos.X <= (panel.AbsolutePosition.X + panel.AbsoluteSize.X)
+				and mousePos.Y >= panel.AbsolutePosition.Y
+				and mousePos.Y <= (panel.AbsolutePosition.Y + panel.AbsoluteSize.Y)
+		)
+		if isOverPanel then return end
+
+		local now = tick()
+		if (now - lastToolMoveFireAt) < 0.05 then return end
+		lastToolMoveFireAt = now
+
+
 		local worldPos = getMovePoint()
 		if worldPos then
 			showerRemote:FireServer("ToolMove", { worldPos = worldPos })
@@ -229,19 +258,26 @@ local function fireRotate(direction, button)
 	showerRemote:FireServer("Rotate", { direction = direction })
 end
 
-rotateLeft.Activated:Connect(function()
-	fireRotate(-1, rotateLeft)
-end)
-rotateLeft.MouseButton1Down:Connect(function()
-	fireRotate(-1, rotateLeft)
-end)
+local function hookRotateButton(button, direction)
+	button.MouseButton1Down:Connect(function()
+		button.BackgroundColor3 = pressedRotateButtonColor
+	end)
+	button.MouseButton1Up:Connect(function()
+		button.BackgroundColor3 = defaultRotateButtonColor
+	end)
+	button.MouseLeave:Connect(function()
+		button.BackgroundColor3 = defaultRotateButtonColor
+	end)
+	button.Activated:Connect(function()
+		fireRotate(direction, button)
+	end)
+	button.MouseButton1Click:Connect(function()
+		fireRotate(direction, button)
+	end)
+end
 
-rotateRight.Activated:Connect(function()
-	fireRotate(1, rotateRight)
-end)
-rotateRight.MouseButton1Down:Connect(function()
-	fireRotate(1, rotateRight)
-end)
+hookRotateButton(rotateLeft, -1)
+hookRotateButton(rotateRight, 1)
 
 local function isPointInsideButton(button, screenPos)
 	if not button or not button.Visible then return false end
@@ -255,6 +291,7 @@ end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed or not gui.Enabled then return end
+	if not gui.Enabled then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1
 		and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
@@ -267,6 +304,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		fireRotate(-1, rotateLeft)
 	elseif isPointInsideButton(rotateRight, inputPos) then
 		fireRotate(1, rotateRight)
+	elseif gameProcessed then
+		return
 	end
 end)	
 
@@ -275,6 +314,8 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 
 	if action == "Start" then
 		gui.Enabled = true
+		lastRotateFireAt = 0
+		lastToolMoveFireAt = 0
 		stageLabel.Text = tostring(payload.stageText or "Scrub with Sponge")
 		updateBar(payload.progress or 0)
 		controlWall = payload.controlWall
