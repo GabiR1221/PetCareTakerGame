@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
 local mouse = player:GetMouse()
@@ -94,7 +95,8 @@ rotateLeft.TextColor3 = Color3.new(1, 1, 1)
 rotateLeft.Font = Enum.Font.SourceSansBold
 rotateLeft.TextSize = 20
 rotateLeft.Text = "⟵"
-rotateLeft.AutoButtonColor = true
+rotateLeft.AutoButtonColor = false
+rotateLeft.Active = true
 rotateLeft.Parent = panel
 
 local rotateRight = Instance.new("TextButton")
@@ -106,7 +108,8 @@ rotateRight.TextColor3 = Color3.new(1, 1, 1)
 rotateRight.Font = Enum.Font.SourceSansBold
 rotateRight.TextSize = 20
 rotateRight.Text = "⟶"
-rotateRight.AutoButtonColor = true
+rotateRight.AutoButtonColor = false
+rotateRight.Active = true 
 rotateRight.Parent = panel
 
 local savedCameraType = nil
@@ -202,15 +205,70 @@ local function startCursorTracking()
 	end)
 end
 
-rotateLeft.MouseButton1Click:Connect(function()
+local defaultRotateButtonColor = Color3.fromRGB(70, 70, 70)
+local pressedRotateButtonColor = Color3.fromRGB(110, 110, 110)
+
+local function pulseButton(button)
+	if not button then return end
+	button.BackgroundColor3 = pressedRotateButtonColor
+	local tween = TweenService:Create(
+		button,
+		TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ BackgroundColor3 = defaultRotateButtonColor }
+	)
+	tween:Play()
+end
+
+local lastRotateFireAt = 0
+local function fireRotate(direction, button)
 	if not gui.Enabled then return end
-	showerRemote:FireServer("Rotate", { direction = -1 })
+	local now = tick()
+	if (now - lastRotateFireAt) < 0.08 then return end
+	lastRotateFireAt = now
+	pulseButton(button)
+	showerRemote:FireServer("Rotate", { direction = direction })
+end
+
+rotateLeft.Activated:Connect(function()
+	fireRotate(-1, rotateLeft)
+end)
+rotateLeft.MouseButton1Down:Connect(function()
+	fireRotate(-1, rotateLeft)
 end)
 
-rotateRight.MouseButton1Click:Connect(function()
-	if not gui.Enabled then return end
-	showerRemote:FireServer("Rotate", { direction = 1 })
+rotateRight.Activated:Connect(function()
+	fireRotate(1, rotateRight)
 end)
+rotateRight.MouseButton1Down:Connect(function()
+	fireRotate(1, rotateRight)
+end)
+
+local function isPointInsideButton(button, screenPos)
+	if not button or not button.Visible then return false end
+	local pos = button.AbsolutePosition
+	local size = button.AbsoluteSize
+	return screenPos.X >= pos.X
+		and screenPos.X <= (pos.X + size.X)
+		and screenPos.Y >= pos.Y
+		and screenPos.Y <= (pos.Y + size.Y)
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed or not gui.Enabled then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1
+		and input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+
+	local inputPos = input.Position
+	if not inputPos then return end
+
+	if isPointInsideButton(rotateLeft, inputPos) then
+		fireRotate(-1, rotateLeft)
+	elseif isPointInsideButton(rotateRight, inputPos) then
+		fireRotate(1, rotateRight)
+	end
+end)	
 
 showerRemote.OnClientEvent:Connect(function(action, payload)
 	payload = payload or {}
