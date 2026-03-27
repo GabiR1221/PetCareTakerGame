@@ -52,6 +52,37 @@ function ShowerDryerManager:_toToolHandle(toolInstance)
 	return nil
 end
 
+function ShowerDryerManager:_bindPetToShowerWeld(session)
+	if not session then return nil end
+	local pet = session.pet
+	local showerPart = session.showerPart
+	if not pet or not showerPart or not showerPart:IsA("BasePart") then return nil end
+
+	self.PetAttachmentManager:SetModelPrimaryIfMissing(pet)
+	local petPrimary = pet.PrimaryPart
+	if not petPrimary then return nil end
+
+	self.PetAttachmentManager:ClearWeldsOnPart(petPrimary)
+
+	local existing = session.showerPetWeld
+	if existing and existing.Parent then
+		existing:Destroy()
+	end
+
+	local weld = Instance.new("Weld")
+	weld.Name = "ShowerPetWeld"
+	weld.Part0 = showerPart
+	weld.Part1 = petPrimary
+	weld.C0 = showerPart.CFrame:ToObjectSpace(petPrimary.CFrame)
+	weld.C1 = CFrame.new()
+	weld.Parent = showerPart
+
+	session.showerPetWeld = weld
+	return weld
+end
+
+
+
 function ShowerDryerManager:_moveToolToPosition(toolInstance, worldPos)
 	local handle = self:_toToolHandle(toolInstance)
 	if not handle then return nil end
@@ -187,8 +218,9 @@ function ShowerDryerManager:_updateDirtVisualForSession(session)
 				dirtPart:SetAttribute("ShowerStartTransparency", startTransparency)
 			end
 			local stainState = self:_getStainState(session, dirtPart)
-			local perStainTransparency = (0.6 * stainState.stage1) + (0.4 * stainState.stage2)
-			dirtPart.Transparency = math.clamp(math.max(startTransparency, perStainTransparency), 0, 1)
+			local cleanProgress = math.clamp((0.6 * stainState.stage1) + (0.4 * stainState.stage2), 0, 1)
+			local targetTransparency = startTransparency + ((1 - startTransparency) * cleanProgress)
+			dirtPart.Transparency = math.clamp(targetTransparency, 0, 1)
 		end
 	end
 end
@@ -283,9 +315,21 @@ function ShowerDryerManager:_handleRotateFromClient(player, payload)
 
 	local showerPart = session.showerPart
 	if not showerPart or not showerPart:IsA("BasePart") then return end
+	
+	local weld = session.showerPetWeld
+	if not weld or not weld.Parent then
+		weld = self:_bindPetToShowerWeld(session)
+	end
 
-	local rotationStep = math.rad(12) * direction
-	showerPart.CFrame = showerPart.CFrame * CFrame.Angles(0, rotationStep, 0)
+	local rotationStep = math.rad(90) * direction
+	if weld and weld.Parent then
+		weld.C0 = weld.C0 * CFrame.Angles(0, rotationStep, 0)
+	else
+		local pet = session.pet
+		if pet and pet.Parent then
+			pet:PivotTo(pet:GetPivot() * CFrame.Angles(0, rotationStep, 0))
+		end
+	end
 end
 
 
@@ -537,6 +581,7 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 	}
 
 	self.activeShowerSessions[player.UserId] = session
+	self:_bindPetToShowerWeld(session)
 
 	local spongePart = self:_toToolHandle(spongeTool)
 	local showerHeadPart = self:_toToolHandle(showerHeadTool)
@@ -734,6 +779,12 @@ function ShowerDryerManager:_cleanupShowerSession(player, sendEndEvent)
 	end
 	
 	self:_clearDirtSessionAttributes(session)
+	if session.showerPetWeld and session.showerPetWeld.Parent then
+		pcall(function()
+			session.showerPetWeld:Destroy()
+		end)
+		session.showerPetWeld = nil
+	end
 	if session.showerPart and session.originalShowerCFrame then
 		pcall(function()
 			session.showerPart.CFrame = session.originalShowerCFrame
@@ -749,6 +800,20 @@ end
 
 function ShowerDryerManager:_finishShowerForPet(player, pet, showerPart)
 	if not pet or not pet.PrimaryPart or not showerPart then return end
+	
+	local session = player and self.activeShowerSessions[player.UserId]
+	if session and session.showerPetWeld and session.showerPetWeld.Parent then
+		pcall(function()
+			session.showerPetWeld:Destroy()
+		end)
+		session.showerPetWeld = nil
+	end
+	local orphanWeld = showerPart:FindFirstChild("ShowerPetWeld")
+	if orphanWeld and orphanWeld:IsA("Weld") then
+		pcall(function()
+			orphanWeld:Destroy()
+		end)
+	end
 
 	self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
 	self.PetMovement.StopWandering(pet)
