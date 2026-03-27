@@ -42,6 +42,7 @@ local PetMovement = require(ServerScriptService:WaitForChild("PetMovement"))
 -- Remote Events
 local accessoryEvent = ReplicatedStorage:FindFirstChild("PetAccessoryEvent")
 local petStateEvent = ReplicatedStorage:FindFirstChild("PetStateEvent")
+local petCarryEvent = ReplicatedStorage:FindFirstChild("PetCarryEvent")
 
 -- Configuration
 local SHOWER_HOLD_TIME = 3
@@ -58,6 +59,66 @@ local petGroundConnected = {}
 local petGroundXPTasks = {}
 local petGroundDirtinessTasks = {}
 local petPickupPromptConns = {}
+
+local function attachDropPickupPrompt(petModel, ownerUserId)
+	if not petModel or not petModel:IsA("Model") then return end
+
+	local existingHelper = petModel:FindFirstChild("PetPickupPart")
+	if existingHelper then
+		pcall(function() existingHelper:Destroy() end)
+	end
+
+	local helper = Instance.new("Part")
+	helper.Name = "PetPickupPart"
+	helper.Size = Vector3.new(1, 1, 1)
+	helper.Anchored = false
+	helper.Transparency = 1
+	helper.CanCollide = false
+	helper.Parent = petModel
+
+	local pp = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+	if pp then
+		helper.CFrame = pp.CFrame * CFrame.new(0, pp.Size.Y/2 + 0.5, 0)
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = helper
+		w.Part1 = pp
+		w.Parent = helper
+	end
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "PetPrompt"
+	prompt.ActionText = "Pick Up Pet"
+	prompt.ObjectText = "Pet"
+	prompt.RequiresLineOfSight = false
+	prompt.MaxActivationDistance = 6
+	prompt.HoldDuration = 0
+	prompt.Parent = helper
+
+	if petPickupPromptConns[petModel] then
+		pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
+		petPickupPromptConns[petModel] = nil
+	end
+
+	petPickupPromptConns[petModel] = prompt.Triggered:Connect(function(requestingPlayer)
+		if not requestingPlayer or not requestingPlayer.Character or not requestingPlayer.Character.PrimaryPart then return end
+		if carryingPetByUserId[requestingPlayer.UserId] then return end
+		if tostring(requestingPlayer.UserId) ~= tostring(ownerUserId) then return end
+
+		local ok = pcall(function()
+			PetAttachmentManager:AttachPetToPlayer(petModel, requestingPlayer, { resetFlags = false })
+		end)
+		if ok then
+			pcall(function() helper:Destroy() end)
+			if petPickupPromptConns[petModel] then
+				pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
+				petPickupPromptConns[petModel] = nil
+			end
+			petState[petModel] = petState[petModel] or {}
+			petState[petModel].location = "player"
+		end
+	end)
+end
+
 
 	
 	local function ensurePlayerPetCollisionGroups()
@@ -92,6 +153,7 @@ local petPickupPromptConns = {}
 	-- Initialize managers with dependencies
 	PetStateManager:Initialize(petState, petStateEvent, carryingPetByUserId)
 	PetAttachmentManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
+	PetAttachmentManager:SetCarryRemote(petCarryEvent)
 	PetAnimationManager:Initialize(petState)
 	NPCManager:Initialize(NPCS_FOLDER, petState, carryingPetByUserId, Players, Config)
 	ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
@@ -105,11 +167,60 @@ local petPickupPromptConns = {}
 	PetMoodVisualManager:Initialize(petState)
 
 	-- Connect remote events
-	if accessoryEvent then
+if accessoryEvent then
 	accessoryEvent.OnServerEvent:Connect(function(player, action, data)
 		AccessoryManager:HandleAccessoryEvent(player, action, data)
 	end)
 end
+
+petCarryEvent.OnServerEvent:Connect(function(player, action)
+	if action == "RequestCarryState" then
+		local carriedPet = carryingPetByUserId[player.UserId]
+		local currentlyCarrying = carriedPet ~= nil
+		local petName = currentlyCarrying and tostring(carriedPet.Name) or nil
+		petCarryEvent:FireClient(player, "CarryState", currentlyCarrying, petName)
+		return
+	end
+	if action ~= "DropPet" then return end
+	if not player then return end
+
+	local carriedPet = carryingPetByUserId[player.UserId]
+	if not carriedPet or not carriedPet.Parent then return end
+	local state = petState[carriedPet]
+	if not state then return end
+	if state.ownerUserId and tostring(state.ownerUserId) ~= tostring(player.UserId) then return end
+
+	local character = player.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	if not root then return end
+
+	PetAttachmentManager:DetachPetFromPlayer(carriedPet)
+	carriedPet.Parent = workspace
+
+	pcall(function()
+		PetRigManager:EnsurePetRig(carriedPet)
+		PetAnimationManager:SetupAnimatorForPet(carriedPet)
+	end)
+
+	if carriedPet.PrimaryPart then
+		local dropPos = root.Position + (root.CFrame.LookVector * 3)
+		local yOffset = (carriedPet.PrimaryPart.Size.Y * 0.5) + 0.3
+		carriedPet:SetPrimaryPartCFrame(CFrame.new(dropPos + Vector3.new(0, yOffset, 0)))
+		pcall(function()
+			carriedPet.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
+			carriedPet.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
+		end)
+	end
+
+	state.location = "free"
+	state.npc = nil
+	state.shower = nil
+
+	PetMovement.StartWandering(carriedPet)
+	attachDropPickupPrompt(carriedPet, state.ownerUserId or player.UserId)
+end)
+
+
 
 	-- Scan for existing NPCs
 	for _, npc in ipairs(NPCS_FOLDER:GetChildren()) do
