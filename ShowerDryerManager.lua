@@ -307,11 +307,20 @@ function ShowerDryerManager:_handleRotateFromClient(player, payload)
 	if not player then return end
 	local session = self.activeShowerSessions[player.UserId]
 	if not session then return end
+	if not session.pet or not session.pet.Parent then return end
+	if (self.petState[session.pet] or {}).location ~= "shower" then return end
 	if type(payload) ~= "table" then return end
 
 	local direction = tonumber(payload.direction) or 0
 	if direction == 0 then return end
 	direction = (direction > 0) and 1 or -1
+	
+	local now = tick()
+	if (now - (session.lastRotateTick or 0)) < 0.08 then
+		return
+	end
+	session.lastRotateTick = now
+
 
 	local showerPart = session.showerPart
 	if not showerPart or not showerPart:IsA("BasePart") then return end
@@ -577,6 +586,7 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 		stageOneFloorDirtiness = math.min(46, math.clamp(tonumber((self.petState[pet] or {}).dirtiness) or 0, 0, 100)),
 		connections = {},
 		lastProgressTick = 0,
+		lastRotateTick = 0,
 		originalShowerCFrame = showerPart.CFrame,
 	}
 
