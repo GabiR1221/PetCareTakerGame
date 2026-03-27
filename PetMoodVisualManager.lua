@@ -2,23 +2,70 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local PetMoodVisualManager = {}
 
-function PetMoodVisualManager:Initialize(stateTable)
-	self.petState = stateTable or {}
+local PLACEHOLDER_TOKEN = "PUT_"
 
-	self.assetsFolder = ReplicatedStorage:WaitForChild("PetVisualAssets")
-	self.dirtySmokeTemplate = self.assetsFolder:WaitForChild("DirtySmoke")
-	self.happySmokeTemplate = self.assetsFolder:WaitForChild("HappySmoke")
-	self.moodBillboardTemplate = self.assetsFolder:WaitForChild("MoodBillboard")
+local function normalizeImageId(value)
+	if value == nil then return nil end
+	local s = tostring(value)
+	if s == "" then return nil end
+	if string.find(s, PLACEHOLDER_TOKEN, 1, true) then
+		return nil
+	end
+	if string.find(s, "rbxassetid://", 1, true) == 1 then
+		return s
+	end
+	if string.match(s, "^%d+$") then
+		return "rbxassetid://" .. s
+	end
+	return nil
+end
 
-	self.faceImageIds = {
-		Happy = "rbxassetid://PUT_HAPPY_FACE_IMAGE_ID_HERE",
-		Nasty = "rbxassetid://PUT_NASTY_FACE_IMAGE_ID_HERE",
-		Sad = "rbxassetid://PUT_SAD_FACE_IMAGE_ID_HERE",
-		Neutral = "rbxassetid://PUT_NEUTRAL_FACE_IMAGE_ID_HERE",
+function PetMoodVisualManager.Initialize(selfOrStateTable, maybeStateTable)
+	local manager = PetMoodVisualManager
+	local stateTable = maybeStateTable or selfOrStateTable
+	if stateTable == manager then
+		stateTable = {}
+	end
+
+	manager.petState = stateTable or {}
+
+	manager.assetsFolder = ReplicatedStorage:WaitForChild("PetVisualAssets")
+	manager.dirtySmokeTemplate = manager.assetsFolder:WaitForChild("DirtySmoke")
+	manager.happySmokeTemplate = manager.assetsFolder:WaitForChild("HappySmoke")
+	manager.moodBillboardTemplate = manager.assetsFolder:WaitForChild("MoodBillboard")
+
+	manager.faceImageIds = {
+		Happy = nil,
+		Nasty = nil,
+		Sad = nil,
+		Neutral = nil,
 	}
 
-	self:_startLoop()
-	return self
+	local configuredIds = manager.moodBillboardTemplate:GetAttribute("FaceImageIds")
+	if type(configuredIds) == "string" and configuredIds ~= "" then
+		for pair in string.gmatch(configuredIds, "([^;]+)") do
+			local mood, id = string.match(pair, "^%s*([%w_]+)%s*=%s*(.-)%s*$")
+			if mood and id then
+				manager.faceImageIds[mood] = normalizeImageId(id)
+			end
+		end
+	end
+
+	for moodName, attrName in pairs({
+		Happy = "860151953",
+		Nasty = "756193742",
+		Sad = "9357787270",
+		Neutral = "7603175993",
+		}) do
+		local attrValue = manager.moodBillboardTemplate:GetAttribute(attrName)
+		local normalized = normalizeImageId(attrValue)
+		if normalized then
+			manager.faceImageIds[moodName] = normalized
+		end
+	end
+
+	manager:_startLoop()
+	return manager
 end
 
 function PetMoodVisualManager:_getDefaultPetAnchorPart(petModel)
@@ -124,7 +171,8 @@ end
 function PetMoodVisualManager:_setMoodFace(petModel, moodName)
 	local billboard = self:_ensureBillboard(petModel)
 	if not billboard then return end
-
+	billboard.Enabled = true
+	
 	local facePart = self:_getDefaultPetAnchorPart(petModel)
 	if not facePart then return end
 
@@ -134,16 +182,55 @@ function PetMoodVisualManager:_setMoodFace(petModel, moodName)
 		(facePart.Size.Y / 2) + 1
 	)
 
-	if billboard.Adornee ~= faceAttachment.Parent then
-		billboard.Adornee = faceAttachment.Parent
+	if billboard.Adornee ~= faceAttachment then
+		billboard.Adornee = faceAttachment
 	end
 
 	local imageLabel = billboard:FindFirstChild("FaceImage", true)
-	if not imageLabel or not imageLabel:IsA("ImageLabel") then return end
+	if not imageLabel or not imageLabel:IsA("ImageLabel") then
+		imageLabel = billboard:FindFirstChildWhichIsA("ImageLabel", true)
+	end
 
 	local imageId = self.faceImageIds[moodName] or self.faceImageIds.Neutral
-	imageLabel.Image = imageId
-	billboard.Enabled = true
+	if imageLabel and not imageId then
+		local specific = imageLabel:GetAttribute(moodName .. "ImageId")
+		local neutral = imageLabel:GetAttribute("NeutralImageId")
+		imageId = normalizeImageId(specific) or normalizeImageId(neutral)
+	end
+
+	local fallbackText = billboard:FindFirstChild("FaceFallbackText", true)
+	if not fallbackText or not fallbackText:IsA("TextLabel") then
+		fallbackText = billboard:FindFirstChildWhichIsA("TextLabel", true)
+	end
+
+	if imageLabel and imageId then
+		imageLabel.Visible = true
+		imageLabel.Image = imageId
+		if fallbackText and fallbackText:IsA("TextLabel") then
+			fallbackText.Visible = false
+		end
+		return
+	end
+
+	if imageLabel and imageLabel:IsA("ImageLabel") then
+		imageLabel.Image = ""
+		imageLabel.Visible = false
+	end
+	if fallbackText and fallbackText:IsA("TextLabel") then
+		fallbackText.Visible = true
+		fallbackText.Text = moodName
+	else
+		local createdText = Instance.new("TextLabel")
+		createdText.Name = "FaceFallbackText"
+		createdText.BackgroundTransparency = 1
+		createdText.Size = UDim2.fromScale(1, 1)
+		createdText.TextScaled = true
+		createdText.TextColor3 = Color3.fromRGB(255, 255, 255)
+		createdText.TextStrokeTransparency = 0.5
+		createdText.Font = Enum.Font.SourceSansBold
+		createdText.Text = moodName
+		createdText.Parent = billboard
+	end
 end
 
 function PetMoodVisualManager:_getMoodFromState(state)
