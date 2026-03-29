@@ -27,6 +27,7 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.SPAWN_INTERVAL = 30 -- seconds
 	self.WANDER_RADIUS = 50
 	self.WILD_PET_MODELS = ServerStorage:FindFirstChild("WildPetModels") or ServerStorage:FindFirstChild("PetModels")
+	self.WILD_PET_ZONE_FOLDER = "Zones"
 
 	-- Trackers
 	self.wildPets = {} -- petModel -> spawnArea part
@@ -78,6 +79,21 @@ function WildPetManager:FindSpawnAreas()
 	end
 end
 
+function WildPetManager:_CollectPetModels(rootFolder)
+	local list = {}
+
+	for _, child in ipairs(rootFolder:GetDescendants()) do
+		if child:IsA("Model") and (child.Parent == rootFolder or not child.Parent:IsA("Model")) then
+			local hasPhysicalPart = child.PrimaryPart ~= nil or child:FindFirstChildWhichIsA("BasePart", true) ~= nil
+			if hasPhysicalPart then
+				table.insert(list, child)
+			end
+		end
+	end
+
+	return list
+end
+
 function WildPetManager:RefreshPetTemplates()
 	self.petTemplates = {}
 
@@ -86,14 +102,15 @@ function WildPetManager:RefreshPetTemplates()
 		return
 	end
 
-	for _, candidate in ipairs(self.WILD_PET_MODELS:GetDescendants()) do
-		if candidate:IsA("Model") then
-			-- Keep only top-level templates (directly under a folder/service, not nested inside another model)
-			if not candidate.Parent or not candidate.Parent:IsA("Model") then
-				local hasPhysicalPart = candidate.PrimaryPart ~= nil or candidate:FindFirstChildWhichIsA("BasePart", true) ~= nil
-				if hasPhysicalPart then
-					table.insert(self.petTemplates, candidate)
-				end
+	for _, child in ipairs(self.WILD_PET_MODELS:GetChildren()) do
+		if child:IsA("Model") then
+			local hasPhysicalPart = child.PrimaryPart ~= nil or child:FindFirstChildWhichIsA("BasePart", true) ~= nil
+			if hasPhysicalPart then
+				table.insert(self.petTemplates, child)
+			end
+		elseif child:IsA("Folder") then
+			for _, model in ipairs(self:_CollectPetModels(child)) do
+				table.insert(self.petTemplates, model)
 			end
 		end
 	end
@@ -200,6 +217,209 @@ function WildPetManager:FindAdoptionMats()
 	end
 end
 
+
+
+function WildPetManager:GetZoneIdForSpawnArea(spawnArea)
+	if not spawnArea then return nil end
+	local zone = spawnArea:GetAttribute("ZoneId") or spawnArea:GetAttribute("WildPetZone")
+	if zone and tostring(zone) ~= "" then
+		return tostring(zone)
+	end
+	local parentZone = spawnArea:FindFirstAncestor("WildPetZones")
+	if parentZone then
+		return spawnArea.Parent and spawnArea.Parent.Name or nil
+	end
+	return nil
+end
+
+function WildPetManager:LooksLikeZoneFolder(folder)
+	if not folder or not folder:IsA("Folder") then
+		return false
+	end
+	if folder.Name == self.WILD_PET_ZONE_FOLDER then
+		return false
+	end
+	local hasZoneAttr = folder:GetAttribute("ZoneId") ~= nil or folder:GetAttribute("WildPetZone") ~= nil
+	if hasZoneAttr then
+		return true
+	end
+	return string.match(string.lower(folder.Name), "^zone%d*$") ~= nil
+end
+
+function WildPetManager:GetZoneFolder(zoneId)
+	if not self.WILD_PET_MODELS or not zoneId then
+		return nil
+	end
+	local zoneIdStr = tostring(zoneId)
+	local numericZone = tonumber(zoneIdStr)
+	local candidateNames = { zoneIdStr }
+	if numericZone then
+		table.insert(candidateNames, ("Zone%d"):format(numericZone))
+	end
+	if string.sub(string.lower(zoneIdStr), 1, 4) == "zone" then
+		local suffix = string.sub(zoneIdStr, 5)
+		if tonumber(suffix) then
+			table.insert(candidateNames, tostring(tonumber(suffix)))
+		end
+	else
+		table.insert(candidateNames, "Zone" .. zoneIdStr)
+	end
+
+	local zonesRoot = self.WILD_PET_MODELS:FindFirstChild(self.WILD_PET_ZONE_FOLDER)
+	if zonesRoot then
+		for _, name in ipairs(candidateNames) do
+			local nested = zonesRoot:FindFirstChild(name)
+			if nested and nested:IsA("Folder") then
+				return nested
+			end
+		end
+	end
+
+	for _, name in ipairs(candidateNames) do
+		local direct = self.WILD_PET_MODELS:FindFirstChild(name)
+		if direct and direct:IsA("Folder") then
+			return direct
+		end
+	end
+
+	for _, child in ipairs(self.WILD_PET_MODELS:GetChildren()) do
+		if child:IsA("Folder") and self:LooksLikeZoneFolder(child) then
+			local lowerName = string.lower(child.Name)
+			for _, name in ipairs(candidateNames) do
+				if lowerName == string.lower(tostring(name)) then
+					return child
+				end
+			end
+		end
+	end
+	return nil
+end
+
+function WildPetManager:GetTemplatesForSpawnArea(spawnArea)
+	if #self.petTemplates == 0 then
+		self:RefreshPetTemplates()
+	end
+
+	if #self.petTemplates == 0 then
+		return {}
+	end
+
+	local allowList = spawnArea and spawnArea:GetAttribute("AllowedPets")
+	if allowList and tostring(allowList) ~= "" then
+		local allowed = {}
+		for token in string.gmatch(tostring(allowList), "[^,]+") do
+			allowed[string.lower((token:gsub("^%s+",""):gsub("%s+$","")))] = true
+		end
+		local filtered = {}
+		for _, model in ipairs(self.petTemplates) do
+			if allowed[string.lower(model.Name)] then
+				table.insert(filtered, model)
+			end
+		end
+		if #filtered > 0 then
+			return filtered
+		end
+	end
+
+	local zoneId = self:GetZoneIdForSpawnArea(spawnArea)
+	if not zoneId or not self.WILD_PET_MODELS then
+		return self.petTemplates
+	end
+
+	local zoneFolder = self:GetZoneFolder(zoneId)
+	if not zoneFolder then
+		return self.petTemplates
+	end
+
+	local zoneTemplates = self:_CollectPetModels(zoneFolder)
+	if #zoneTemplates > 0 then
+		return zoneTemplates
+	end
+
+	return self.petTemplates
+end
+
+function WildPetManager:GetWeightedRandomTemplateFromList(templateList)
+	if not templateList or #templateList == 0 then
+		return nil
+	end
+
+	local totalWeight = 0
+	for _, model in ipairs(templateList) do
+		local weight = tonumber(model:GetAttribute("SpawnWeight"))
+			or tonumber(model:GetAttribute("Weight"))
+			or tonumber(model:GetAttribute("RarityWeight"))
+			or 1
+		if weight > 0 then
+			totalWeight = totalWeight + weight
+		end
+	end
+
+	if totalWeight <= 0 then
+		return templateList[math.random(1, #templateList)]
+	end
+
+	local pick = math.random() * totalWeight
+	local running = 0
+	for _, model in ipairs(templateList) do
+		local weight = tonumber(model:GetAttribute("SpawnWeight"))
+			or tonumber(model:GetAttribute("Weight"))
+			or tonumber(model:GetAttribute("RarityWeight"))
+			or 1
+		if weight > 0 then
+			running = running + weight
+			if pick <= running then
+				return model
+			end
+		end
+	end
+
+	return templateList[#templateList]
+end
+
+function WildPetManager:_pickupWildPetForPlayer(pet, player, helper)
+	if self.carryingPetByUserId[player.UserId] then
+		return false
+	end
+
+	local state = self.petState[pet]
+	if not state or not state.wild then
+		return false
+	end
+
+	local opts = nil
+	if player and player:GetAttribute("RunnerJumping") == true then
+		opts = { attachToHand = true }
+	end
+	local ok, err = self.PetAttachmentManager:AttachWildPetToPlayer(pet, player, opts)
+	if ok then
+		self.petState[pet].location = "player_wild"
+		self.petState[pet].carrierUserId = player.UserId
+		self.PetMovement.StopWandering(pet)
+		self.wildPets[pet] = nil
+
+		if self.wildPetPickupConns[pet] then
+			self.wildPetPickupConns[pet]:Disconnect()
+			self.wildPetPickupConns[pet] = nil
+		end
+		if helper then
+			pcall(function() helper:Destroy() end)
+		end
+
+		print(("[WildPetManager] Player %s picked up wild pet %s"):format(player.Name, pet.Name))
+		return true
+	else
+		warn("[WildPetManager] Failed to attach wild pet:", err)
+	end
+	return false
+end
+
+function WildPetManager:TryAutoPickupWildPet(player, pet)
+	if not player or not pet or not pet:IsA("Model") then return false end
+	return self:_pickupWildPetForPlayer(pet, player, pet:FindFirstChild("WildPetPickupPart"))
+end
+
+
 function WildPetManager:SpawnWildPet()
 	-- Check if we have spawn areas and haven't reached the limit
 	if #self.spawnAreas == 0 then
@@ -229,16 +449,23 @@ function WildPetManager:SpawnWildPet()
 		end
 	end
 	
-	if #self.petTemplates == 0 then
+	local templates = self:GetTemplatesForSpawnArea(spawnArea)
+	if #templates == 0 then
+		-- Refresh once in case templates were added after initialization.
 		self:RefreshPetTemplates()
+		templates = self:GetTemplatesForSpawnArea(spawnArea)
 	end
 
-	if #self.petTemplates == 0 then
-		print("[WildPetManager] No pet models found in WildPetModels/PetModels folder")
+	if #templates == 0 then
+		local zoneId = self:GetZoneIdForSpawnArea(spawnArea)
+		print(("[WildPetManager] No pet templates available for spawn area %s (zone=%s)"):format(
+			spawnArea:GetFullName(),
+			tostring(zoneId)
+			))
 		return
 	end
 
-	local selectedModel = self:GetWeightedRandomTemplate()
+	local selectedModel = self:GetWeightedRandomTemplateFromList(templates)
 	if not selectedModel then
 		return
 	end
@@ -338,41 +565,7 @@ function WildPetManager:AddWildPetPickupPrompt(pet)
 	prompt.Parent = helper
 
 	local conn = prompt.Triggered:Connect(function(player)
-		-- Check if player can carry (not already carrying a pet)
-		if self.carryingPetByUserId[player.UserId] then
-			return
-		end
-
-		-- Check if pet is still wild and available
-		local state = self.petState[pet]
-		if not state or not state.wild then
-			return
-		end
-
-		-- Attach wild pet to player (without setting owner yet)
-		local ok, err = self.PetAttachmentManager:AttachWildPetToPlayer(pet, player)
-		if ok then
-			-- Update state
-			self.petState[pet].location = "player_wild"
-			self.petState[pet].carrierUserId = player.UserId
-
-			-- Stop wandering
-			self.PetMovement.StopWandering(pet)
-
-			-- Remove from wild pets tracker
-			self.wildPets[pet] = nil
-
-			-- Remove pickup prompt
-			if self.wildPetPickupConns[pet] then
-				self.wildPetPickupConns[pet]:Disconnect()
-				self.wildPetPickupConns[pet] = nil
-			end
-			pcall(function() helper:Destroy() end)
-
-			print(("[WildPetManager] Player %s picked up wild pet %s"):format(player.Name, pet.Name))
-		else
-			warn("[WildPetManager] Failed to attach wild pet:", err)
-		end
+		self:_pickupWildPetForPlayer(pet, player, helper)
 	end)
 
 	self.wildPetPickupConns[pet] = conn
@@ -604,7 +797,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			if not restoredToStand then
 				self:PlacePetOnGround(pet, matPos)
 				self.petState[pet].location = "free"
-				self.PetMovement.StartWandering(pet, matPos, 20)
+				self.PetMovement.StartWandering(pet, matPos, 20, player.UserId)
 				self:AddOwnedPetPickupPrompt(pet, player.UserId)
 			end
 
@@ -674,7 +867,8 @@ function WildPetManager:CreateOwnedPetPickupPrompt(pet, position)
 	end)
 
 	-- Start wandering in the tycoon area
-	self.PetMovement.StartWandering(pet, position, 20)
+	local ownerUserId = self.petState[pet] and self.petState[pet].ownerUserId
+	self.PetMovement.StartWandering(pet, position, 20, ownerUserId)
 	self.ownedPetPickupConns[pet] = conn
 end
 
