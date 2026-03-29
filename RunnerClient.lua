@@ -36,16 +36,58 @@ goBackButton.TextSize = 20
 goBackButton.Text = "Go Back"
 goBackButton.Parent = gui
 
+local staminaFrame = Instance.new("Frame")
+staminaFrame.Name = "RunnerStaminaFrame"
+staminaFrame.Size = UDim2.new(0, 240, 0, 22)
+staminaFrame.Position = UDim2.new(0.5, -120, 0.15, 0)
+staminaFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+staminaFrame.BorderSizePixel = 0
+staminaFrame.Visible = false
+staminaFrame.Parent = gui
+
+local staminaFill = Instance.new("Frame")
+staminaFill.Name = "RunnerStaminaFill"
+staminaFill.Size = UDim2.new(1, 0, 1, 0)
+staminaFill.BackgroundColor3 = Color3.fromRGB(82, 255, 125)
+staminaFill.BorderSizePixel = 0
+staminaFill.Parent = staminaFrame
+
+local staminaLabel = Instance.new("TextLabel")
+staminaLabel.Name = "RunnerStaminaLabel"
+staminaLabel.Size = UDim2.new(1, 0, 1, 0)
+staminaLabel.BackgroundTransparency = 1
+staminaLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+staminaLabel.Font = Enum.Font.SourceSansBold
+staminaLabel.TextSize = 16
+staminaLabel.Text = "Stamina"
+staminaLabel.Parent = staminaFrame
+
+
 local runnerActive = false
 local jumpingNow = false
 local runTrack = nil
 local jumpTrack = nil
+local staminaCurrent = 0
+local staminaMax = 50
 
 local function stopTrack(track)
 	if track then
 		pcall(function() track:Stop(0.1) end)
 	end
 end
+
+local function renderStamina(exhausted)
+	local max = math.max(1, staminaMax)
+	local ratio = math.clamp(staminaCurrent / max, 0, 1)
+	staminaFill.Size = UDim2.new(ratio, 0, 1, 0)
+	if exhausted then
+		staminaFill.BackgroundColor3 = Color3.fromRGB(255, 92, 92)
+	else
+		staminaFill.BackgroundColor3 = Color3.fromRGB(82, 255, 125)
+	end
+	staminaLabel.Text = string.format("Stamina: %d / %d", math.floor(staminaCurrent + 0.5), math.floor(max + 0.5))
+end
+
 
 local function loadTrack(animId)
 	if not animId then return nil end
@@ -76,14 +118,23 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 	if action == "RunnerState" then
 		runnerActive = enabled == true
 		gui.Enabled = runnerActive
+		staminaFrame.Visible = runnerActive
 		if not runnerActive then
 			jumpingNow = false
 			stopTrack(runTrack)
 			stopTrack(jumpTrack)
 			runTrack = nil
 			jumpTrack = nil
+			staminaCurrent = 0
+			staminaMax = 50
+			renderStamina(false)
 			return
 		end
+		
+		staminaCurrent = (payload and payload.currentStamina) or staminaMax
+		staminaMax = (payload and payload.maxStamina) or staminaMax
+		renderStamina(false)
+
 
 		stopTrack(runTrack)
 		runTrack = loadTrack(payload and payload.runAnimationId)
@@ -107,5 +158,10 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 				runTrack:Play(0.08)
 			end
 		end
+	elseif action == "StaminaUpdate" then
+		if not runnerActive then return end
+		staminaCurrent = payload and payload.current or staminaCurrent
+		staminaMax = payload and payload.max or staminaMax
+		renderStamina(payload and payload.exhausted == true)
 	end
 end)
