@@ -147,8 +147,9 @@ function PetAttachmentManager:AttachPetToPart(petModel, part)
 	return true
 end
 
-function PetAttachmentManager:AttachWildPetToPlayer(petModel, player)
+function PetAttachmentManager:AttachWildPetToPlayer(petModel, player, opts)
 	-- Similar to AttachPetToPlayer but doesn't set ownerUserId
+	opts = opts or {}
 	if not petModel or not player then return false, "missing args" end
 	local char = player.Character
 	if not char or not char.PrimaryPart then return false, "no char" end
@@ -201,7 +202,20 @@ function PetAttachmentManager:AttachWildPetToPlayer(petModel, player)
 	end
 
 	-- create a WeldConstraint between pet.PrimaryPart and HRP (non-physical link)
-	pcall(function() self:WeldParts(ppart, hrp) end)
+	local attachPart = hrp
+	if opts.attachToHand then
+		local rightHand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+		if rightHand and rightHand:IsA("BasePart") then
+			attachPart = rightHand
+		end
+	end
+
+	-- create a WeldConstraint between pet.PrimaryPart and target part (non-physical link)
+	pcall(function() self:WeldParts(ppart, attachPart) end)
+	if attachPart ~= hrp then
+		local armOffset = CFrame.new(0, -0.5, -0.5) * CFrame.Angles(0, math.rad(90), 0)
+		petModel:SetPrimaryPartCFrame(attachPart.CFrame * armOffset)
+	end
 
 	-- update maps (but don't set ownerUserId yet)
 	local uid = player.UserId
