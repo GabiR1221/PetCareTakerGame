@@ -31,6 +31,7 @@ local PetSaveManager = require(Modules:WaitForChild("PetSaveManager"))
 local PetFeedingManager = require(Modules:WaitForChild("PetFeedingManager"))
 local PetStandManager = require(Modules:WaitForChild("PetStandManager"))
 local PetMoodVisualManager = require(Modules:WaitForChild("PetMoodVisualManager"))
+local SprintRunManager = require(Modules:WaitForChild("SprintRunManager"))
 -- Services
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -165,6 +166,7 @@ end
 	WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 	PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
 	PetMoodVisualManager:Initialize(petState)
+	SprintRunManager:Initialize(Players, WildPetManager)
 
 	-- Connect remote events
 if accessoryEvent then
@@ -218,7 +220,21 @@ petCarryEvent.OnServerEvent:Connect(function(player, action)
 
 	PetMovement.StartWandering(carriedPet)
 	attachDropPickupPrompt(carriedPet, state.ownerUserId or player.UserId)
+	PetStateManager:SendStateToOwner(carriedPet)
 end)
+
+if petStateEvent then
+	petStateEvent.OnServerEvent:Connect(function(player, action)
+		if action ~= "RequestOwnedPetsState" then return end
+		if not player then return end
+
+		for petModel, st in pairs(petState) do
+			if petModel and petModel.Parent and st and tostring(st.ownerUserId) == tostring(player.UserId) then
+				PetStateManager:SendStateToOwner(petModel)
+			end
+		end
+	end)
+end
 
 
 
