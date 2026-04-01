@@ -4,6 +4,21 @@ local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 
+local function normalizePetName(name)
+	if not name then return "" end
+	return string.lower((tostring(name):gsub("^%s+", ""):gsub("%s+$", "")))
+end
+
+local function buildOwnedPetCsv(nameSet)
+	local list = {}
+	for petName, _ in pairs(nameSet) do
+		table.insert(list, petName)
+	end
+	table.sort(list)
+	return table.concat(list, ",")
+end
+
+
 function WildPetManager:Initialize(stateTable, carryingTable, playersService, petMovement, config, saveManager)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
@@ -41,8 +56,100 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self:FindSpawnAreas()
 	self:FindAdoptionMats()
 	self:RefreshPetTemplates()
+	self:BindRebirthResetEvent()
 	self:StartSpawning()
 end
+
+function WildPetManager:BindRebirthResetEvent()
+	local resetEvent = ReplicatedStorage:FindFirstChild("PetSystemClearPlayerPets")
+	if not resetEvent or not resetEvent:IsA("BindableEvent") then
+		resetEvent = Instance.new("BindableEvent")
+		resetEvent.Name = "PetSystemClearPlayerPets"
+		resetEvent.Parent = ReplicatedStorage
+	end
+
+	if self._rebirthResetConn then
+		pcall(function() self._rebirthResetConn:Disconnect() end)
+		self._rebirthResetConn = nil
+	end
+
+	self._rebirthResetConn = resetEvent.Event:Connect(function(userId)
+		local numericUserId = tonumber(userId)
+		if not numericUserId then return end
+		local player = self.Players:GetPlayerByUserId(numericUserId)
+		if not player then return end
+		self:ClearPlayerPetsForRebirth(player)
+	end)
+end
+
+function WildPetManager:ClearPlayerPetsForRebirth(player)
+	if not player then return end
+
+	if self.carryingPetByUserId[player.UserId] then
+		self.carryingPetByUserId[player.UserId] = nil
+	end
+
+	local petsToRemove = {}
+	for petModel, state in pairs(self.petState) do
+		if state and tostring(state.ownerUserId) == tostring(player.UserId) then
+			table.insert(petsToRemove, petModel)
+		end
+	end
+
+	for _, petModel in ipairs(petsToRemove) do
+		local state = self.petState[petModel]
+		if state and state.petstandRoot then
+			local storedMoney = state.petstandRoot:FindFirstChild("StoredMoney")
+			if storedMoney and storedMoney:IsA("NumberValue") then
+				storedMoney.Value = 0
+			end
+		end
+
+		if self.wildPetPickupConns[petModel] then
+			pcall(function() self.wildPetPickupConns[petModel]:Disconnect() end)
+			self.wildPetPickupConns[petModel] = nil
+		end
+		if self.ownedPetPickupConns[petModel] then
+			pcall(function() self.ownedPetPickupConns[petModel]:Disconnect() end)
+			self.ownedPetPickupConns[petModel] = nil
+		end
+
+		self.wildPets[petModel] = nil
+		self.petState[petModel] = nil
+
+		if petModel and petModel.Parent then
+			pcall(function() petModel:Destroy() end)
+		end
+	end
+
+	self:UpdateOwnedPetRegistryForPlayer(player)
+	if self.SaveManager then
+		self.SaveManager:ScheduleSave(player)
+	end
+end
+
+function WildPetManager:UpdateOwnedPetRegistryForPlayer(player)
+	if not player then return end
+	local playerDataRoot = ServerStorage:FindFirstChild("PlayerData")
+	if not playerDataRoot then return end
+	local playerFolder = playerDataRoot:FindFirstChild(tostring(player.UserId))
+	if not playerFolder then return end
+
+	local ownedPetNames = {}
+	for petModel, state in pairs(self.petState) do
+		if petModel and petModel.Parent and state and not state.wild and tostring(state.ownerUserId) == tostring(player.UserId) then
+			local templateName = petModel:GetAttribute("TemplateName") or petModel.Name
+			local normalized = normalizePetName(templateName)
+			if normalized ~= "" then
+				ownedPetNames[normalized] = true
+			end
+		end
+	end
+
+	playerFolder:SetAttribute("OwnedPetNamesCsv", buildOwnedPetCsv(ownedPetNames))
+end
+
+
 
 function WildPetManager:FindSpawnAreas()
 	print("[WildPetManager] Scanning for wild pet spawn areas...")
@@ -419,6 +526,29 @@ function WildPetManager:TryAutoPickupWildPet(player, pet)
 	return self:_pickupWildPetForPlayer(pet, player, pet:FindFirstChild("WildPetPickupPart"))
 end
 
+function WildPetManager:NormalizeRunnerCaughtPetHold(player)
+	if not player then return false end
+	local pet = self.carryingPetByUserId[player.UserId]
+	if not pet or not pet.Parent then return false end
+
+	local state = self.petState[pet]
+	if not state or not state.wild or state.location ~= "player_wild" then
+		return false
+	end
+	if state.carrierUserId and tostring(state.carrierUserId) ~= tostring(player.UserId) then
+		return false
+	end
+
+	local ok = self.PetAttachmentManager:AttachWildPetToPlayer(pet, player)
+	if not ok then
+		return false
+	end
+
+	state.location = "player_wild"
+	state.carrierUserId = player.UserId
+	return true
+end
+
 
 function WildPetManager:SpawnWildPet()
 	-- Check if we have spawn areas and haven't reached the limit
@@ -663,6 +793,7 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 
 		-- Send adoption message to player
 		game.ReplicatedStorage:FindFirstChild("PetAdoptionEvent"):FireClient(player, "PetAdopted", pet)
+		self:UpdateOwnedPetRegistryForPlayer(player)
 		if self.SaveManager then
 			self.SaveManager:ScheduleSave(player)
 		end
@@ -806,6 +937,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			warn(("[WildPetManager] Pet model %s not found"):format(petInfo.modelName))
 		end
 	end
+	self:UpdateOwnedPetRegistryForPlayer(player)
 end
 
 function WildPetManager:CreateOwnedPetPickupPrompt(pet, position)
