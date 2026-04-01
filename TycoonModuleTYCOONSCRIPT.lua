@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local MarketplaceService = game:GetService("MarketplaceService")
 local Debris = game:GetService("Debris")
+local DataStoreService = game:GetService("DataStoreService")
 
 -- Modules
 local configModule = require("../Settings")
@@ -14,6 +15,7 @@ local animationsModule = require("./ObjectAnimationsModule")
 local rebirthEvent = ReplicatedStorage:WaitForChild("TycoonRebirthEvent")
 local soundEvent = ReplicatedStorage:WaitForChild("TycoonSoundEvent")
 local soundsFolder = script.Parent.Parent.SoundsFolder
+local petDataStore = DataStoreService:GetDataStore("PetData10")-----------CHANGE THIS TO THE SAME PETDATA NAME AS IN PETSAVE
 
 local objectModules = {}
 for _, module in ipairs(script.ObjectModules:GetChildren()) do
@@ -130,6 +132,131 @@ local function changePlayerCurrency(player, currencyName, delta)
 		end
 	end
 	return false
+end
+
+local function normalizePetName(name)
+	if not name then return "" end
+	return string.lower((tostring(name):gsub("^%s+", ""):gsub("%s+$", "")))
+end
+
+local function splitCsv(csv)
+	local out = {}
+	if type(csv) ~= "string" or csv == "" then return out end
+	for token in string.gmatch(csv, "([^,]+)") do
+		local cleaned = normalizePetName(token)
+		if cleaned ~= "" then
+			out[cleaned] = true
+		end
+	end
+	return out
+end
+
+local function getOwnedPetSetFromFolder(playerFolder)
+	if not playerFolder then return {} end
+	local csv = playerFolder:GetAttribute("OwnedPetNamesCsv")
+	return splitCsv(csv)
+end
+
+local function canAffordRequirements(player, currencyRequirements)
+	if type(currencyRequirements) ~= "table" then
+		return true
+	end
+	for currencyName, requiredAmount in pairs(currencyRequirements) do
+		local required = tonumber(requiredAmount) or 0
+		if required > 0 then
+			local current = getPlayerCurrency(player, tostring(currencyName))
+			if current < required then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+local function chargeRequirements(player, currencyRequirements)
+	if type(currencyRequirements) ~= "table" then
+		return true
+	end
+	if not canAffordRequirements(player, currencyRequirements) then
+		return false
+	end
+	for currencyName, requiredAmount in pairs(currencyRequirements) do
+		local required = tonumber(requiredAmount) or 0
+		if required > 0 then
+			changePlayerCurrency(player, tostring(currencyName), -required)
+		end
+	end
+	return true
+end
+
+local function resolveRebirthRequirementForTier(rebirthCount)
+	local tier = (tonumber(rebirthCount) or 0) + 1
+	local tierRequirements = nil
+	if type(configModule.RebirthRequirementsByTier) == "table" then
+		tierRequirements = configModule.RebirthRequirementsByTier[tier]
+	end
+	tierRequirements = tierRequirements or {}
+	return tierRequirements
+end
+
+local function meetsPetRequirements(playerFolder, petRequirements)
+	if type(petRequirements) ~= "table" or #petRequirements == 0 then
+		return true
+	end
+	local ownedPets = getOwnedPetSetFromFolder(playerFolder)
+	for _, petName in ipairs(petRequirements) do
+		local normalized = normalizePetName(petName)
+		if normalized ~= "" and not ownedPets[normalized] then
+			return false
+		end
+	end
+	return true
+end
+
+local function canPlayerRebirthNow(player, playerFolder, percentComplete)
+	if percentComplete < (tonumber(configModule.RebirthCompletionPercentage) or 100) then
+		return false
+	end
+
+	local rebirthCount = tonumber(playerFolder:GetAttribute(configModule.RebirthsName)) or 0
+	local rebirthLimit = tonumber(configModule.RebirthLimit)
+	if rebirthLimit == nil then
+		rebirthLimit = 3 -- secure default for this project when not configured
+	end
+	if rebirthLimit > 0 and rebirthCount >= rebirthLimit then
+		return false
+	end
+
+	local tierRequirements = resolveRebirthRequirementForTier(rebirthCount)
+	local requiredPets = tierRequirements.RequiredPets or configModule.RebirthRequiredPets
+	if not meetsPetRequirements(playerFolder, requiredPets) then
+		return false
+	end
+
+	local requiredCurrency = tierRequirements.RequiredCurrency or configModule.RebirthRequiredCurrency
+	if not canAffordRequirements(player, requiredCurrency) then
+		return false
+	end
+
+	return true
+end
+
+local function clearPetDataStoreForPlayer(player)
+	if not player then return end
+	local ok, err = pcall(function()
+		petDataStore:SetAsync(tostring(player.UserId), {})
+	end)
+	if not ok then
+		warn("[TycoonRebirth] Failed to clear pet datastore for", player.Name, err)
+	end
+end
+
+local function clearLivePetsForPlayer(player)
+	if not player then return end
+	local clearEvent = ReplicatedStorage:FindFirstChild("PetSystemClearPlayerPets")
+	if clearEvent and clearEvent:IsA("BindableEvent") then
+		clearEvent:Fire(player.UserId)
+	end
 end
 
 
@@ -521,29 +648,41 @@ end
 function Tycoon:Rebirth()
 	local player = Players:GetPlayerByUserId(self.Tycoon:GetAttribute("OwnerId"))
 	if not player then return end
-	-- Double check that the player can actually rebirth
-	local percentComplete = self:GetCompletionPercentage()
-	if percentComplete < configModule.RebirthCompletionPercentage then return end
 	
 	local playerFolder = ServerStorage.PlayerData:FindFirstChild(player.UserId)
 	if not playerFolder then return end
-	-- Make sure the player is not above the rebirth limit
-	if configModule.RebirthLimit > 0 and playerFolder:GetAttribute(configModule.RebirthsName) >= configModule.RebirthLimit then return end
 	
-	local rebirthCount = playerFolder:GetAttribute(configModule.RebirthsName)
+	local percentComplete = self:GetCompletionPercentage()
+	if not canPlayerRebirthNow(player, playerFolder, percentComplete) then
+		return
+	end
+
+	local rebirthCount = tonumber(playerFolder:GetAttribute(configModule.RebirthsName)) or 0
+	local tierRequirements = resolveRebirthRequirementForTier(rebirthCount)
+	local requiredCurrency = tierRequirements.RequiredCurrency or configModule.RebirthRequiredCurrency
+	if not chargeRequirements(player, requiredCurrency) then
+		return
+	end
+
 	playerFolder:SetAttribute(configModule.RebirthsName, rebirthCount + 1)
 
-	-- Reset each configured currency to its starting value and reset totals if needed
+	-- Rebirth wipe: remove owned pets from memory + datastore
+	clearLivePetsForPlayer(player)
+	clearPetDataStoreForPlayer(player)
+	playerFolder:SetAttribute("OwnedPetNamesCsv", "")
+
+	-- Reset each configured currency to 0 and reset totals if needed
 	local ownerPlayer = player
 	for i, currency in ipairs(configModule.Currencies) do
-		-- set the current currency value to StartingValue
-		setPlayerCurrencyDirect(ownerPlayer, currency.Name, tonumber(currency.StartingValue) or 0)
+		-- force currency wipe on rebirth
+		setPlayerCurrencyDirect(ownerPlayer, currency.Name, 0)
 		-- reset total counter (TotalCurrency, TotalCurrency2) to 0 if present
 		local totalName = "Total" .. tostring(currency.Name)
 		setPlayerCurrencyDirect(ownerPlayer, totalName, 0)
 	end
-
-
+	-- extra compatibility for systems that use explicit Currency/Currency2 values
+	setPlayerCurrencyDirect(ownerPlayer, "Currency", 0)
+	setPlayerCurrencyDirect(ownerPlayer, "Currency2", 0)
 	
 	self:ResetTycoon(true)
 	self:AssignTycoon(Players:GetPlayerByUserId(self.Tycoon:GetAttribute("OwnerId")))
