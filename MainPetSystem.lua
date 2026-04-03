@@ -135,11 +135,26 @@ local function dropCarriedPet(player, options)
 	return true
 end
 
-local function isInsideTycoonBounds(rootPart, tycoonModel, returnPart)
-	if not rootPart or not tycoonModel then return true end
+local function isInsideTycoonBounds(referencePart, tycoonModel, returnPart)
+	if not referencePart or not tycoonModel then return true end
+
+	local boundaryPartName = tostring(tycoonModel:GetAttribute("CarryBoundaryPartName") or "PetCarryBoundary")
+	local essentials = TycoonUtils:FindEssentialsInModel(tycoonModel)
+	local boundaryPart = essentials and essentials:FindFirstChild(boundaryPartName)
+	if boundaryPart and boundaryPart:IsA("BasePart") then
+		local localPoint = boundaryPart.CFrame:PointToObjectSpace(referencePart.Position)
+		local margin = tonumber(boundaryPart:GetAttribute("CarryBoundaryMargin"))
+			or tonumber(tycoonModel:GetAttribute("CarryBoundaryMargin"))
+			or 0
+		local half = (boundaryPart.Size * 0.5) + Vector3.new(margin, margin, margin)
+		return math.abs(localPoint.X) <= half.X
+			and math.abs(localPoint.Y) <= half.Y
+			and math.abs(localPoint.Z) <= half.Z
+	end
+
 	if returnPart and returnPart:IsA("BasePart") then
 		local maxCarryDistance = tonumber(tycoonModel:GetAttribute("CarryBoundaryRadius")) or 180
-		if (rootPart.Position - returnPart.Position).Magnitude > maxCarryDistance then
+		if (referencePart.Position - returnPart.Position).Magnitude > maxCarryDistance then
 			return false
 		end
 	end
@@ -149,12 +164,28 @@ local function isInsideTycoonBounds(rootPart, tycoonModel, returnPart)
 	if not ok or not boxCFrame or not boxSize then
 		return true
 	end
-	local localPoint = boxCFrame:PointToObjectSpace(rootPart.Position)
+	local localPoint = boxCFrame:PointToObjectSpace(referencePart.Position)
 	local margin = 6
 	return math.abs(localPoint.X) <= (boxSize.X * 0.5 + margin)
 		and math.abs(localPoint.Y) <= (boxSize.Y * 0.5 + margin)
 		and math.abs(localPoint.Z) <= (boxSize.Z * 0.5 + margin)
 end
+
+local function forceReturnPlayerAndPetToTycoon(player, carriedPet, tycoonModel, returnPart)
+	if not player or not carriedPet or not carriedPet.Parent then
+		return false
+	end
+	if not tycoonModel or not returnPart or not returnPart:IsA("BasePart") then
+		return false
+	end
+
+	local returnPosition = returnPart.Position
+	local dropped = dropCarriedPet(player, { forcePosition = returnPosition })
+
+	return dropped
+end
+
+
 
 function attachDropPickupPrompt(petModel, ownerUserId)
 	if not petModel or not petModel:IsA("Model") then return end
@@ -332,12 +363,17 @@ end
 			for _, player in ipairs(Players:GetPlayers()) do
 				local carriedPet = carryingPetByUserId[player.UserId]
 				if carriedPet and carriedPet.Parent then
+				local state = petState[carriedPet]
+				if not state or state.wild == true then
+					continue
+				end
 					local character = player.Character
 					local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
 					if root then
 						local tycoonModel, returnPart = getTycoonReturnPartForPlayer(player.UserId)
-						if tycoonModel and returnPart and not isInsideTycoonBounds(root, tycoonModel, returnPart) then
-							dropCarriedPet(player, { forcePosition = returnPart.Position })
+						local boundaryReference = carriedPet.PrimaryPart or carriedPet:FindFirstChildWhichIsA("BasePart") or root
+						if tycoonModel and returnPart and boundaryReference and not isInsideTycoonBounds(boundaryReference, tycoonModel, returnPart) then
+							forceReturnPlayerAndPetToTycoon(player, carriedPet, tycoonModel, returnPart)
 						end
 					end
 				end
