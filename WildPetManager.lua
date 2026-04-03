@@ -659,6 +659,47 @@ function WildPetManager:NormalizeRunnerCaughtPetHold(player)
 	return true
 end
 
+function WildPetManager:AutoAdoptCarriedWildPet(player)
+	if not player then return false end
+	local pet = self.carryingPetByUserId[player.UserId]
+	if not pet or not pet.Parent then return false end
+
+	local state = self.petState[pet]
+	if not state or not state.wild then
+		return false
+	end
+
+	state.ownerUserId = player.UserId
+	state.wild = false
+	state.location = "player"
+	state.carrierUserId = nil
+	self:_resetDirtVisualCache(pet)
+
+	local adoptionEvent = ReplicatedStorage:FindFirstChild("PetAdoptionEvent")
+	if adoptionEvent and adoptionEvent:IsA("RemoteEvent") then
+		adoptionEvent:FireClient(player, "PetAdopted", pet)
+	end
+
+	self:UpdateOwnedPetRegistryForPlayer(player)
+	if self.SaveManager then
+		self.SaveManager:ScheduleSave(player)
+	end
+
+	self.PetStateManager:AddXP(pet, 1)
+	self.PetStateManager:SendStateToOwner(pet)
+	if self.PetMoodVisualManager and self.PetMoodVisualManager.UpdatePetVisuals then
+		task.defer(function()
+			pcall(function()
+				self.PetMoodVisualManager:UpdatePetVisuals(pet)
+			end)
+		end)
+	end
+
+	print(("[WildPetManager] Auto-adopted pet %s for %s"):format(pet.Name, player.Name))
+	return true
+end
+
+
 
 function WildPetManager:SpawnWildPet(preferredSpawnArea)
 	-- Check if we have spawn areas and haven't reached the limit
@@ -909,7 +950,7 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 		print(("[WildPetManager] Pet %s adopted by %s!"):format(pet.Name, player.Name))
 
 		-- Optional: Give adoption bonus XP
-		self.PetStateManager:AddXP(pet, 50) -- Adoption bonus
+		self.PetStateManager:AddXP(pet, 1) -- Adoption bonus
 		if self.PetMoodVisualManager and self.PetMoodVisualManager.UpdatePetVisuals then
 			task.defer(function()
 				pcall(function()
