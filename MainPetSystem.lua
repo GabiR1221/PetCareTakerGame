@@ -60,8 +60,103 @@ local petGroundConnected = {}
 local petGroundXPTasks = {}
 local petGroundDirtinessTasks = {}
 local petPickupPromptConns = {}
+local attachDropPickupPrompt
 
-local function attachDropPickupPrompt(petModel, ownerUserId)
+local function getTycoonReturnPartForPlayer(userId)
+	local tycoonModel = TycoonUtils:FindTycoonByOwnerId(userId)
+	local desk = nil
+	if tycoonModel then
+		local ess = TycoonUtils:FindEssentialsInModel(tycoonModel)
+		desk = TycoonUtils:FindDeskInEssentials(ess)
+	else
+		local fallbackTycoon, fallbackDesk = TycoonUtils:FindTycoonByOwnerIdWithDesk(userId)
+		tycoonModel = fallbackTycoon
+		desk = fallbackDesk
+	end
+	if not tycoonModel then
+		return nil, nil, nil
+	end
+	local returnPart = TycoonUtils:GetPreferredReturnPartForTycoon(tycoonModel, desk)
+	return tycoonModel, returnPart, desk
+end
+
+local function canPlayerDropCarriedPet(player, carriedPet)
+	if not player or not carriedPet then return false end
+	local state = petState[carriedPet]
+	if not state then return false end
+	if state.ownerUserId and tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return false
+	end
+	return state.wild ~= true
+end
+
+local function dropCarriedPet(player, options)
+	options = options or {}
+	local carriedPet = carryingPetByUserId[player.UserId]
+	if not carriedPet or not carriedPet.Parent then return false end
+	local state = petState[carriedPet]
+	if not state then return false end
+	if state.ownerUserId and tostring(state.ownerUserId) ~= tostring(player.UserId) then return false end
+	if options.blockWildDrop and state.wild then return false end
+
+	local character = player.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	if not root then return false end
+
+	PetAttachmentManager:DetachPetFromPlayer(carriedPet)
+	carriedPet.Parent = workspace
+
+	pcall(function()
+		PetRigManager:EnsurePetRig(carriedPet)
+		PetAnimationManager:SetupAnimatorForPet(carriedPet)
+	end)
+
+	local dropPos = root.Position + (root.CFrame.LookVector * 3)
+	if options.forcePosition and typeof(options.forcePosition) == "Vector3" then
+		dropPos = options.forcePosition
+	end
+
+	if carriedPet.PrimaryPart then
+		local yOffset = (carriedPet.PrimaryPart.Size.Y * 0.5) + 0.3
+		carriedPet:SetPrimaryPartCFrame(CFrame.new(dropPos + Vector3.new(0, yOffset, 0)))
+		pcall(function()
+			carriedPet.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
+			carriedPet.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
+		end)
+	end
+
+	state.location = "free"
+	state.npc = nil
+	state.shower = nil
+
+	PetMovement.StartWandering(carriedPet)
+	attachDropPickupPrompt(carriedPet, state.ownerUserId or player.UserId)
+	PetStateManager:SendStateToOwner(carriedPet)
+	return true
+end
+
+local function isInsideTycoonBounds(rootPart, tycoonModel, returnPart)
+	if not rootPart or not tycoonModel then return true end
+	if returnPart and returnPart:IsA("BasePart") then
+		local maxCarryDistance = tonumber(tycoonModel:GetAttribute("CarryBoundaryRadius")) or 180
+		if (rootPart.Position - returnPart.Position).Magnitude > maxCarryDistance then
+			return false
+		end
+	end
+	local ok, boxCFrame, boxSize = pcall(function()
+		return tycoonModel:GetBoundingBox()
+	end)
+	if not ok or not boxCFrame or not boxSize then
+		return true
+	end
+	local localPoint = boxCFrame:PointToObjectSpace(rootPart.Position)
+	local margin = 6
+	return math.abs(localPoint.X) <= (boxSize.X * 0.5 + margin)
+		and math.abs(localPoint.Y) <= (boxSize.Y * 0.5 + margin)
+		and math.abs(localPoint.Z) <= (boxSize.Z * 0.5 + margin)
+end
+
+function attachDropPickupPrompt(petModel, ownerUserId)
 	if not petModel or not petModel:IsA("Model") then return end
 
 	local existingHelper = petModel:FindFirstChild("PetPickupPart")
@@ -180,47 +275,14 @@ petCarryEvent.OnServerEvent:Connect(function(player, action)
 		local carriedPet = carryingPetByUserId[player.UserId]
 		local currentlyCarrying = carriedPet ~= nil
 		local petName = currentlyCarrying and tostring(carriedPet.Name) or nil
-		petCarryEvent:FireClient(player, "CarryState", currentlyCarrying, petName)
+		local canDrop = currentlyCarrying and canPlayerDropCarriedPet(player, carriedPet) or false
+		petCarryEvent:FireClient(player, "CarryState", currentlyCarrying, petName, canDrop)
 		return
 	end
 	if action ~= "DropPet" then return end
 	if not player then return end
 
-	local carriedPet = carryingPetByUserId[player.UserId]
-	if not carriedPet or not carriedPet.Parent then return end
-	local state = petState[carriedPet]
-	if not state then return end
-	if state.ownerUserId and tostring(state.ownerUserId) ~= tostring(player.UserId) then return end
-
-	local character = player.Character
-	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
-	if not root then return end
-
-	PetAttachmentManager:DetachPetFromPlayer(carriedPet)
-	carriedPet.Parent = workspace
-
-	pcall(function()
-		PetRigManager:EnsurePetRig(carriedPet)
-		PetAnimationManager:SetupAnimatorForPet(carriedPet)
-	end)
-
-	if carriedPet.PrimaryPart then
-		local dropPos = root.Position + (root.CFrame.LookVector * 3)
-		local yOffset = (carriedPet.PrimaryPart.Size.Y * 0.5) + 0.3
-		carriedPet:SetPrimaryPartCFrame(CFrame.new(dropPos + Vector3.new(0, yOffset, 0)))
-		pcall(function()
-			carriedPet.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
-			carriedPet.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
-		end)
-	end
-
-	state.location = "free"
-	state.npc = nil
-	state.shower = nil
-
-	PetMovement.StartWandering(carriedPet)
-	attachDropPickupPrompt(carriedPet, state.ownerUserId or player.UserId)
-	PetStateManager:SendStateToOwner(carriedPet)
+	dropCarriedPet(player, { blockWildDrop = true })
 end)
 
 if petStateEvent then
@@ -264,6 +326,27 @@ end
 			task.wait(6)
 		end
 	end)
+	
+	task.spawn(function()
+		while true do
+			for _, player in ipairs(Players:GetPlayers()) do
+				local carriedPet = carryingPetByUserId[player.UserId]
+				if carriedPet and carriedPet.Parent then
+					local character = player.Character
+					local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+					if root then
+						local tycoonModel, returnPart = getTycoonReturnPartForPlayer(player.UserId)
+						if tycoonModel and returnPart and not isInsideTycoonBounds(root, tycoonModel, returnPart) then
+							dropCarriedPet(player, { forcePosition = returnPart.Position })
+						end
+					end
+				end
+			end
+			task.wait(0.5)
+		end
+	end)
+
+
 
 	Players.PlayerAdded:Connect(function(player)
 			player.CharacterAdded:Connect(function(character)
