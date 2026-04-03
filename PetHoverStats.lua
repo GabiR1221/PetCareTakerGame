@@ -7,10 +7,12 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local mouse = player:GetMouse()
 local petEvent = ReplicatedStorage:WaitForChild("PetStateEvent")
+local carryEvent = ReplicatedStorage:WaitForChild("PetCarryEvent")
 
 local knownPets = {} -- petInstance -> latest payload table
 local hoveredPet = nil
 local menuOpenPet = nil
+local currentCarriedPet = nil
 
 -- Create GUI
 local playerGui = player:WaitForChild("PlayerGui")
@@ -227,24 +229,98 @@ petEvent.OnClientEvent:Connect(function(action, pet, payload)
 	end
 end)
 
-RunService.RenderStepped:Connect(function()
-	local target = mouse.Target
-	local newHover = nil
-	if target then
-		local p = target
-		while p and p.Parent do
-			if p:IsA("Model") then
-				if knownPets[p] then newHover = p break end
-			else
-				local ancestor = p
-				while ancestor and not ancestor:IsA("Model") do
-					ancestor = ancestor.Parent
-				end
-				if ancestor and knownPets[ancestor] then newHover = ancestor break end
-			end
-			p = p.Parent
+local function requestOwnedPetStates()
+	pcall(function()
+		petEvent:FireServer("RequestOwnedPetsState")
+	end)
+end
+
+requestOwnedPetStates()
+task.spawn(function()
+	while true do
+		task.wait(6)
+		requestOwnedPetStates()
+	end
+end)
+
+
+carryEvent.OnClientEvent:Connect(function(action, isCarrying, petName)
+	if action ~= "CarryState" then return end
+	if not isCarrying then
+		currentCarriedPet = nil
+		return
+	end
+	if currentCarriedPet and currentCarriedPet.Parent and knownPets[currentCarriedPet] then
+		return
+	end
+
+	for pet in pairs(knownPets) do
+		if pet and pet.Parent and (not petName or pet.Name == petName) then
+			currentCarriedPet = pet
+			return
 		end
 	end
+	currentCarriedPet = nil
+end)
+
+local function resolveHoverFromMouseTarget()
+	local target = mouse.Target
+	if not target then return nil end
+
+	local p = target
+	while p and p.Parent do
+		if p:IsA("Model") then
+			if knownPets[p] then return p end
+		else
+			local ancestor = p
+			while ancestor and not ancestor:IsA("Model") do
+				ancestor = ancestor.Parent
+			end
+			if ancestor and knownPets[ancestor] then return ancestor end
+		end
+		p = p.Parent
+	end
+	return nil
+end
+
+local function resolveHoverFromCarriedPetProjection()
+	local pet = currentCarriedPet
+	local camera = workspace.CurrentCamera
+	if not pet or not pet.Parent or not camera then return nil end
+	if not knownPets[pet] then return nil end
+
+	local primary = pet.PrimaryPart or pet:FindFirstChildWhichIsA("BasePart")
+	if not primary then return nil end
+
+	local viewportPos, onScreen = camera:WorldToViewportPoint(primary.Position)
+	if not onScreen then return nil end
+
+	local dx = viewportPos.X - mouse.X
+	local dy = viewportPos.Y - mouse.Y
+	local dist = math.sqrt((dx * dx) + (dy * dy))
+	if dist <= 85 then
+		return pet
+	end
+	return nil
+end
+
+RunService.RenderStepped:Connect(function()
+	for pet in pairs(knownPets) do
+		if not pet or not pet.Parent then
+			knownPets[pet] = nil
+			if hoveredPet == pet then hoveredPet = nil end
+			if menuOpenPet == pet then
+				menuOpenPet = nil
+				menuFrame.Visible = false
+			end
+			if currentCarriedPet == pet then
+				currentCarriedPet = nil
+			end
+		end
+	end
+	
+	local newHover = resolveHoverFromMouseTarget() or resolveHoverFromCarriedPetProjection()
+
 
 	if newHover ~= hoveredPet then
 		hoveredPet = newHover
