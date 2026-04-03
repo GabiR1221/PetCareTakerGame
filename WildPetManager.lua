@@ -31,6 +31,7 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.PetRigManager = require(script.Parent.PetRigManager)
 	self.PetAnimationManager = require(script.Parent.PetAnimationManager)
+	self.PetMoodVisualManager = require(script.Parent.PetMoodVisualManager)
 	self.PromptManager = require(script.Parent.PromptManager)
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
 	self.TycoonUtils:Initialize(config)  -- Initialize TycoonUtils with the config
@@ -38,8 +39,12 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.PetStandManager = require(script.Parent.PetStandManager)
 	-- Settings
 	self.WILD_PET_SPAWN_AREA_TAG = "WildPetSpawnArea"
-	self.MAX_WILD_PETS = 10
+	self.MAX_WILD_PETS = 20
 	self.SPAWN_INTERVAL = 30 -- seconds
+	self.MIN_SPAWN_INTERVAL = 12
+	self.MAX_SPAWN_INTERVAL = 30
+	self.INITIAL_SPAWN_PER_ZONE = 3
+	self.MAX_WILD_PETS_PER_AREA = 3
 	self.WANDER_RADIUS = 50
 	self.WILD_PET_MODELS = ServerStorage:FindFirstChild("WildPetModels") or ServerStorage:FindFirstChild("PetModels")
 	self.WILD_PET_ZONE_FOLDER = "Zones"
@@ -59,6 +64,111 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self:BindRebirthResetEvent()
 	self:StartSpawning()
 end
+
+function WildPetManager:CountWildPets()
+	local count = 0
+	for petModel, spawnArea in pairs(self.wildPets) do
+		if petModel and petModel.Parent and spawnArea and spawnArea.Parent then
+			count += 1
+		end
+	end
+	return count
+end
+
+function WildPetManager:CountWildPetsInSpawnArea(spawnArea)
+	if not spawnArea then return 0 end
+	local count = 0
+	for petModel, area in pairs(self.wildPets) do
+		if petModel and petModel.Parent and area == spawnArea then
+			count += 1
+		end
+	end
+	return count
+end
+
+function WildPetManager:CleanupDestroyedWildPets()
+	for pet, _ in pairs(self.wildPets) do
+		if not pet or not pet.Parent then
+			self.wildPets[pet] = nil
+			if self.wildPetPickupConns[pet] then
+				self.wildPetPickupConns[pet]:Disconnect()
+				self.wildPetPickupConns[pet] = nil
+			end
+		end
+	end
+end
+
+function WildPetManager:GetRandomSpawnInterval()
+	local minInterval = tonumber(self.MIN_SPAWN_INTERVAL) or tonumber(self.SPAWN_INTERVAL) or 30
+	local maxInterval = tonumber(self.MAX_SPAWN_INTERVAL) or minInterval
+	if maxInterval < minInterval then
+		minInterval, maxInterval = maxInterval, minInterval
+	end
+	return minInterval + math.random() * (maxInterval - minInterval)
+end
+
+function WildPetManager:FindSafeSpawnPosition(spawnArea, pet)
+	if not spawnArea or not pet then return nil end
+
+	local extents = pet:GetExtentsSize()
+	local petHalfHeight = math.max(1, (extents.Y * 0.5))
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = {pet}
+
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+	overlapParams.FilterDescendantsInstances = {pet, spawnArea}
+
+	local halfSize = spawnArea.Size * 0.5
+	local tries = 20
+	for _ = 1, tries do
+		local randomOffsetX = (math.random() - 0.5) * spawnArea.Size.X
+		local randomOffsetZ = (math.random() - 0.5) * spawnArea.Size.Z
+		local sampleOrigin = spawnArea.Position + Vector3.new(randomOffsetX, halfSize.Y + 25, randomOffsetZ)
+
+		local rayResult = workspace:Raycast(sampleOrigin, Vector3.new(0, -80, 0), raycastParams)
+		if rayResult and rayResult.Position then
+			local candidatePos = Vector3.new(
+				rayResult.Position.X,
+				rayResult.Position.Y + petHalfHeight + 0.1,
+				rayResult.Position.Z
+			)
+
+			local clearanceSize = extents + Vector3.new(0.75, 0.75, 0.75)
+			local hits = workspace:GetPartBoundsInBox(CFrame.new(candidatePos), clearanceSize, overlapParams)
+			local blocked = false
+			for _, hit in ipairs(hits) do
+				if hit and hit.CanCollide and hit:IsDescendantOf(workspace) then
+					blocked = true
+					break
+				end
+			end
+
+			if not blocked then
+				return candidatePos
+			end
+		end
+	end
+
+	return nil
+end
+
+
+function WildPetManager:_resetDirtVisualCache(pet)
+	if not pet or not pet:IsA("Model") then return end
+	local dirtFolder = pet:FindFirstChild("Dirt")
+	if not dirtFolder then return end
+
+	for _, item in ipairs(dirtFolder:GetDescendants()) do
+		if item:IsA("BasePart") then
+			item:SetAttribute("BaseDirtTransparency", nil)
+			item:SetAttribute("ShowerStartTransparency", nil)
+		end
+	end
+end
+
 
 function WildPetManager:BindRebirthResetEvent()
 	local resetEvent = ReplicatedStorage:FindFirstChild("PetSystemClearPlayerPets")
@@ -550,33 +660,33 @@ function WildPetManager:NormalizeRunnerCaughtPetHold(player)
 end
 
 
-function WildPetManager:SpawnWildPet()
+function WildPetManager:SpawnWildPet(preferredSpawnArea)
 	-- Check if we have spawn areas and haven't reached the limit
 	if #self.spawnAreas == 0 then
 		print("[WildPetManager] No spawn areas found")
 		return
 	end
 
-	if #self.wildPets >= self.MAX_WILD_PETS then
+	if self:CountWildPets() >= self.MAX_WILD_PETS then
 		print(("[WildPetManager] Max wild pets reached (%d)"):format(self.MAX_WILD_PETS))
 		return
 	end
 
-	-- Select a random spawn area
-	local spawnArea = self.spawnAreas[math.random(1, #self.spawnAreas)]
+	-- Select a spawn area (preferred first, random fallback).
+	local spawnArea = preferredSpawnArea
+	if not spawnArea then
+		spawnArea = self.spawnAreas[math.random(1, #self.spawnAreas)]
+	end
 	if not spawnArea or not spawnArea:IsA("BasePart") then return end
+	local maxPerArea = tonumber(spawnArea:GetAttribute("MaxWildPets")) or self.MAX_WILD_PETS_PER_AREA
+	if self:CountWildPetsInSpawnArea(spawnArea) >= maxPerArea then
+		return
+	end
 
 	-- Get a random pet model
 	if not self.WILD_PET_MODELS then
 		print("[WildPetManager] No WildPetModels/PetModels folder found in ServerStorage")
 		return
-	end
-
-	local petModels = {}
-	for _, child in ipairs(self.WILD_PET_MODELS:GetChildren()) do
-		if child:IsA("Model") then
-			table.insert(petModels, child)
-		end
 	end
 	
 	local templates = self:GetTemplatesForSpawnArea(spawnArea)
@@ -601,15 +711,11 @@ function WildPetManager:SpawnWildPet()
 	end
 	local pet = selectedModel:Clone()
 
-	-- Generate a random position within the spawn area
-	local min = spawnArea.Position - spawnArea.Size / 2
-	local max = spawnArea.Position + spawnArea.Size / 2
-
-	local randomPos = Vector3.new(
-		math.random(min.X, max.X),
-		spawnArea.Position.Y + spawnArea.Size.Y / 2 + 2, -- Spawn on top of the area
-		math.random(min.Z, max.Z)
-	)
+	local randomPos = self:FindSafeSpawnPosition(spawnArea, pet)
+	if not randomPos then
+		pet:Destroy()
+		return
+	end
 	
 
 	-- Position the pet
@@ -784,6 +890,7 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 		self.petState[pet].ownerUserId = player.UserId
 		self.petState[pet].wild = false
 		self.petState[pet].location = "player"
+		self:_resetDirtVisualCache(pet)
 
 		-- Update carrying tables
 		self.carryingPetByUserId[player.UserId] = pet
@@ -803,6 +910,13 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 
 		-- Optional: Give adoption bonus XP
 		self.PetStateManager:AddXP(pet, 50) -- Adoption bonus
+		if self.PetMoodVisualManager and self.PetMoodVisualManager.UpdatePetVisuals then
+			task.defer(function()
+				pcall(function()
+					self.PetMoodVisualManager:UpdatePetVisuals(pet)
+				end)
+			end)
+		end
 
 		-- Create new pickup prompt for the now-owned pet
 		self:CreateOwnedPetPickupPrompt(pet, adoptionMat.Position)
@@ -1006,38 +1120,29 @@ end
 
 function WildPetManager:StartSpawning()
 	task.spawn(function()
-		-- Initial spawn
-		for i = 1, math.min(3, self.MAX_WILD_PETS) do
-			task.wait(2)
-			self:SpawnWildPet()
-		end
+		-- Initial spawn per zone/spawn area
+		for _, spawnArea in ipairs(self.spawnAreas) do
+			local perAreaTarget = tonumber(spawnArea:GetAttribute("InitialWildPets")) or self.INITIAL_SPAWN_PER_ZONE
+			for _ = 1, perAreaTarget do
+				if self:CountWildPets() >= self.MAX_WILD_PETS then
+					break
+				end
+				self:SpawnWildPet(spawnArea)
+				task.wait(0.2 + (math.random() * 0.4))
+			end
+		end			
 
-		-- Periodic spawning
-		while true do
-			task.wait(self.SPAWN_INTERVAL)
-
-			-- Remove any destroyed wild pets
-			for pet, _ in pairs(self.wildPets) do
-				if not pet or not pet.Parent then
-					self.wildPets[pet] = nil
-					if self.wildPetPickupConns[pet] then
-						self.wildPetPickupConns[pet]:Disconnect()
-						self.wildPetPickupConns[pet] = nil
+		-- Independent periodic spawning per area with random interval
+		for _, spawnArea in ipairs(self.spawnAreas) do
+			task.spawn(function()
+				while spawnArea and spawnArea.Parent do
+					task.wait(self:GetRandomSpawnInterval())
+					self:CleanupDestroyedWildPets()
+					if self:CountWildPets() < self.MAX_WILD_PETS then
+						self:SpawnWildPet(spawnArea)
 					end
 				end
-			end
-
-			-- Spawn new ones if under limit
-			local currentCount = 0
-			for _ in pairs(self.wildPets) do currentCount += 1 end
-
-			if currentCount < self.MAX_WILD_PETS then
-				local toSpawn = math.min(2, self.MAX_WILD_PETS - currentCount)
-				for i = 1, toSpawn do
-					task.wait(1)
-					self:SpawnWildPet()
-				end
-			end
+			end)
 		end
 	end)
 end
