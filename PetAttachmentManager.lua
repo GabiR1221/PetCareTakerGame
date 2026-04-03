@@ -21,11 +21,15 @@ function PetAttachmentManager:_notifyCarryState(userId, isCarrying, petModel)
 	local player = self.Players:GetPlayerByUserId(tonumber(userId) or -1)
 	if not player then return end
 	local petName = nil
+	local canDrop = isCarrying == true
 	if petModel and petModel.Name then
 		petName = tostring(petModel.Name)
 	end
+	if petModel and self.petState and self.petState[petModel] and self.petState[petModel].wild == true then
+		canDrop = false
+	end
 	pcall(function()
-		self.petCarryRemote:FireClient(player, "CarryState", isCarrying == true, petName)
+		self.petCarryRemote:FireClient(player, "CarryState", isCarrying == true, petName, canDrop)
 	end)
 end
 
