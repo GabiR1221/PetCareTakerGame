@@ -259,6 +259,18 @@ local function clearLivePetsForPlayer(player)
 	end
 end
 
+local function applyMainSystemRebirth(player)
+	if not player then return end
+	local dataFolder = player:FindFirstChild("Data")
+	if not dataFolder then return end
+	local playerData = dataFolder:FindFirstChild("PlayerData")
+	if not playerData then return end
+
+	local rebirthValue = playerData:FindFirstChild("Rebirth")
+	if rebirthValue and (rebirthValue:IsA("IntValue") or rebirthValue:IsA("NumberValue")) then
+		rebirthValue.Value = (tonumber(rebirthValue.Value) or 0) + 1
+	end
+end
 
 local Tycoon = {}
 Tycoon.__index = Tycoon
@@ -665,6 +677,7 @@ function Tycoon:Rebirth()
 	end
 
 	playerFolder:SetAttribute(configModule.RebirthsName, rebirthCount + 1)
+	applyMainSystemRebirth(player)
 
 	-- Rebirth wipe: remove owned pets from memory + datastore
 	clearLivePetsForPlayer(player)
