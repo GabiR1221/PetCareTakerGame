@@ -1,7 +1,6 @@
 -- clientmainRebirthTYCOONSCRIPT
 local ProximityPromptService = game:GetService("ProximityPromptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 local SoundService = game:GetService("SoundService")
 local Players = game:GetService("Players")
 
@@ -10,35 +9,19 @@ local player = Players.LocalPlayer
 local rebirthEvent = ReplicatedStorage:WaitForChild("TycoonRebirthEvent")
 local rebirthGui = script.Parent
 local rebirthButton = rebirthGui:WaitForChild("RebirthButton")
-local originalButtonSize = rebirthButton.Size
 local soundEvent = ReplicatedStorage:WaitForChild("TycoonSoundEvent")
 local animationEvent = ReplicatedStorage:WaitForChild("TycoonObjectAnimationEvent")
 local getModuleFunction = ReplicatedStorage:WaitForChild("TycoonGetObjectAnimationsFunction")
 local objectAnimations = require(getModuleFunction:InvokeServer())
 
--- Displays the rebirth button
+-- We now use the simulator rebirth button as the single source of truth.
+-- Keep the old tycoon GUI button hidden so users cannot trigger two different flows.
+rebirthButton.Visible = false
+
 local function ShowRebirthButton()
-	if rebirthButton.Visible == true then return end
-
-	rebirthButton.Visible = true
-	
-	-- Remove the below 4 lines if you don't want the button to animate
-	rebirthButton.Size = UDim2.new(0, 0, 0, 0)
-	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-	local buttonTween = TweenService:Create(rebirthButton, tweenInfo, {Size = originalButtonSize})
-	buttonTween:Play()
-end
-
--- Fires the rebirth event on the server and hides the rebirth button
-local function Rebirth()
-	rebirthEvent:FireServer()
-	
-	-- Remove the below 6 lines if you don't want the button to animate
-	rebirthButton.Size = originalButtonSize
-	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-	local buttonTween = TweenService:Create(rebirthButton, tweenInfo, {Size = UDim2.new(0, 0, 0, 0)})
-	buttonTween:Play()
-	task.wait(0.2)
+	if rebirthGui:IsA("GuiObject") then
+		rebirthGui.Visible = true
+	end
 	rebirthButton.Visible = false
 end
 
@@ -104,7 +87,6 @@ end
 
 -- Connections
 rebirthEvent.OnClientEvent:Connect(ShowRebirthButton)
-rebirthButton.MouseButton1Click:Connect(Rebirth)
 soundEvent.OnClientEvent:Connect(PlaySound)
 animationEvent.OnClientEvent:Connect(PlayAnimation)
 ProximityPromptService.PromptShown:Connect(UpdatePromptText)
