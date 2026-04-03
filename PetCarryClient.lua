@@ -9,6 +9,7 @@ local player = Players.LocalPlayer
 local carryRemote = ReplicatedStorage:WaitForChild("PetCarryEvent")
 local isCarrying = false
 local carriedPetName = nil
+local canDropCarriedPet = false
 
 local playerGui = player:WaitForChild("PlayerGui")
 local gui = Instance.new("ScreenGui")
@@ -32,20 +33,26 @@ dropButton.Activated:Connect(function()
 	carryRemote:FireServer("DropPet")
 end)
 
-carryRemote.OnClientEvent:Connect(function(action, value, petName)
+carryRemote.OnClientEvent:Connect(function(action, value, petName, canDrop)
 	if action == "CarryState" then
 		isCarrying = value == true
 		carriedPetName = isCarrying and (petName or "Pet") or nil
+		canDropCarriedPet = (isCarrying and canDrop == true) or false
 	end
 end)
 
 RunService.RenderStepped:Connect(function()
-	dropButton.Visible = isCarrying
+	dropButton.Visible = isCarrying and canDropCarriedPet
 	dropButton.AutoButtonColor = true
 	dropButton.Active = true
 	if isCarrying then
-		dropButton.Text = ("Drop Pet (%s)"):format(tostring(carriedPetName or "Pet"))
-		dropButton.BackgroundColor3 = Color3.fromRGB(190, 70, 70)
+		if canDropCarriedPet then
+			dropButton.Text = ("Drop Pet (%s)"):format(tostring(carriedPetName or "Pet"))
+			dropButton.BackgroundColor3 = Color3.fromRGB(190, 70, 70)
+		else
+			dropButton.Text = "Adopt pet first"
+			dropButton.BackgroundColor3 = Color3.fromRGB(90, 90, 90)
+		end
 	else
 		dropButton.Text = "Drop Pet"
 		dropButton.BackgroundColor3 = Color3.fromRGB(90, 90, 90)
