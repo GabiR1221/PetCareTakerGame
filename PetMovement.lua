@@ -15,6 +15,8 @@ local WALK_SPEED_MAX = 7.2
 local MOVE_TIMEOUT = 8
 local CLOSE_DIST = 1.5
 local FLOOR_PADDING = 2
+local OBSTACLE_CLEARANCE = Vector3.new(2.8, 3.4, 2.8)
+local TARGET_SAMPLE_ATTEMPTS = 8
 
 local WALK_ANIM_BASE_SPEED = 6.5
 local TURN_RESPONSE = 10 -- smaller = smoother/slower turning
@@ -474,15 +476,41 @@ local function moveToPositionSmooth(state, targetPos, speed)
 end
 
 local function sampleWanderTarget(anchorPos, radius, bounds)
-	local angle = math.random() * math.pi * 2
-	local sampledRadius = math.sqrt(math.random()) * radius
-	local target = anchorPos + Vector3.new(math.cos(angle) * sampledRadius, 0, math.sin(angle) * sampledRadius)
-
-	if bounds and bounds.floorPart then
-		target = clampPointToPartXZ(bounds.floorPart, target, FLOOR_PADDING)
+	local floorPart = bounds and bounds.floorPart or nil
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+	if floorPart then
+		overlapParams.FilterDescendantsInstances = { floorPart }
 	end
 
-	return target
+	for _ = 1, TARGET_SAMPLE_ATTEMPTS do
+		local angle = math.random() * math.pi * 2
+		local sampledRadius = math.sqrt(math.random()) * radius
+		local target = anchorPos + Vector3.new(math.cos(angle) * sampledRadius, 0, math.sin(angle) * sampledRadius)
+
+		if floorPart then
+			target = clampPointToPartXZ(floorPart, target, FLOOR_PADDING)
+		end
+
+		local clearanceCenter = target + Vector3.new(0, OBSTACLE_CLEARANCE.Y * 0.5, 0)
+		local nearby = workspace:GetPartBoundsInBox(CFrame.new(clearanceCenter), OBSTACLE_CLEARANCE, overlapParams)
+		local blocked = false
+		for _, part in ipairs(nearby) do
+			if part and part.CanCollide and (not floorPart or part ~= floorPart) then
+				blocked = true
+				break
+			end
+		end
+		if not blocked then
+			return target
+		end
+	end
+
+	local fallback = anchorPos
+	if floorPart then
+		fallback = clampPointToPartXZ(floorPart, fallback, FLOOR_PADDING)
+	end
+	return fallback
 end
 
 local function doIdlePause(state, anchorPos)
@@ -544,6 +572,14 @@ local function cleanupState(pet)
 	petTasks[pet] = nil
 end
 
+local function cleanupStateIfCurrent(pet, expectedState)
+	local state = petTasks[pet]
+	if not state then return end
+	if state ~= expectedState then return end
+	cleanupState(pet)
+end
+
+
 function PetMovement.StopWandering(pet)
 	if not pet then return end
 	cleanupState(pet)
@@ -601,9 +637,9 @@ local function startWanderingInternal(pet, spawnPos, options)
 	end)
 
 	task.spawn(function()
-		while petTasks[pet] and petTasks[pet].wanderRunning and pet and pet.Parent do
+		while pet and pet.Parent do
 			local currentState = petTasks[pet]
-			if not currentState then
+			if not currentState or currentState ~= state or not currentState.wanderRunning then
 				break
 			end
 
@@ -613,7 +649,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 			local path = PathfindingService:CreatePath({
 				AgentRadius = 2,
 				AgentHeight = 3,
-				AgentCanJump = true,
+				AgentCanJump = false,
 				WaypointSpacing = 2,
 			})
 
@@ -625,7 +661,8 @@ local function startWanderingInternal(pet, spawnPos, options)
 				local waypoints = path:GetWaypoints()
 
 				for i, wp in ipairs(waypoints) do
-					if not (petTasks[pet] and petTasks[pet].wanderRunning) or not pet.Parent then
+					local liveState = petTasks[pet]
+					if not liveState or liveState ~= state or not liveState.wanderRunning or not pet.Parent then
 						break
 					end
 
@@ -661,7 +698,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 			task.wait(pause)
 		end
 
-		cleanupState(pet)
+		cleanupStateIfCurrent(pet, state)
 	end)
 end
 
