@@ -635,16 +635,25 @@ function SprintRunManager:GoBackToPlot(player)
 	
 	local tycoonUtils = self.WildPetManager and self.WildPetManager.TycoonUtils
 	local desk
+	local tycoonModel
 
 	if tycoonUtils then
-		local _, foundDesk = tycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
+		local foundTycoon, foundDesk = tycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
+		tycoonModel = foundTycoon
 		desk = foundDesk
 	end
 
-	if desk and player.Character then
+	if self.WildPetManager then
+		pcall(function()
+			self.WildPetManager:AutoAdoptCarriedWildPet(player)
+		end)
+	end
+
+	local returnPart = tycoonUtils and tycoonUtils:GetPreferredReturnPartForTycoon(tycoonModel, desk) or desk
+	if returnPart and player.Character then
 		local root = player.Character:FindFirstChild("HumanoidRootPart") or player.Character.PrimaryPart
 		if root then
-			root.CFrame = desk.CFrame + Vector3.new(0, 4, 0)
+			root.CFrame = returnPart.CFrame + Vector3.new(0, 4, 0)
 		end
 	end
 
