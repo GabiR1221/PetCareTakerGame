@@ -157,4 +157,84 @@ function TycoonUtils:FindTycoonByOwnerIdWithDesk(userId)
 	return nil, nil
 end
 
+function TycoonUtils:FindTycoonByOwnerId(userId)
+	if not userId then return nil end
+
+	local function ownerMatches(inst)
+		if not inst or not inst.FindFirstChild then return false end
+		local ownerAttr = inst:GetAttribute("OwnerId")
+		if ownerAttr and tostring(ownerAttr) == tostring(userId) then
+			return true
+		end
+		for _, nm in ipairs({"OwnerId", "Owner", "OwnerUserId"}) do
+			local child = inst:FindFirstChild(nm)
+			if child and child.Value and tostring(child.Value) == tostring(userId) then
+				return true
+			end
+		end
+		return false
+	end
+
+	local tycoonRoot = workspace:FindFirstChild("Tycoon")
+	if tycoonRoot then
+		local tycoonsFolder = tycoonRoot:FindFirstChild("Tycoons")
+		if tycoonsFolder then
+			for _, inst in ipairs(tycoonsFolder:GetChildren()) do
+				if ownerMatches(inst) then
+					return inst
+				end
+			end
+		end
+	end
+
+	local globalTycoons = workspace:FindFirstChild("Tycoons")
+	if globalTycoons then
+		for _, inst in ipairs(globalTycoons:GetChildren()) do
+			if ownerMatches(inst) then
+				return inst
+			end
+		end
+	end
+
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if ownerMatches(inst) then
+			return inst
+		end
+	end
+
+	return nil
+end
+
+function TycoonUtils:FindPartByNameInModel(model, partName)
+	if not model or not partName then return nil end
+	local direct = model:FindFirstChild(partName, true)
+	if direct and direct:IsA("BasePart") then
+		return direct
+	end
+	local lowerTarget = string.lower(tostring(partName))
+	for _, desc in ipairs(model:GetDescendants()) do
+		if desc:IsA("BasePart") and string.lower(desc.Name) == lowerTarget then
+			return desc
+		end
+	end
+	return nil
+end
+
+function TycoonUtils:GetPreferredReturnPartForTycoon(tycoonModel, fallbackDesk)
+	if not tycoonModel then
+		return fallbackDesk
+	end
+	local backSpawn = self:FindPartByNameInModel(tycoonModel, "TycoonSpawnBack")
+	if backSpawn then
+		return backSpawn
+	end
+	if fallbackDesk and fallbackDesk:IsA("BasePart") then
+		return fallbackDesk
+	end
+	local ess = self:FindEssentialsInModel(tycoonModel)
+	local desk = self:FindDeskInEssentials(ess)
+	return desk
+end
+
+
 return TycoonUtils
