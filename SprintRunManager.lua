@@ -6,11 +6,18 @@ local CollectionService = game:GetService("CollectionService")
 
 local START_LINE_TAG = "PetRunStartLine"
 local START_LINE_NAME = "PetRunStartLine"
+local OBSTACLE_ZONE_TAG = "WildPetZone"
+local OBSTACLE_ZONE_NAME = "WildPetZonePart"
 
 local RUN_SPEED = 28
 local DEFAULT_WALK_SPEED = 16
 local DEFAULT_STAMINA = 50
 local STAMINA_DRAIN_PER_SECOND = 14
+local OBSTACLE_RESPAWN_DELAY = 0.75
+local DEFAULT_ZONE_MAX_OBSTACLES = 4
+local DEFAULT_OBSTACLE_STAMINA_DAMAGE = 8
+local DEFAULT_OBSTACLE_SPEED_MULTIPLIER = 0.55
+local OBSTACLE_SPEED_PENALTY_DURATION = 2
 local JUMP_DURATION = 1
 local JUMP_FORCE_DURATION = 0.5
 local JUMP_PUSH_FORCE = 36
@@ -86,12 +93,19 @@ function SprintRunManager:Initialize(playersService, wildPetManager)
 	self.playerState = {}
 	self.startLines = {}
 	self.startLineConns = {}
+	self.obstacleZones = {}
+	self.obstacleRng = Random.new()
+	self.liveObstacleFolder = workspace:FindFirstChild("RunnerLiveObstacles") or Instance.new("Folder")
+	self.liveObstacleFolder.Name = "RunnerLiveObstacles"
+	self.liveObstacleFolder.Parent = workspace
 	self.gemShopFolder = ReplicatedStorage:FindFirstChild("GemShop")
+	self.obstacleTemplatesRoot = game:GetService("ServerStorage"):FindFirstChild("RunnerObstacleModels")
 
 	self.stateRemote = getOrCreateRemote("RunnerStateEvent")
 	self.actionRemote = getOrCreateRemote("RunnerActionEvent")
 
 	self:ScanStartLines()
+	self:ScanObstacleZones()
 	self:_connectRemotes()
 	self:_connectPlayers()
 	self:_startHeartbeat()
@@ -143,6 +157,7 @@ function SprintRunManager:_startHeartbeat()
 				hum.JumpHeight = 0
 				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
 				player:SetAttribute("RunnerJumping", false)
+				self:_finalizeJumpCarryPose(player)
 				self.stateRemote:FireClient(player, "JumpState", false)
 			end
 			if state.jumpForceEndAt and os.clock() >= state.jumpForceEndAt then
@@ -162,6 +177,10 @@ function SprintRunManager:_startHeartbeat()
 
 
 			local speed = state.runSpeed or RUN_SPEED
+			if (state.speedPenaltyUntil or 0) > os.clock() then
+				local penaltyMultiplier = state.speedPenaltyMultiplier or DEFAULT_OBSTACLE_SPEED_MULTIPLIER
+				speed *= math.clamp(penaltyMultiplier, 0.1, 1)
+			end
 			local canMove = (not state.exhausted) and (not state.jumping)
 			if not canMove then
 				if hum.WalkSpeed ~= 0 then
@@ -200,8 +219,215 @@ function SprintRunManager:_startHeartbeat()
 				})
 			end
 		end
+		self:_tickObstacleZones()
 	end)
 end
+
+function SprintRunManager:ScanObstacleZones()
+	for _, zone in ipairs(CollectionService:GetTagged(OBSTACLE_ZONE_TAG)) do
+		if zone:IsA("BasePart") then
+			self:_registerObstacleZone(zone)
+		end
+	end
+
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("BasePart") and inst.Name == OBSTACLE_ZONE_NAME then
+			self:_registerObstacleZone(inst)
+		end
+	end
+end
+
+function SprintRunManager:_registerObstacleZone(zonePart)
+	if self.obstacleZones[zonePart] then return end
+
+	self.obstacleZones[zonePart] = {
+		part = zonePart,
+		active = {},
+		nextSpawnAt = 0,
+	}
+
+	zonePart.Destroying:Connect(function()
+		local zoneState = self.obstacleZones[zonePart]
+		if not zoneState then return end
+		for obstacle in pairs(zoneState.active) do
+			pcall(function() obstacle:Destroy() end)
+		end
+		self.obstacleZones[zonePart] = nil
+	end)
+end
+
+function SprintRunManager:_resolveZoneId(zonePart)
+	local zoneId = zonePart:GetAttribute("ZoneId") or zonePart:GetAttribute("WildPetZone")
+	if zoneId ~= nil and tostring(zoneId) ~= "" then
+		return tostring(zoneId)
+	end
+	return zonePart.Name
+end
+
+function SprintRunManager:_getObstacleTemplatesForZone(zonePart)
+	if not self.obstacleTemplatesRoot then
+		return {}
+	end
+
+	local templates = {}
+	local zoneId = self:_resolveZoneId(zonePart)
+	local zonesFolder = self.obstacleTemplatesRoot:FindFirstChild("Zones")
+
+	local function addTemplatesFrom(container)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Model") or child:IsA("BasePart") then
+				table.insert(templates, child)
+			end
+		end
+	end
+
+	if zonesFolder and zoneId then
+		addTemplatesFrom(zonesFolder:FindFirstChild(zoneId))
+		local numeric = tonumber(zoneId)
+		if numeric then
+			addTemplatesFrom(zonesFolder:FindFirstChild(("Zone%d"):format(numeric)))
+		end
+	end
+
+	if #templates == 0 then
+		addTemplatesFrom(self.obstacleTemplatesRoot:FindFirstChild("All"))
+	end
+	if #templates == 0 then
+		addTemplatesFrom(self.obstacleTemplatesRoot)
+	end
+	return templates
+end
+
+function SprintRunManager:_placeObstacleInZone(zonePart, obstacleModel)
+	local randomX = (self.obstacleRng:NextNumber() - 0.5) * zonePart.Size.X
+	local randomZ = (self.obstacleRng:NextNumber() - 0.5) * zonePart.Size.Z
+	local targetPos = (zonePart.CFrame * CFrame.new(randomX, 0, randomZ)).Position + Vector3.new(0, 2.5, 0)
+
+	if obstacleModel:IsA("Model") then
+		local primary = obstacleModel.PrimaryPart or obstacleModel:FindFirstChildWhichIsA("BasePart")
+		if primary then
+			if not obstacleModel.PrimaryPart then
+				obstacleModel.PrimaryPart = primary
+			end
+			obstacleModel:PivotTo(CFrame.new(targetPos))
+		end
+	elseif obstacleModel:IsA("BasePart") then
+		obstacleModel.CFrame = CFrame.new(targetPos)
+	end
+end
+
+function SprintRunManager:_connectObstacleTouch(zoneState, obstacleInstance)
+	local touchParts = {}
+	if obstacleInstance:IsA("Model") then
+		for _, desc in ipairs(obstacleInstance:GetDescendants()) do
+			if desc:IsA("BasePart") then
+				table.insert(touchParts, desc)
+			end
+		end
+	elseif obstacleInstance:IsA("BasePart") then
+		table.insert(touchParts, obstacleInstance)
+	end
+
+	local function onTouched(otherPart)
+		if not otherPart then return end
+		if obstacleInstance:GetAttribute("Consumed") then return end
+		local character = otherPart.Parent
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if not humanoid then return end
+		local player = self.Players:GetPlayerFromCharacter(character)
+		if not player then return end
+		local state = self.playerState[player]
+		if not state or not state.active then return end
+		obstacleInstance:SetAttribute("Consumed", true)
+		self:_applyObstaclePenalty(player, state, obstacleInstance)
+		self:_despawnObstacle(zoneState, obstacleInstance)
+	end
+
+	for _, part in ipairs(touchParts) do
+		part.CanTouch = true
+		part.Touched:Connect(onTouched)
+	end
+end
+
+function SprintRunManager:_spawnObstacleInZone(zoneState)
+	local zonePart = zoneState and zoneState.part
+	if not zonePart or not zonePart.Parent then return end
+
+	local templates = self:_getObstacleTemplatesForZone(zonePart)
+	if #templates == 0 then return end
+
+	local template = templates[self.obstacleRng:NextInteger(1, #templates)]
+	local obstacle = template:Clone()
+	obstacle.Parent = self.liveObstacleFolder
+	obstacle:SetAttribute("Consumed", false)
+	self:_placeObstacleInZone(zonePart, obstacle)
+	zoneState.active[obstacle] = true
+	self:_connectObstacleTouch(zoneState, obstacle)
+end
+
+function SprintRunManager:_despawnObstacle(zoneState, obstacleInstance)
+	if not zoneState or not obstacleInstance then return end
+	zoneState.active[obstacleInstance] = nil
+	pcall(function() obstacleInstance:Destroy() end)
+	zoneState.nextSpawnAt = os.clock() + OBSTACLE_RESPAWN_DELAY
+end
+
+function SprintRunManager:_applyObstaclePenalty(player, state, obstacleInstance)
+	local staminaDamage = obstacleInstance:GetAttribute("StaminaDamage")
+	if staminaDamage == nil then
+		staminaDamage = DEFAULT_OBSTACLE_STAMINA_DAMAGE
+	end
+	staminaDamage = math.max(0, tonumber(staminaDamage) or DEFAULT_OBSTACLE_STAMINA_DAMAGE)
+
+	local speedMultiplier = obstacleInstance:GetAttribute("SpeedMultiplier")
+	if speedMultiplier == nil then
+		speedMultiplier = DEFAULT_OBSTACLE_SPEED_MULTIPLIER
+	end
+	speedMultiplier = math.clamp(tonumber(speedMultiplier) or DEFAULT_OBSTACLE_SPEED_MULTIPLIER, 0.1, 1)
+
+	local now = os.clock()
+	state.currentStamina = math.max(0, (state.currentStamina or 0) - staminaDamage)
+	state.speedPenaltyUntil = now + OBSTACLE_SPEED_PENALTY_DURATION
+	state.speedPenaltyMultiplier = speedMultiplier
+	if state.currentStamina <= 0 then
+		state.exhausted = true
+	end
+
+	self.stateRemote:FireClient(player, "StaminaUpdate", true, {
+		current = state.currentStamina,
+		max = state.maxStamina or DEFAULT_STAMINA,
+		exhausted = state.exhausted == true,
+	})
+end
+
+function SprintRunManager:_tickObstacleZones()
+	local now = os.clock()
+	for zonePart, zoneState in pairs(self.obstacleZones) do
+		if not zonePart or not zonePart.Parent then
+			self.obstacleZones[zonePart] = nil
+			continue
+		end
+
+		local maxObstacles = tonumber(zonePart:GetAttribute("MaxObstacles")) or DEFAULT_ZONE_MAX_OBSTACLES
+		maxObstacles = math.max(0, math.floor(maxObstacles))
+
+		local activeCount = 0
+		for obstacleInstance in pairs(zoneState.active) do
+			if obstacleInstance and obstacleInstance.Parent then
+				activeCount += 1
+			else
+				zoneState.active[obstacleInstance] = nil
+			end
+		end
+
+		if activeCount < maxObstacles and now >= (zoneState.nextSpawnAt or 0) then
+			self:_spawnObstacleInZone(zoneState)
+			zoneState.nextSpawnAt = now + 0.1
+		end
+	end
+end
+
 
 function SprintRunManager:_clearJumpForce(state)
 	if not state then return end
@@ -214,6 +440,19 @@ function SprintRunManager:_clearJumpForce(state)
 		state.jumpAttachment = nil
 	end
 end
+
+function SprintRunManager:_finalizeJumpCarryPose(player)
+	if not player or not self.WildPetManager then return end
+	if type(self.WildPetManager.NormalizeRunnerCaughtPetHold) ~= "function" then return end
+
+	local ok, err = pcall(function()
+		self.WildPetManager:NormalizeRunnerCaughtPetHold(player)
+	end)
+	if not ok then
+		warn("[SprintRunManager] Failed to normalize runner catch carry pose:", err)
+	end
+end
+
 
 function SprintRunManager:_applyJumpForce(state, root)
 	self:_clearJumpForce(state)
@@ -322,6 +561,8 @@ function SprintRunManager:StartRunning(player, startLine)
 	state.staminaDrainPerSecond = STAMINA_DRAIN_PER_SECOND
 	state.exhausted = false
 	state.lastStaminaUpdateAt = 0
+	state.speedPenaltyUntil = 0
+	state.speedPenaltyMultiplier = 1
 
 	player:SetAttribute("RunnerJumping", false)
 	hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
@@ -418,6 +659,8 @@ function SprintRunManager:StopRunning(player, notifyClient)
 	state.jumpForceEndAt = nil
 	state.nextAllowedJumpAt = 0
 	state.exhausted = false
+	state.speedPenaltyUntil = 0
+	state.speedPenaltyMultiplier = 1
 	player:SetAttribute("RunnerJumping", false)
 	self:_clearJumpForce(state)
 
