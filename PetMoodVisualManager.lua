@@ -281,9 +281,35 @@ function PetMoodVisualManager:_getDirtTransparencyFromDirtiness(dirtiness)
 	if d <= 10 then
 		return 1
 	end
-	local alpha = (d - 10) / 90
-	return math.clamp(1 - alpha, 0, 1)
+	local normalized = (d - 10) / 90
+	local visibilityBoost = normalized ^ 0.6
+	return math.clamp(1 - visibilityBoost, 0, 1)
 end
+
+function PetMoodVisualManager:_resolveBaseDirtTransparency(item)
+	if not item or not item:IsA("BasePart") then
+		return 0
+	end
+
+	local baseTransparency = item:GetAttribute("BaseDirtTransparency")
+	if baseTransparency ~= nil then
+		return math.clamp(tonumber(baseTransparency) or 0, 0, 1)
+	end
+
+	baseTransparency = math.clamp(item.Transparency, 0, 1)
+	if baseTransparency >= 0.99 then
+		local configuredBase = item:GetAttribute("DirtyBaseTransparency")
+		if configuredBase ~= nil then
+			baseTransparency = math.clamp(tonumber(configuredBase) or 0, 0, 1)
+		else
+			baseTransparency = 0
+		end
+	end
+
+	item:SetAttribute("BaseDirtTransparency", baseTransparency)
+	return baseTransparency
+end
+
 
 function PetMoodVisualManager:_applyDirtVisuals(petModel, state)
 	if not petModel or not state then return end
@@ -295,11 +321,7 @@ function PetMoodVisualManager:_applyDirtVisuals(petModel, state)
 
 	for _, item in ipairs(dirtFolder:GetDescendants()) do
 		if item:IsA("BasePart") then
-			local baseTransparency = item:GetAttribute("BaseDirtTransparency")
-			if baseTransparency == nil then
-				baseTransparency = item.Transparency
-				item:SetAttribute("BaseDirtTransparency", baseTransparency)
-			end
+			local baseTransparency = self:_resolveBaseDirtTransparency(item)
 			item.Transparency = math.clamp(math.max(baseTransparency, targetTransparency), 0, 1)
 		elseif item:IsA("Decal") or item:IsA("Texture") then
 			item.Transparency = targetTransparency
