@@ -126,13 +126,30 @@ rotateRight.Selectable = true
 rotateRight.ZIndex = 12
 rotateRight.Parent = panel
 
+local exitButton = Instance.new("TextButton")
+exitButton.Name = "ExitButton"
+exitButton.AnchorPoint = Vector2.new(1, 0)
+exitButton.Position = UDim2.new(1, -12, 0, 10)
+exitButton.Size = UDim2.new(0, 28, 0, 24)
+exitButton.BackgroundColor3 = Color3.fromRGB(130, 50, 50)
+exitButton.TextColor3 = Color3.new(1, 1, 1)
+exitButton.Font = Enum.Font.SourceSansBold
+exitButton.TextSize = 18
+exitButton.Text = "X"
+exitButton.AutoButtonColor = true
+exitButton.ZIndex = 12
+exitButton.Parent = panel
+
+
 local savedCameraType = nil
 local savedCameraSubject = nil
 local cameraPart = nil
 local controlWall = nil
+local currentPet = nil
 local cameraConn = nil
 local cursorTrackConn = nil
 local lastToolMoveFireAt = 0
+local lastToolMovePoint = nil
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -161,6 +178,7 @@ local function endShowerView()
 	end
 	cameraPart = nil
 	controlWall = nil
+	currentPet = nil
 	gui.Enabled = false
 end
 
@@ -191,14 +209,27 @@ local function updateBar(progress)
 end
 
 local function getMovePoint()
-	if controlWall and controlWall:IsA("BasePart") then
-		local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+	local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+	if currentPet and currentPet.Parent then
 		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.FilterDescendantsInstances = {controlWall}
-		local result = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
-		if result then
-			return result.Position
+		params.FilterType = Enum.RaycastFilterType.Include
+		params.FilterDescendantsInstances = {currentPet}
+		local hitPet = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+		if hitPet then
+			return hitPet.Position + (hitPet.Normal * 0.02)
+		end
+	end
+
+	if controlWall and controlWall:IsA("BasePart") then
+		local wallCf = controlWall.CFrame
+		local normal = wallCf.LookVector
+		local originToWall = wallCf.Position - ray.Origin
+		local denom = ray.Direction:Dot(normal)
+		if math.abs(denom) > 1e-4 then
+			local distance = originToWall:Dot(normal) / denom
+			if distance > 0 then
+				return ray.Origin + (ray.Direction * distance)
+			end
 		end
 	end
 
@@ -223,11 +254,17 @@ local function startCursorTracking()
 		if isOverPanel then return end
 
 		local now = tick()
-		if (now - lastToolMoveFireAt) < 0.05 then return end
-		lastToolMoveFireAt = now
-
-
 		local worldPos = getMovePoint()
+		if not worldPos then return end
+
+		local hasMovedEnough = (not lastToolMovePoint) or ((worldPos - lastToolMovePoint).Magnitude >= 0.04)
+		if not hasMovedEnough and (now - lastToolMoveFireAt) < 0.06 then
+			return
+		end
+		if (now - lastToolMoveFireAt) < 0.02 then return end
+		lastToolMoveFireAt = now
+		lastToolMovePoint = worldPos
+
 		if worldPos then
 			showerRemote:FireServer("ToolMove", { worldPos = worldPos })
 		end
@@ -279,6 +316,13 @@ end
 hookRotateButton(rotateLeft, -1)
 hookRotateButton(rotateRight, 1)
 
+exitButton.Activated:Connect(function()
+	if gui.Enabled then
+		showerRemote:FireServer("Exit", {})
+	end
+end)
+
+
 local function isPointInsideButton(button, screenPos)
 	if not button or not button.Visible then return false end
 	local pos = button.AbsolutePosition
@@ -316,9 +360,11 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		gui.Enabled = true
 		lastRotateFireAt = 0
 		lastToolMoveFireAt = 0
+		lastToolMovePoint = nil
 		stageLabel.Text = tostring(payload.stageText or "Scrub with Sponge")
 		updateBar(payload.progress or 0)
 		controlWall = payload.controlWall
+		currentPet = payload.pet
 		startShowerView(payload.cameraPart)
 		startCursorTracking()
 	elseif action == "Progress" then
