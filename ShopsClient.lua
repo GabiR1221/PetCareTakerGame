@@ -4,6 +4,7 @@ local Defaultwalkspeed = Player.Character.Humanoid.WalkSpeed
 
 local BANK_OPEN_POSITION = UDim2.new(0.359, 0, 0.414, 0)
 local PETS_WHILE_BANK_OPEN_POSITION = UDim2.new(0.095, 0, 0.414, 0)
+local SELL_OPEN_POSITION = UDim2.new(0.359, 0, 0.414, 0)
 
 local openedPetFrameFromBank = false
 local defaultPetsPosition = Frames.Pets.Position
@@ -14,6 +15,7 @@ local function showPetsNextToBank()
 	end
 
 	-- IMPORTANT: direct control, do NOT use ButtonHandler.OnClick for Pets here
+	Frames.Pets:SetAttribute("CanDeletePets", false)
 	Frames.Pets.Position = PETS_WHILE_BANK_OPEN_POSITION
 	Frames.Pets.Visible = true
 end
@@ -24,6 +26,13 @@ local function hideBankOpenedPets()
 
 	Frames.Pets.Visible = false
 	Frames.Pets.Position = defaultPetsPosition
+	Frames.Pets:SetAttribute("CanDeletePets", false)	
+end
+
+local function showPetsForSell()
+	Frames.Pets.Position = SELL_OPEN_POSITION
+	Frames.Pets:SetAttribute("CanDeletePets", true)
+	Frames.Pets.Visible = true
 end
 
 Frames.Bank:GetPropertyChangedSignal("Visible"):Connect(function()
@@ -69,5 +78,23 @@ local function BankRing()
 	end
 end
 
+local function SellRing()
+	local wasInRange = false
+	while task.wait(0.1) do
+		local character = Player.Character
+		local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+		local rings = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Rings")
+		local sellPart = rings and rings:FindFirstChild("Sell") and rings.Sell:FindFirstChild("MainPart")
+		local inRange = humanoidRootPart and sellPart and (humanoidRootPart.Position - sellPart.Position).Magnitude < 10
+
+		if inRange and not wasInRange then
+			showPetsForSell()
+		end
+
+		wasInRange = inRange and true or false
+	end
+end
+
 coroutine.wrap(GemRing)()
 coroutine.wrap(BankRing)()
+coroutine.wrap(SellRing)()
