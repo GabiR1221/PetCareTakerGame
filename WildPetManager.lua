@@ -3,6 +3,7 @@ local WildPetManager = {}
 local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local INVENTORY_BRIDGE_NAME = "PetInventoryAdoptionBridge"
 
 local function normalizePetName(name)
 	if not name then return "" end
@@ -16,6 +17,17 @@ local function buildOwnedPetCsv(nameSet)
 	end
 	table.sort(list)
 	return table.concat(list, ",")
+end
+
+local function grantAdoptedPetToInventory(player, petModel)
+	if not player or not petModel then return end
+	local templateName = petModel:GetAttribute("TemplateName") or petModel.Name
+	if type(templateName) ~= "string" or templateName == "" then return end
+
+	local bridge = ReplicatedStorage:FindFirstChild(INVENTORY_BRIDGE_NAME)
+	if bridge and bridge:IsA("BindableEvent") then
+		bridge:Fire(player, templateName)
+	end
 end
 
 
@@ -679,6 +691,8 @@ function WildPetManager:AutoAdoptCarriedWildPet(player)
 	if adoptionEvent and adoptionEvent:IsA("RemoteEvent") then
 		adoptionEvent:FireClient(player, "PetAdopted", pet)
 	end
+	
+	grantAdoptedPetToInventory(player, pet)
 
 	self:UpdateOwnedPetRegistryForPlayer(player)
 	if self.SaveManager then
@@ -941,6 +955,7 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 
 		-- Send adoption message to player
 		game.ReplicatedStorage:FindFirstChild("PetAdoptionEvent"):FireClient(player, "PetAdopted", pet)
+		grantAdoptedPetToInventory(player, pet)
 		self:UpdateOwnedPetRegistryForPlayer(player)
 		if self.SaveManager then
 			self.SaveManager:ScheduleSave(player)
