@@ -32,6 +32,75 @@ Players.PlayerRemoving:Connect(function(Player)
 	workspace.PlayerPets[Player.Name]:Destroy()
 end)
 
+local InventoryBridgeName = "PetInventoryAdoptionBridge"
+
+local function getPetsFolder(player)
+	if not player then return nil end
+	local data = player:FindFirstChild("Data")
+	if not data then return nil end
+	return data:FindFirstChild("Pets")
+end
+
+local function getNextPetId(petsFolder)
+	local nextId = 1
+	for _, child in ipairs(petsFolder:GetChildren()) do
+		local numericId = tonumber(child.Name)
+		if numericId and numericId >= nextId then
+			nextId = numericId + 1
+		end
+	end
+	return tostring(nextId)
+end
+
+local function createInventoryPet(player, petName)
+	if type(petName) ~= "string" then return nil end
+	if not ReplicatedStorage:FindFirstChild("Pets") then return nil end
+	if not ReplicatedStorage.Pets:FindFirstChild(petName) then
+		warn(("[PetServer] Could not grant '%s' to %s because ReplicatedStorage.Pets entry is missing"):format(tostring(petName), player.Name))
+		return nil
+	end
+
+	local petsFolder = getPetsFolder(player)
+	if not petsFolder then
+		warn(("[PetServer] Could not grant '%s' to %s because Player.Data.Pets is missing"):format(tostring(petName), player.Name))
+		return nil
+	end
+
+	if Multipliers.GetMaxPetsStorage(player) <= #petsFolder:GetChildren() then
+		warn(("[PetServer] Could not grant '%s' to %s because storage is full"):format(tostring(petName), player.Name))
+		return nil
+	end
+
+	local petFolder = Instance.new("Folder")
+	petFolder.Name = getNextPetId(petsFolder)
+	petFolder.Parent = petsFolder
+
+	local petNameValue = Instance.new("StringValue")
+	petNameValue.Name = "PetName"
+	petNameValue.Value = petName
+	petNameValue.Parent = petFolder
+
+	local equippedValue = Instance.new("BoolValue")
+	equippedValue.Name = "Equipped"
+	equippedValue.Value = false
+	equippedValue.Parent = petFolder
+
+	return petFolder
+end
+
+local inventoryBridge = ReplicatedStorage:FindFirstChild(InventoryBridgeName)
+if not inventoryBridge or not inventoryBridge:IsA("BindableEvent") then
+	inventoryBridge = Instance.new("BindableEvent")
+	inventoryBridge.Name = InventoryBridgeName
+	inventoryBridge.Parent = ReplicatedStorage
+end
+
+inventoryBridge.Event:Connect(function(player, petName)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	createInventoryPet(player, petName)
+end)
+
+
 -- Pet
 function LoadEquipped(Player)
 	local EquippedPets = PetMultipliers.Multipliers[Player.Name]
@@ -99,6 +168,7 @@ end
 Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 	if type(Parameter) ~= "table" then -- so if this condition is true, then Parameter should be the id of the pet
 		local Pet = Player.Data.Pets[Parameter]
+		if not Pet then return end
 
 		if Action == "Equip" then
 			EquipAction(Player, Pet)
@@ -111,12 +181,14 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 		if Action == "Equip" then -- equip all pets
 			for _,PetId in Parameter do
 				local Pet = Player.Data.Pets[PetId]
+				if not Pet then continue end
 				EquipAction(Player, Pet)
 			end
 
 		elseif Action == "Delete" then -- delete all pets
 			for _,PetId in Parameter do
 				local Pet = Player.Data.Pets[PetId]
+				if not Pet then continue end
 				DeleteAction(Player, Pet)				
 			end
 		end
