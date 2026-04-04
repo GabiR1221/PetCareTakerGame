@@ -11,6 +11,24 @@ local Multipliers = require(Modules.Multipliers)
 local PetMultipliers = require(Modules.PetMultipliers)
 
 local Cooldowns = {}
+local SELL_RING_MAX_DISTANCE = 12
+
+local function canDeleteFromSellRing(player)
+	if not player then return false end
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not hrp then return false end
+
+	local map = workspace:FindFirstChild("Map")
+	local rings = map and map:FindFirstChild("Rings")
+	local sellRing = rings and rings:FindFirstChild("Sell")
+	local sellMainPart = sellRing and sellRing:FindFirstChild("MainPart")
+	if not sellMainPart or not sellMainPart:IsA("BasePart") then
+		return false
+	end
+
+	return (hrp.Position - sellMainPart.Position).Magnitude <= SELL_RING_MAX_DISTANCE
+end
 
 --// Script
 
@@ -173,6 +191,7 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 		if Action == "Equip" then
 			EquipAction(Player, Pet)
 		elseif Action == "Delete" then
+			if not canDeleteFromSellRing(Player) then return end
 			DeleteAction(Player, Pet)
 		end
 
@@ -186,6 +205,7 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 			end
 
 		elseif Action == "Delete" then -- delete all pets
+			if not canDeleteFromSellRing(Player) then return end
 			for _,PetId in Parameter do
 				local Pet = Player.Data.Pets[PetId]
 				if not Pet then continue end
