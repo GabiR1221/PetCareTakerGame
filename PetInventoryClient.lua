@@ -8,6 +8,21 @@ PetFrame.SideFrameBlocker.Visible = true
 local IsMultiDeleting = false
 local SelectedForDelete = {}
 
+local function getPetTemplate(petInstance)
+	if not petInstance then return nil end
+	local petNameValue = petInstance:FindFirstChild("PetName")
+	if not petNameValue then return nil end
+	return ReplicatedStorage.Pets:FindFirstChild(petNameValue.Value)
+end
+
+local function getPetMultiplier(petInstance)
+	local template = getPetTemplate(petInstance)
+	local settings = template and template:FindFirstChild("Settings")
+	local multiplier = settings and settings:FindFirstChild("Multiplier")
+	return (multiplier and tonumber(multiplier.Value)) or 1
+end
+
+
 function SortInventory(SortTable, ObjectHolder)
 	local TableToSort = SortTable ~= nil and SortTable or PetInventory -- so it can differentiate between trade and normal inventories
 
@@ -41,26 +56,25 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 	task.wait(0.1)
 	local NewPet = script.PetTemplate:Clone()
 
-	local PetModel = ReplicatedStorage.Pets[PetInstance.PetName.Value]:Clone()
+	local PetTemplate = getPetTemplate(PetInstance)
+	if not PetTemplate then
+		warn(("[PetInventoryClient] Missing ReplicatedStorage.Pets model for inventory pet '%s'"):format(tostring(PetInstance.Name)))
+		NewPet:Destroy()
+		return nil
+	end
+	local PetModel = PetTemplate:Clone()
 	PetModel.Parent = NewPet.Display
 
-	local MainPart = PetModel:FindFirstChild("MainPart")
+	local MainPart = PetModel:FindFirstChild("MainPart") or PetModel.PrimaryPart or PetModel:FindFirstChildWhichIsA("BasePart", true)
 	local Pos
 
 	if not MainPart then
-		warn(PetModel.Name.." does not have a MainPart, please add one by calling one of the parts 'MainPart'")
-
-		for _,v in PetModel:GetChildren() do -- this here chooses a random part of the pet instead of the mainpart.
-			if v:IsA("BasePart") then
-				Pos = v.Position
-				break
-			end
-		end
-	else
-		Pos = MainPart.Position
+		warn(PetModel.Name.." does not have a BasePart, could not render inventory slot")
+		NewPet:Destroy()
+		return nil
 	end
 
-	local Pos = PetModel.MainPart.Position
+	Pos = MainPart.Position
 	local Camera = Instance.new("Camera")
 	NewPet.Display.CurrentCamera = Camera
 	PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
@@ -97,10 +111,11 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 	NewPet.Name = PetInstance.Name
 	NewPet.Parent = Parent == nil and PetFrame.MainFrame.ObjectHolder or Parent
 
+	local multiplier = getPetMultiplier(PetInstance)
 	if SortTable == nil then
-		PetInventory[#PetInventory+1] = {ID = PetInstance.Name, Multiplier = ReplicatedStorage.Pets[PetInstance.PetName.Value].Settings.Multiplier.Value}
+		PetInventory[#PetInventory+1] = {ID = PetInstance.Name, Multiplier = multiplier}
 	else
-		SortTable[#SortTable+1] = {ID = PetInstance.Name, Multiplier = ReplicatedStorage.Pets[PetInstance.PetName.Value].Settings.Multiplier.Value}
+		SortTable[#SortTable+1] = {ID = PetInstance.Name, Multiplier = multiplier}
 	end
 
 	return NewPet
@@ -118,17 +133,27 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 		SideFrame.Display.PetModel:Destroy()
 	end
 
-	local PetModel = ReplicatedStorage.Pets[PetInstance.PetName.Value]:Clone()
+	local PetTemplate = getPetTemplate(PetInstance)
+	if not PetTemplate then
+		SideFrame.Multiplier.Amount.Text = "x1"
+		return
+	end
+	local PetModel = PetTemplate:Clone()
 	PetModel.Name = "PetModel"
 	PetModel.Parent = SideFrame.Display
 
-	local Pos = PetModel.MainPart.Position
+	local MainPart = PetModel:FindFirstChild("MainPart") or PetModel.PrimaryPart or PetModel:FindFirstChildWhichIsA("BasePart", true)
+	if not MainPart then
+		SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
+		return
+	end
+	local Pos = MainPart.Position
 	local Camera = Instance.new("Camera")
 	SideFrame.Display.CurrentCamera = Camera
 	PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
 	Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
 
-	SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(ReplicatedStorage.Pets[PetInstance.PetName.Value].Settings.Multiplier.Value)
+	SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
 end
 
 for _,v in Data.Pets:GetChildren() do -- load pets on join
