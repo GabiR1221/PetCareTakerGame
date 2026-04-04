@@ -7,6 +7,41 @@ PetFrame.SideFrameBlocker.Visible = true
 
 local IsMultiDeleting = false
 local SelectedForDelete = {}
+local CanDeletePets = false
+
+local function setDeleteMode(canDelete)
+	CanDeletePets = canDelete and true or false
+	SideFrame.Delete.Visible = CanDeletePets
+	PetFrame.Buttons.MultiDelete.Visible = CanDeletePets
+
+	if not CanDeletePets then
+		if IsMultiDeleting then
+			IsMultiDeleting = false
+			PetFrame.Buttons.MultiDelete.Title.Text = "Multi Delete"
+		end
+
+		for _, petId in ipairs(SelectedForDelete) do
+			local petSlot = PetFrame.MainFrame.ObjectHolder:FindFirstChild(tostring(petId))
+			if petSlot and petSlot:FindFirstChild("Delete") then
+				petSlot.Delete.Visible = false
+			end
+		end
+		SelectedForDelete = {}
+	end
+end
+
+if PetFrame:GetAttribute("CanDeletePets") == nil then
+	PetFrame:SetAttribute("CanDeletePets", false)
+end
+setDeleteMode(PetFrame:GetAttribute("CanDeletePets"))
+PetFrame:GetAttributeChangedSignal("CanDeletePets"):Connect(function()
+	setDeleteMode(PetFrame:GetAttribute("CanDeletePets"))
+end)
+PetFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+	if not PetFrame.Visible and PetFrame:GetAttribute("CanDeletePets") then
+		PetFrame:SetAttribute("CanDeletePets", false)
+	end
+end)
 
 local function getPetTemplate(petInstance)
 	if not petInstance then return nil end
@@ -97,6 +132,7 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 			if not IsMultiDeleting then
 				UpdateSideFrame(PetInstance)
 			else
+				if not CanDeletePets then return end
 				if not table.find(SelectedForDelete, tonumber(PetInstance.Name)) then
 					table.insert(SelectedForDelete, tonumber(PetInstance.Name))
 					NewPet.Delete.Visible = true
@@ -202,6 +238,7 @@ SideFrame.Equip.Click.MouseButton1Click:Connect(function()
 end)
 
 SideFrame.Delete.Click.MouseButton1Click:Connect(function()
+	if not CanDeletePets then return end
 	Remotes.Pet:FireServer("Delete", CurrentlySelected)
 	PetFrame.SideFrameBlocker.Visible = true
 	Utilities.Audio.PlayAudio("Click")
@@ -214,6 +251,7 @@ for _, Button in PetFrame.Buttons:GetChildren() do
 end
 
 PetFrame.Buttons.MultiDelete.Click.MouseButton1Click:Connect(function()	
+	if not CanDeletePets then return end
 	IsMultiDeleting = not IsMultiDeleting
 
 	if not IsMultiDeleting then
