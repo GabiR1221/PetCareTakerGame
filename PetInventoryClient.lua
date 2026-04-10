@@ -59,6 +59,15 @@ local function getPetMultiplier(petInstance)
 	return (multiplier and tonumber(multiplier.Value)) or 1
 end
 
+local function getPetUidFromFolder(petFolder)
+	local uidValue = petFolder and petFolder:FindFirstChild("PetUID")
+	local uid = uidValue and uidValue.Value or nil
+	if type(uid) ~= "string" or uid == "" then
+		return nil
+	end
+	return uid
+end
+
 
 function SortInventory(SortTable, ObjectHolder)
 	local TableToSort = SortTable ~= nil and SortTable or PetInventory -- so it can differentiate between trade and normal inventories
@@ -201,9 +210,12 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 	Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
 
 	SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
-	local selectedPetId, selectedPetName = getSelectedPetKeys()
+	local selectedPetId, selectedPetName, selectedPetUid = getSelectedPetKeys()
 	local cachedState = selectedPetId and (
-		CachedPetStateByKey[selectedPetId]
+		(selectedPetUid and CachedPetStateByKey[selectedPetUid])
+			or CachedPetStateByKey[selectedPetId]
+			or (selectedPetUid and CachedPetStateByKey["inv:"..selectedPetUid])
+			or (selectedPetId and CachedPetStateByKey["invId:"..selectedPetId])
 			or (selectedPetName and CachedPetStateByKey[tostring(selectedPetName)])
 	) or nil
 	if cachedState then
@@ -259,11 +271,12 @@ updateSideFrameState = function(payload)
 end
 
 getSelectedPetKeys = function()
-	if CurrentlySelected == 0 then return nil, nil end
+	if CurrentlySelected == 0 then return nil, nil, nil end
 	local selectedId = tostring(CurrentlySelected)
 	local selectedPetFolder = Data.Pets:FindFirstChild(selectedId)
 	local selectedPetName = selectedPetFolder and selectedPetFolder:FindFirstChild("PetName") and selectedPetFolder.PetName.Value or nil
-	return selectedId, selectedPetName
+	local selectedPetUid = getPetUidFromFolder(selectedPetFolder)
+	return selectedId, selectedPetName, selectedPetUid
 end
 
 local function updateSideFrameState(payload)
@@ -292,11 +305,12 @@ local function updateSideFrameState(payload)
 end
 
 local function getSelectedPetKeys()
-	if CurrentlySelected == 0 then return nil, nil end
+	if CurrentlySelected == 0 then return nil, nil, nil end
 	local selectedId = tostring(CurrentlySelected)
 	local selectedPetFolder = Data.Pets:FindFirstChild(selectedId)
 	local selectedPetName = selectedPetFolder and selectedPetFolder:FindFirstChild("PetName") and selectedPetFolder.PetName.Value or nil
-	return selectedId, selectedPetName
+	local selectedPetUid = getPetUidFromFolder(selectedPetFolder)
+	return selectedId, selectedPetName, selectedPetUid
 end
 
 
@@ -403,15 +417,37 @@ if PetStateEvent then
 
 		local payloadId = tostring(payload.petName or "")
 		local modelName = petModel and tostring(petModel.Name) or ""
+		local payloadUid = tostring(payload.petUid or "")
+		local payloadInventoryId = tostring(payload.inventoryPetId or "")
 		if payloadId ~= "" then
 			CachedPetStateByKey[payloadId] = payload
 		end
 		if modelName ~= "" then
 			CachedPetStateByKey[modelName] = payload
 		end
+		if payloadUid ~= "" then
+			CachedPetStateByKey[payloadUid] = payload
+			CachedPetStateByKey["inv:"..payloadUid] = payload
+		end
+		if payloadInventoryId ~= "" then
+			CachedPetStateByKey[payloadInventoryId] = payload
+			CachedPetStateByKey["invId:"..payloadInventoryId] = payload
+		end
 
-		local selectedPetId, selectedPetName = getSelectedPetKeys()
+		local selectedPetId, selectedPetName, selectedPetUid = getSelectedPetKeys()
 		if not selectedPetId then return end
+		
+		if payloadInventoryId ~= "" then
+			if payloadInventoryId ~= selectedPetId then return end
+			updateSideFrameState(payload)
+			return
+		end
+		if selectedPetUid and selectedPetUid ~= "" then
+			if payloadUid ~= selectedPetUid then return end
+			updateSideFrameState(payload)
+			return
+		end
+
 
 		local payloadCompareId = tostring(payload.petName or (petModel and petModel.Name) or "")
 		if payloadCompareId ~= selectedPetId
