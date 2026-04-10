@@ -45,9 +45,23 @@ Players.PlayerAdded:Connect(function(Player)
 	LoadEquipped(Player)
 end)
 
-Players.PlayerRemoving:Connect(function(Player)
-	Cooldowns[Player.Name] = nil
-	workspace.PlayerPets[Player.Name]:Destroy()
+
+
+Remotes.Rebirth.OnServerEvent:Connect(function(Player)
+	if Cooldowns[Player.Name] == false then
+		Cooldowns[Player.Name] = true	
+		if GameSettings.RebirthType.Value == "Linear" then
+			if Player.Data.PlayerData.Currency.Value >= GameSettings.RebirthBasePrice.Value * (Player.Data.PlayerData.Rebirth.Value + 1) then
+				Rebirth(Player)
+			end
+		else
+			if Player.Data.PlayerData.Currency.Value >= GameSettings.RebirthBasePrice.Value * (GameSettings.RebirthMultiplier.Value + 1.25) ^ Player.Data.PlayerData.Rebirth.Value then
+				Rebirth(Player)
+			end
+		end
+		task.wait(0.08)
+		Cooldowns[Player.Name] = false
+	end
 end)
 
 local InventoryBridgeName = "PetInventoryAdoptionBridge"
