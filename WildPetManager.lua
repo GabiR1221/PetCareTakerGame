@@ -49,6 +49,7 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.TycoonUtils:Initialize(config)  -- Initialize TycoonUtils with the config
 	self.SaveManager = saveManager
 	self.PetStandManager = require(script.Parent.PetStandManager)
+	self.Multipliers = require(ReplicatedStorage.Modules.Multipliers)
 	-- Settings
 	self.WILD_PET_SPAWN_AREA_TAG = "WildPetSpawnArea"
 	self.MAX_WILD_PETS = 20
@@ -76,6 +77,91 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self:BindRebirthResetEvent()
 	self:StartSpawning()
 end
+
+function WildPetManager:GetAdoptionMatForTycoon(tycoonModel)
+	for mat, tModel in pairs(self.adoptionMats) do
+		if tModel == tycoonModel then
+			return mat
+		end
+	end
+	return nil
+end
+
+function WildPetManager:CanGrantPetToInventory(player)
+	if not player then return false end
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if not petsFolder then return false end
+
+	local maxStorage = self.Multipliers.GetMaxPetsStorage(player)
+	return #petsFolder:GetChildren() < maxStorage
+end
+
+function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
+	if not player or type(templateName) ~= "string" or templateName == "" then
+		return false, "InvalidInput"
+	end
+	if not self:CanGrantPetToInventory(player) then
+		return false, "InventoryFull"
+	end
+
+	local template = self:FindPetTemplateByName(templateName)
+	if not template then
+		return false, "TemplateMissing"
+	end
+
+	local tycoonModel, _ = self.TycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
+	if not tycoonModel then
+		return false, "TycoonMissing"
+	end
+
+	local adoptionMat = self:GetAdoptionMatForTycoon(tycoonModel)
+	if not adoptionMat then
+		return false, "AdoptionMatMissing"
+	end
+
+	local pet = template:Clone()
+	pet.Name = templateName
+	pet:SetAttribute("TemplateName", templateName)
+	pet.Parent = workspace
+
+	local power = template:GetAttribute("Power") or 1
+	local rarityMult = template:GetAttribute("RarityMultiplier") or 1
+	pet:SetAttribute("Power", power)
+	pet:SetAttribute("RarityMultiplier", rarityMult)
+
+	self.petState[pet] = {
+		location = "free",
+		wild = false,
+		ownerUserId = player.UserId,
+		xp = 0,
+		level = 1,
+		scale = 1.0,
+		dirtiness = 0,
+		wetness = 0,
+		hunger = 100,
+		showered = true,
+		dried = true,
+		accessories = {A = false, B = false},
+		power = power,
+		rarityMultiplier = rarityMult,
+	}
+
+	self.PetRigManager:EnsurePetRig(pet)
+	self.PetAnimationManager:SetupAnimatorForPet(pet)
+	self:PlacePetOnGround(pet, adoptionMat.Position)
+	self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId)
+	self:AddOwnedPetPickupPrompt(pet, player.UserId)
+
+	grantAdoptedPetToInventory(player, pet)
+	self:UpdateOwnedPetRegistryForPlayer(player)
+	if self.SaveManager then
+		self.SaveManager:ScheduleSave(player)
+	end
+
+	return true, pet
+end
+
 
 function WildPetManager:CountWildPets()
 	local count = 0
@@ -387,6 +473,13 @@ end
 
 function WildPetManager:FindPetTemplateByName(templateName)
 	if not self.WILD_PET_MODELS or not templateName then
+		local replicatedPets = ReplicatedStorage:FindFirstChild("Pets")
+		if replicatedPets then
+			local fallback = replicatedPets:FindFirstChild(templateName)
+			if fallback and fallback:IsA("Model") then
+				return fallback
+			end
+		end
 		return nil
 	end
 
@@ -398,6 +491,14 @@ function WildPetManager:FindPetTemplateByName(templateName)
 	for _, candidate in ipairs(self.WILD_PET_MODELS:GetDescendants()) do
 		if candidate:IsA("Model") and candidate.Name == templateName then
 			return candidate
+		end
+	end
+	
+	local replicatedPets = ReplicatedStorage:FindFirstChild("Pets")
+	if replicatedPets then
+		local fallback = replicatedPets:FindFirstChild(templateName)
+		if fallback and fallback:IsA("Model") then
+			return fallback
 		end
 	end
 
@@ -1041,13 +1142,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 		return
 	end
 
-	local adoptionMat = nil
-	for mat, tModel in pairs(self.adoptionMats) do
-		if tModel == tycoonModel then
-			adoptionMat = mat
-			break
-		end
-	end
+	local adoptionMat = self:GetAdoptionMatForTycoon(tycoonModel)
 
 	if not adoptionMat then
 		print(("[WildPetManager] Could not find adoption mat in tycoon for player %s"):format(player.Name))
