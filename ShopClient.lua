@@ -26,19 +26,34 @@ local function getGamepassTemplate(entry)
 	return script.GamepassTemplate
 end
 
+local function getGamepassContainer()
+	local shop = Frames and Frames:FindFirstChild("Shop")
+	if not shop then return nil end
+
+	local holder = shop:FindFirstChild("GamepassesHolder")
+	if holder then
+		local nestedGamepasses = holder:FindFirstChild("Gamepasses")
+		if nestedGamepasses then
+			return nestedGamepasses
+		end
+	end
+
+	return shop:FindFirstChild("Gamepasses")
+end
+
 local function getExistingShopCard(entry)
-	local holder = Frames and Frames:FindFirstChild("Shop") and Frames.Shop:FindFirstChild("Gamepasses")
-	if not holder then return nil end
+	local container = getGamepassContainer()
+	if not container then return nil end
 
 	local explicitCardName = entry:GetAttribute("ShopCardName")
 	if type(explicitCardName) == "string" and explicitCardName ~= "" then
-		local explicitCard = holder:FindFirstChild(explicitCardName)
+		local explicitCard = container:FindFirstChild(explicitCardName)
 		if explicitCard and explicitCard:IsA("Frame") then
 			return explicitCard
 		end
 	end
 
-	local cardByEntryName = holder:FindFirstChild(entry.Name)
+	local cardByEntryName = container:FindFirstChild(entry.Name)
 	if cardByEntryName and cardByEntryName:IsA("Frame") then
 		return cardByEntryName
 	end
@@ -113,6 +128,12 @@ local function getProductInfoWithType(productId)
 end
 
 for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
+	local gamepassContainer = getGamepassContainer()
+	if not gamepassContainer then
+		warn("[ShopClient] Missing Shop.Gamepasses container. Expected Shop.GamepassesHolder.Gamepasses or Shop.Gamepasses.")
+		break
+	end
+
 	local ExistingCard = getExistingShopCard(Gamepass)
 	local isCustomCard = ExistingCard ~= nil
 	local NewGamepass = ExistingCard or getGamepassTemplate(Gamepass):Clone()
@@ -124,7 +145,7 @@ for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 		continue
 	end
 	if not isCustomCard then
-		NewGamepass.Parent = Frames.Shop.Gamepasses
+		NewGamepass.Parent = gamepassContainer
 	end
 
 	local GamepassInfo
