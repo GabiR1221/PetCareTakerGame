@@ -44,6 +44,7 @@ local PetMovement = require(ServerScriptService:WaitForChild("PetMovement"))
 local accessoryEvent = ReplicatedStorage:FindFirstChild("PetAccessoryEvent")
 local petStateEvent = ReplicatedStorage:FindFirstChild("PetStateEvent")
 local petCarryEvent = ReplicatedStorage:FindFirstChild("PetCarryEvent")
+local PetGamepassGrantBridgeName = "PetGamepassGrantBridge"
 
 -- Configuration
 local SHOWER_HOLD_TIME = 3
@@ -293,6 +294,35 @@ end
 	PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
 	PetMoodVisualManager:Initialize(petState)
 	SprintRunManager:Initialize(Players, WildPetManager)
+	
+	local petGamepassGrantBridge = ReplicatedStorage:FindFirstChild(PetGamepassGrantBridgeName)
+	if not petGamepassGrantBridge or not petGamepassGrantBridge:IsA("BindableEvent") then
+		petGamepassGrantBridge = Instance.new("BindableEvent")
+		petGamepassGrantBridge.Name = PetGamepassGrantBridgeName
+		petGamepassGrantBridge.Parent = ReplicatedStorage
+	end
+
+	petGamepassGrantBridge.Event:Connect(function(player, gamepassName, petsToGrant)
+		if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+		if type(petsToGrant) ~= "table" then return end
+
+		for _, petName in ipairs(petsToGrant) do
+			if type(petName) == "string" then
+				local ok, reason = WildPetManager:GrantOwnedPetFromTemplate(player, petName)
+				if not ok then
+					if reason == "TemplateMissing" then
+						warn(("[PetSystem] Failed to grant gamepass pet '%s' for %s (gamepass=%s, reason=%s). Add a Model named '%s' in ServerStorage.WildPetModels/ServerStorage.PetModels or ReplicatedStorage.Pets.")
+							:format(petName, player.Name, tostring(gamepassName), tostring(reason), petName))
+					else
+						warn(("[PetSystem] Failed to grant gamepass pet '%s' for %s (gamepass=%s, reason=%s)")
+							:format(petName, player.Name, tostring(gamepassName), tostring(reason)))
+					end
+				end
+			end
+		end
+	end)
+
+
 
 	-- Connect remote events
 if accessoryEvent then
