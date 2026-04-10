@@ -13,6 +13,22 @@ local PetMultipliers = require(Modules.PetMultipliers)
 
 local Cooldowns = {}
 local SELL_RING_MAX_DISTANCE = 12
+local PetSellQuoteRemote = Remotes:FindFirstChild("PetSellQuote")
+if not PetSellQuoteRemote or not PetSellQuoteRemote:IsA("RemoteFunction") then
+	PetSellQuoteRemote = Instance.new("RemoteFunction")
+	PetSellQuoteRemote.Name = "PetSellQuote"
+	PetSellQuoteRemote.Parent = Remotes
+end
+
+local RARITY_MULTIPLIERS = {
+	Common = 1,
+	Uncommon = 1.25,
+	Rare = 1.6,
+	Epic = 2.1,
+	Legendary = 3,
+	Mythical = 4.5,
+	Secret = 8,
+}
 
 local function disableAllEquipsForPlayer(player)
 	if not player then return end
@@ -58,6 +74,58 @@ local function canDeleteFromSellRing(player)
 	return (hrp.Position - sellMainPart.Position).Magnitude <= SELL_RING_MAX_DISTANCE
 end
 
+local function resolvePetTemplate(petFolder)
+	if not petFolder then return nil end
+	local petNameValue = petFolder:FindFirstChild("PetName")
+	if not petNameValue or type(petNameValue.Value) ~= "string" then return nil end
+	local petsContainer = ReplicatedStorage:FindFirstChild("Pets")
+	return petsContainer and petsContainer:FindFirstChild(petNameValue.Value)
+end
+
+local function resolveSellBasePrice(petFolder, petTemplate)
+	local settings = petTemplate and petTemplate:FindFirstChild("Settings")
+	local sellValue = settings and (settings:FindFirstChild("Sellprice") or settings:FindFirstChild("SellPrice"))
+	local sellPrice = sellValue and tonumber(sellValue.Value)
+	if not sellPrice then
+		sellPrice = tonumber((petTemplate and (petTemplate:GetAttribute("Sellprice") or petTemplate:GetAttribute("SellPrice"))) or 0)
+	end
+	return math.max(0, math.floor(sellPrice or 0))
+end
+
+local function resolveRarityMultiplier(petTemplate)
+	local settings = petTemplate and petTemplate:FindFirstChild("Settings")
+	local rawRarity = settings and settings:FindFirstChild("Rarity")
+	local explicitMultiplier = settings and settings:FindFirstChild("RarityMultiplier")
+	local rarityMultiplier = explicitMultiplier and tonumber(explicitMultiplier.Value) or nil
+	if rarityMultiplier then
+		return math.max(0, rarityMultiplier)
+	end
+
+	local rarityName = rawRarity and tostring(rawRarity.Value) or "Common"
+	return RARITY_MULTIPLIERS[rarityName] or 1
+end
+
+local function resolvePetLevel(petFolder)
+	local levelValue = petFolder and petFolder:FindFirstChild("Level")
+	local level = levelValue and tonumber(levelValue.Value) or 1
+	return math.max(1, math.floor(level))
+end
+
+local function calculatePetSellPrice(player, petFolder)
+	if not player or not petFolder then return 0 end
+	if not canDeleteFromSellRing(player) then return 0 end
+
+	local petTemplate = resolvePetTemplate(petFolder)
+	local basePrice = resolveSellBasePrice(petFolder, petTemplate)
+	if basePrice <= 0 then return 0 end
+
+	local level = resolvePetLevel(petFolder)
+	local levelMultiplier = 1 + ((level - 1) * 0.15)
+	local rarityMultiplier = resolveRarityMultiplier(petTemplate)
+
+	local totalPrice = basePrice * levelMultiplier * rarityMultiplier
+	return math.max(0, math.floor(totalPrice))
+end
 
 
 
@@ -237,6 +305,38 @@ function DeleteAction(Player, Pet) -- this is the action for deleting a pet
 	Pet:Destroy()
 end
 
+function SellAction(Player, Pet)
+	local payout = calculatePetSellPrice(Player, Pet)
+	if payout <= 0 then return end
+
+	local currencyValue = Player:FindFirstChild("Data")
+		and Player.Data:FindFirstChild("PlayerData")
+		and Player.Data.PlayerData:FindFirstChild("Currency")
+	if not currencyValue then return end
+
+	local petUidValue = Pet:FindFirstChild("PetUID")
+	local petUid = petUidValue and tostring(petUidValue.Value) or ""
+
+	currencyValue.Value += payout
+	DeleteAction(Player, Pet)
+
+	local sellBridge = ReplicatedStorage:FindFirstChild("PetSellBridge")
+	if petUid ~= "" and sellBridge and sellBridge:IsA("BindableEvent") then
+		sellBridge:Fire(Player, petUid)
+	end
+end
+
+PetSellQuoteRemote.OnServerInvoke = function(player, petId)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return 0 end
+	local pet = player:FindFirstChild("Data")
+		and player.Data:FindFirstChild("Pets")
+		and player.Data.Pets:FindFirstChild(tostring(petId))
+	if not pet then return 0 end
+	return calculatePetSellPrice(player, pet)
+end
+
+
+
 Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 	if type(Parameter) ~= "table" then -- so if this condition is true, then Parameter should be the id of the pet
 		local Pet = Player.Data.Pets[Parameter]
@@ -247,6 +347,9 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 		elseif Action == "Delete" then
 			if not canDeleteFromSellRing(Player) then return end
 			DeleteAction(Player, Pet)
+		elseif Action == "Sell" then
+			if not canDeleteFromSellRing(Player) then return end
+			SellAction(Player, Pet)
 		end
 
 		disableAllEquipsForPlayer(Player)
