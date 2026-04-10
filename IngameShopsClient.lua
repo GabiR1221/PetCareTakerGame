@@ -8,6 +8,8 @@ local SELL_OPEN_POSITION = UDim2.new(0.359, 0, 0.414, 0)
 
 local openedPetFrameFromBank = false
 local defaultPetsPosition = Frames.Pets.Position
+local SellShopFrame = Frames:FindFirstChild("SellShop")
+local defaultSellPosition = SellShopFrame and SellShopFrame.Position or SELL_OPEN_POSITION
 
 local function showPetsNextToBank()
 	if not Frames.Pets.Visible then
@@ -30,9 +32,18 @@ local function hideBankOpenedPets()
 end
 
 local function showPetsForSell()
-	Frames.Pets.Position = SELL_OPEN_POSITION
-	Frames.Pets:SetAttribute("CanDeletePets", true)
-	Frames.Pets.Visible = true
+	if SellShopFrame then
+		SellShopFrame.Position = SELL_OPEN_POSITION
+		SellShopFrame.Visible = true
+	end
+
+	Frames.Pets:SetAttribute("CanDeletePets", false)
+end
+
+local function hideSellShop()
+	if not SellShopFrame then return end
+	SellShopFrame.Visible = false
+	SellShopFrame.Position = defaultSellPosition
 end
 
 Frames.Bank:GetPropertyChangedSignal("Visible"):Connect(function()
@@ -89,6 +100,8 @@ local function SellRing()
 
 		if inRange and not wasInRange then
 			showPetsForSell()
+		elseif not inRange and wasInRange then
+			hideSellShop()
 		end
 
 		wasInRange = inRange and true or false
