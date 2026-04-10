@@ -3,13 +3,18 @@ local PetInventory = {} -- all pets will be added in this table
 
 local PetFrame = Frames.Pets
 local SideFrame = PetFrame.SideFrame
+local SellShopFrame = Frames:FindFirstChild("SellShop")
+local SellObjectHolder = SellShopFrame and SellShopFrame:FindFirstChild("PetsHolder") and SellShopFrame.PetsHolder:FindFirstChild("ObjectHolder")
 PetFrame.SideFrameBlocker.Visible = true
 local PetStateEvent = ReplicatedStorage:FindFirstChild("PetStateEvent")
+local PetSellQuoteRemote = Remotes:FindFirstChild("PetSellQuote")
 
 local IsMultiDeleting = false
 local SelectedForDelete = {}
 local CanDeletePets = false
 local CachedPetStateByKey = {}
+local SellSlotByPetId = {}
+local OpenSellFramePetId = nil
 
 local function setDeleteMode(canDelete)
 	CanDeletePets = canDelete and true or false
@@ -116,6 +121,96 @@ local function findSideFrameObject(name)
 	return SideFrame:FindFirstChild(name) or findDescendantByNameInsensitive(SideFrame, name)
 end
 
+local function getCachedStateForPetFolder(petFolder)
+	if not petFolder then return nil end
+	local petId = tostring(petFolder.Name)
+	local petName = petFolder:FindFirstChild("PetName") and petFolder.PetName.Value or nil
+	local petUid = getPetUidFromFolder(petFolder)
+
+	return (petUid and CachedPetStateByKey[petUid])
+		or CachedPetStateByKey[petId]
+		or (petUid and CachedPetStateByKey["inv:"..petUid])
+		or CachedPetStateByKey["invId:"..petId]
+		or (petName and CachedPetStateByKey[tostring(petName)])
+end
+
+local function getSellFrameParts(slotFrame)
+	if not slotFrame then return nil, nil, nil end
+	local sellFrame = slotFrame:FindFirstChild("SellFrame") or findDescendantByNameInsensitive(slotFrame, "SellFrame")
+	if not sellFrame then return nil, nil, nil end
+
+	local sellButton = sellFrame:FindFirstChild("SellButton")
+		or sellFrame:FindFirstChild("Sell")
+		or findDescendantByNameInsensitive(sellFrame, "SellButton")
+	local titleLabel = sellFrame:FindFirstChild("TitleLabel")
+		or sellFrame:FindFirstChild("Title")
+		or findDescendantByNameInsensitive(sellFrame, "TitleLabel")
+	return sellFrame, sellButton, titleLabel
+end
+
+local function getSellFrameTemplate()
+	if not SellShopFrame then return nil end
+	local template = SellShopFrame:FindFirstChild("SellFrame") or findDescendantByNameInsensitive(SellShopFrame, "SellFrame")
+	if template and template:IsA("GuiObject") then
+		template.Visible = false
+	end
+	return template
+end
+
+local function ensureSellFrameExists(slotFrame)
+	if not slotFrame then return nil, nil, nil end
+	local sellFrame, sellButton, titleLabel = getSellFrameParts(slotFrame)
+	if sellFrame then
+		return sellFrame, sellButton, titleLabel
+	end
+
+	local template = getSellFrameTemplate()
+	if not template then
+		return nil, nil, nil
+	end
+
+	local cloned = template:Clone()
+	cloned.Name = "SellFrame"
+	cloned.Visible = false
+	cloned.Parent = slotFrame
+	return getSellFrameParts(slotFrame)
+end
+
+local function requestSellPriceFromServer(petId)
+	if not PetSellQuoteRemote then return 0 end
+	local ok, result = pcall(function()
+		return PetSellQuoteRemote:InvokeServer(tostring(petId))
+	end)
+	if not ok then return 0 end
+	return math.max(0, math.floor(tonumber(result) or 0))
+end
+
+local function updateSellSlotText(petFolder, slotFrame)
+	if not petFolder or not slotFrame then return end
+	local sellFrame, _, titleLabel = getSellFrameParts(slotFrame)
+	if not sellFrame or not titleLabel then return end
+
+	local petId = tostring(petFolder.Name)
+	local cachedState = getCachedStateForPetFolder(petFolder)
+	local levelValue = petFolder:FindFirstChild("Level")
+	local level = (levelValue and levelValue.Value) or (cachedState and cachedState.level) or 1
+
+	local quotedPrice = requestSellPriceFromServer(petId)
+	titleLabel.Text = ("Sell for %s (Lv.%s)"):format(Utilities.Short.en(quotedPrice), tostring(math.max(1, math.floor(tonumber(level) or 1))))
+end
+
+local function closeAllSellFrames(exceptPetId)
+	for petId, slotFrame in pairs(SellSlotByPetId) do
+		if exceptPetId ~= nil and tostring(petId) == tostring(exceptPetId) then
+			continue
+		end
+		local sellFrame = slotFrame and (slotFrame:FindFirstChild("SellFrame") or findDescendantByNameInsensitive(slotFrame, "SellFrame"))
+		if sellFrame then
+			sellFrame.Visible = false
+		end
+	end
+end
+
 
 function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 	task.wait(0.1)
@@ -166,11 +261,42 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 	end
 	NewPet.Name = PetInstance.Name
 	NewPet.Parent = Parent == nil and PetFrame.MainFrame.ObjectHolder or Parent
+	
+	if Parent == SellObjectHolder then
+		SellSlotByPetId[PetInstance.Name] = NewPet
+		closeAllSellFrames()
+
+		local sellFrame, sellButton, _ = ensureSellFrameExists(NewPet)
+		if sellFrame then
+			sellFrame.Visible = false
+		end
+		updateSellSlotText(PetInstance, NewPet)
+
+		NewPet.Button.MouseButton1Click:Connect(function()
+			local myPetId = tostring(PetInstance.Name)
+			local shouldOpen = OpenSellFramePetId ~= myPetId
+			closeAllSellFrames(myPetId)
+			local thisSellFrame = NewPet:FindFirstChild("SellFrame") or findDescendantByNameInsensitive(NewPet, "SellFrame")
+			if thisSellFrame then
+				thisSellFrame.Visible = shouldOpen
+			end
+			OpenSellFramePetId = shouldOpen and myPetId or nil
+			updateSellSlotText(PetInstance, NewPet)
+			Utilities.Audio.PlayAudio("Click")
+		end)
+
+		if sellButton and sellButton:IsA("GuiButton") then
+			sellButton.MouseButton1Click:Connect(function()
+				Remotes.Pet:FireServer("Sell", tonumber(PetInstance.Name))
+				Utilities.Audio.PlayAudio("Click")
+			end)
+		end
+	end
 
 	local multiplier = getPetMultiplier(PetInstance)
-	if SortTable == nil then
+	if Parent == nil and SortTable == nil then
 		PetInventory[#PetInventory+1] = {ID = PetInstance.Name, Multiplier = multiplier}
-	else
+	elseif SortTable ~= nil then
 		SortTable[#SortTable+1] = {ID = PetInstance.Name, Multiplier = multiplier}
 	end
 
@@ -337,17 +463,46 @@ end)()
 function OnPetAdded(Child) -- this function is ran when a pet is added, which updates the counters & adds a new pet ui instance
 	UpdateCounters()
 	AddPet(Child)
+	if SellObjectHolder then
+		AddPet(Child, nil, SellObjectHolder)
+		SortInventory(nil, SellObjectHolder)
+	end
 	SortInventory()
 end
 
 function OnPetRemoved(Child)
 	UpdateCounters()
-	PetFrame.MainFrame.ObjectHolder[Child.Name]:Destroy()
+	if PetFrame.MainFrame.ObjectHolder:FindFirstChild(Child.Name) then
+		PetFrame.MainFrame.ObjectHolder[Child.Name]:Destroy()
+	end
+	if SellObjectHolder and SellObjectHolder:FindFirstChild(Child.Name) then
+		SellObjectHolder[Child.Name]:Destroy()
+	end
+	SellSlotByPetId[Child.Name] = nil
+	if OpenSellFramePetId == tostring(Child.Name) then
+		OpenSellFramePetId = nil
+	end
 	SortInventory()
+	if SellObjectHolder then
+		SortInventory(nil, SellObjectHolder)
+	end
 end
 
 Data.Pets.ChildAdded:Connect(OnPetAdded)
 Data.Pets.ChildRemoved:Connect(OnPetRemoved)
+
+if SellObjectHolder then
+	for _, petFolder in Data.Pets:GetChildren() do
+		coroutine.wrap(function()
+			AddPet(petFolder, nil, SellObjectHolder)
+		end)()
+	end
+	coroutine.wrap(function()
+		task.wait(0.5)
+		SortInventory(nil, SellObjectHolder)
+	end)()
+end
+
 
 Player.NonSaveValues.PetsEquipped.Changed:Connect(UpdateCounters) -- if player equips a pet
 
@@ -432,6 +587,12 @@ if PetStateEvent then
 		if payloadInventoryId ~= "" then
 			CachedPetStateByKey[payloadInventoryId] = payload
 			CachedPetStateByKey["invId:"..payloadInventoryId] = payload
+
+			local petFolder = Data.Pets:FindFirstChild(payloadInventoryId)
+			local sellSlot = SellSlotByPetId[payloadInventoryId]
+			if petFolder and sellSlot then
+				updateSellSlotText(petFolder, sellSlot)
+			end
 		end
 
 		local selectedPetId, selectedPetName, selectedPetUid = getSelectedPetKeys()
