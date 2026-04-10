@@ -1,257 +1,426 @@
---// Services
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
+--// Pet Inventory
+local PetInventory = {} -- all pets will be added in this table
 
---// Variables
-local GameSettings = ReplicatedStorage["Game Settings"]
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local Modules = ReplicatedStorage.Modules
+local PetFrame = Frames.Pets
+local SideFrame = PetFrame.SideFrame
+PetFrame.SideFrameBlocker.Visible = true
+local PetStateEvent = ReplicatedStorage:FindFirstChild("PetStateEvent")
 
-local Multipliers = require(Modules.Multipliers)
-local PetMultipliers = require(Modules.PetMultipliers)
+local IsMultiDeleting = false
+local SelectedForDelete = {}
+local CanDeletePets = false
+local CachedPetStateByKey = {}
 
-local Cooldowns = {}
-local SELL_RING_MAX_DISTANCE = 12
+local function setDeleteMode(canDelete)
+	CanDeletePets = canDelete and true or false
+	SideFrame.Delete.Visible = CanDeletePets
+	PetFrame.Buttons.MultiDelete.Visible = CanDeletePets
 
-local function disableAllEquipsForPlayer(player)
-	if not player then return end
-	local data = player:FindFirstChild("Data")
-	local petsFolder = data and data:FindFirstChild("Pets")
-	if petsFolder then
-		for _, pet in ipairs(petsFolder:GetChildren()) do
-			local equippedValue = pet:FindFirstChild("Equipped")
-			if equippedValue then
-				equippedValue.Value = false
+	if not CanDeletePets then
+		if IsMultiDeleting then
+			IsMultiDeleting = false
+			PetFrame.Buttons.MultiDelete.Title.Text = "Multi Delete"
+		end
+
+		for _, petId in ipairs(SelectedForDelete) do
+			local petSlot = PetFrame.MainFrame.ObjectHolder:FindFirstChild(tostring(petId))
+			if petSlot and petSlot:FindFirstChild("Delete") then
+				petSlot.Delete.Visible = false
 			end
 		end
-	end
-
-	PetMultipliers.Multipliers[player.Name] = {}
-
-	local nonSave = player:FindFirstChild("NonSaveValues")
-	if nonSave and nonSave:FindFirstChild("PetsEquipped") then
-		nonSave.PetsEquipped.Value = 0
-	end
-
-	local playerPetFolder = workspace:FindFirstChild("PlayerPets") and workspace.PlayerPets:FindFirstChild(player.Name)
-	if playerPetFolder then
-		playerPetFolder:ClearAllChildren()
+		SelectedForDelete = {}
 	end
 end
 
-
-local function canDeleteFromSellRing(player)
-	if not player then return false end
-	local character = player.Character
-	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if not hrp then return false end
-
-	local map = workspace:FindFirstChild("Map")
-	local rings = map and map:FindFirstChild("Rings")
-	local sellRing = rings and rings:FindFirstChild("Sell")
-	local sellMainPart = sellRing and sellRing:FindFirstChild("MainPart")
-	if not sellMainPart or not sellMainPart:IsA("BasePart") then
-		return false
-	end
-
-	return (hrp.Position - sellMainPart.Position).Magnitude <= SELL_RING_MAX_DISTANCE
+if PetFrame:GetAttribute("CanDeletePets") == nil then
+	PetFrame:SetAttribute("CanDeletePets", false)
 end
-
---// Script
-
-Players.PlayerAdded:Connect(function(Player)
-	Cooldowns[Player.Name] = false
-
-	local PetFolder = Instance.new("Folder")
-	PetFolder.Name = Player.Name
-	PetFolder.Parent = workspace.PlayerPets
-
-	repeat wait() until Player:FindFirstChild("Loaded") and Player.Loaded.Value or Player.Parent == nil
-	if Player.Parent == nil then return end
-
-	disableAllEquipsForPlayer(Player)
+setDeleteMode(PetFrame:GetAttribute("CanDeletePets"))
+PetFrame:GetAttributeChangedSignal("CanDeletePets"):Connect(function()
+	setDeleteMode(PetFrame:GetAttribute("CanDeletePets"))
+end)
+PetFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+	if not PetFrame.Visible and PetFrame:GetAttribute("CanDeletePets") then
+		PetFrame:SetAttribute("CanDeletePets", false)
+	end
 end)
 
+local function getPetTemplate(petInstance)
+	if not petInstance then return nil end
+	local petNameValue = petInstance:FindFirstChild("PetName")
+	if not petNameValue then return nil end
+	return ReplicatedStorage.Pets:FindFirstChild(petNameValue.Value)
+end
+
+local function getPetMultiplier(petInstance)
+	local template = getPetTemplate(petInstance)
+	local settings = template and template:FindFirstChild("Settings")
+	local multiplier = settings and settings:FindFirstChild("Multiplier")
+	return (multiplier and tonumber(multiplier.Value)) or 1
+end
 
 
-Remotes.Rebirth.OnServerEvent:Connect(function(Player)
-	if Cooldowns[Player.Name] == false then
-		Cooldowns[Player.Name] = true	
-		if GameSettings.RebirthType.Value == "Linear" then
-			if Player.Data.PlayerData.Currency.Value >= GameSettings.RebirthBasePrice.Value * (Player.Data.PlayerData.Rebirth.Value + 1) then
-				Rebirth(Player)
-			end
+function SortInventory(SortTable, ObjectHolder)
+	local TableToSort = SortTable ~= nil and SortTable or PetInventory -- so it can differentiate between trade and normal inventories
+
+	table.sort(TableToSort, function(a,b)
+		if not a or not b then return end
+
+		if a.Multiplier ~= b.Multiplier then
+			return a.Multiplier > b.Multiplier
 		else
-			if Player.Data.PlayerData.Currency.Value >= GameSettings.RebirthBasePrice.Value * (GameSettings.RebirthMultiplier.Value + 1.25) ^ Player.Data.PlayerData.Rebirth.Value then
-				Rebirth(Player)
-			end
+			return a.ID > b.ID
 		end
-		task.wait(0.08)
-		Cooldowns[Player.Name] = false
-	end
-end)
+	end)
 
-local InventoryBridgeName = "PetInventoryAdoptionBridge"
+	for Order,PetInfo in TableToSort do
+		if not Data.Pets:FindFirstChild(PetInfo.ID) then
+			table.remove(TableToSort, Order)
+			continue
+		end
 
-local function getPetsFolder(player)
-	if not player then return nil end
-	local data = player:FindFirstChild("Data")
-	if not data then return nil end
-	return data:FindFirstChild("Pets")
-end
-
-local function getNextPetId(petsFolder)
-	local nextId = 1
-	for _, child in ipairs(petsFolder:GetChildren()) do
-		local numericId = tonumber(child.Name)
-		if numericId and numericId >= nextId then
-			nextId = numericId + 1
+		if not ObjectHolder then
+			PetFrame.MainFrame.ObjectHolder[PetInfo.ID].LayoutOrder = Order
+		else
+			ObjectHolder[PetInfo.ID].LayoutOrder = Order
 		end
 	end
-	return tostring(nextId)
 end
 
-local function createInventoryPet(player, petName)
-	if type(petName) ~= "string" then return nil end
-	if not ReplicatedStorage:FindFirstChild("Pets") then return nil end
-	if not ReplicatedStorage.Pets:FindFirstChild(petName) then
-		warn(("[PetServer] Could not grant '%s' to %s because ReplicatedStorage.Pets entry is missing"):format(tostring(petName), player.Name))
+local CurrentlySelected = 0
+
+local getSelectedPetKeys
+local updateSideFrameState
+
+local function findDescendantByNameInsensitive(root, targetName)
+	if not root or not targetName then return nil end
+	local lowerTarget = string.lower(targetName)
+	for _, desc in ipairs(root:GetDescendants()) do
+		if string.lower(desc.Name) == lowerTarget then
+			return desc
+		end
+	end
+	return nil
+end
+
+local function findSideFrameObject(name)
+	return SideFrame:FindFirstChild(name) or findDescendantByNameInsensitive(SideFrame, name)
+end
+
+
+function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
+	task.wait(0.1)
+	local NewPet = script.PetTemplate:Clone()
+
+	local PetTemplate = getPetTemplate(PetInstance)
+	if not PetTemplate then
+		warn(("[PetInventoryClient] Missing ReplicatedStorage.Pets model for inventory pet '%s'"):format(tostring(PetInstance.Name)))
+		NewPet:Destroy()
+		return nil
+	end
+	local PetModel = PetTemplate:Clone()
+	PetModel.Parent = NewPet.Display
+
+	local MainPart = PetModel:FindFirstChild("MainPart") or PetModel.PrimaryPart or PetModel:FindFirstChildWhichIsA("BasePart", true)
+	local Pos
+
+	if not MainPart then
+		warn(PetModel.Name.." does not have a BasePart, could not render inventory slot")
+		NewPet:Destroy()
 		return nil
 	end
 
-	local petsFolder = getPetsFolder(player)
-	if not petsFolder then
-		warn(("[PetServer] Could not grant '%s' to %s because Player.Data.Pets is missing"):format(tostring(petName), player.Name))
-		return nil
-	end
+	Pos = MainPart.Position
+	local Camera = Instance.new("Camera")
+	NewPet.Display.CurrentCamera = Camera
+	PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
+	Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
 
-	if Multipliers.GetMaxPetsStorage(player) <= #petsFolder:GetChildren() then
-		warn(("[PetServer] Could not grant '%s' to %s because storage is full"):format(tostring(petName), player.Name))
-		return nil
-	end
+	if not Parent then -- normal pet
+		NewPet.Equipped.Visible = false
 
-	local petFolder = Instance.new("Folder")
-	petFolder.Name = getNextPetId(petsFolder)
-	petFolder.Parent = petsFolder
-
-	local petNameValue = Instance.new("StringValue")
-	petNameValue.Name = "PetName"
-	petNameValue.Value = petName
-	petNameValue.Parent = petFolder
-
-	local equippedValue = Instance.new("BoolValue")
-	equippedValue.Name = "Equipped"
-	equippedValue.Value = false
-	equippedValue.Parent = petFolder
-
-	return petFolder
-end
-
-local inventoryBridge = ReplicatedStorage:FindFirstChild(InventoryBridgeName)
-if not inventoryBridge or not inventoryBridge:IsA("BindableEvent") then
-	inventoryBridge = Instance.new("BindableEvent")
-	inventoryBridge.Name = InventoryBridgeName
-	inventoryBridge.Parent = ReplicatedStorage
-end
-
-inventoryBridge.Event:Connect(function(player, petName)
-	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
-	createInventoryPet(player, petName)
-end)
-
-
--- Pet
-function LoadEquipped(Player)
-	local EquippedPets = PetMultipliers.Multipliers[Player.Name]
-
-	for PetId, Value in EquippedPets do
-		local PetModel = workspace.PlayerPets[Player.Name]:FindFirstChild(PetId)
-
-		if not PetModel then
-			local PetInstance = Player.Data.Pets[PetId]
-			local NewPet = ReplicatedStorage.Pets[PetInstance.PetName.Value]:Clone()
-			NewPet.Name = PetId
-
-			for _, Part in NewPet:GetChildren() do
-				if Part:IsA("BasePart") then
-					Part.Anchored = true
+		NewPet.Button.MouseButton1Click:Connect(function()
+			if not IsMultiDeleting then
+				UpdateSideFrame(PetInstance)
+			else
+				if not CanDeletePets then return end
+				if not table.find(SelectedForDelete, tonumber(PetInstance.Name)) then
+					table.insert(SelectedForDelete, tonumber(PetInstance.Name))
+					NewPet.Delete.Visible = true
+				else
+					table.remove(SelectedForDelete, table.find(SelectedForDelete, tonumber(PetInstance.Name)))
+					NewPet.Delete.Visible = false
 				end
 			end
+			Utilities.Audio.PlayAudio("Click")
+		end)
+	end
+	NewPet.Name = PetInstance.Name
+	NewPet.Parent = Parent == nil and PetFrame.MainFrame.ObjectHolder or Parent
 
-			local Billboard = script.BillboardGui:Clone()
-			Billboard.PetName.Text = PetInstance.PetName.Value
-			Billboard.PetRarity.Text = ReplicatedStorage.Pets[PetInstance.PetName.Value].Settings.Rarity.Value
-			Billboard.StudsOffset = Vector3.new(0, NewPet.MainPart.Size.Y, 0)
-			Billboard.Parent = NewPet
-
-			NewPet:PivotTo(Player.Character.HumanoidRootPart.CFrame)			
-			NewPet.Parent = workspace.PlayerPets[Player.Name]
-		end
+	local multiplier = getPetMultiplier(PetInstance)
+	if SortTable == nil then
+		PetInventory[#PetInventory+1] = {ID = PetInstance.Name, Multiplier = multiplier}
+	else
+		SortTable[#SortTable+1] = {ID = PetInstance.Name, Multiplier = multiplier}
 	end
 
-	for _,PlayerPet in workspace.PlayerPets[Player.Name]:GetChildren() do
-		if not EquippedPets[tonumber(PlayerPet.Name)] then
-			PlayerPet:Destroy()
-		end
+	return NewPet
+end
+
+function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pets
+	CurrentlySelected = tonumber(PetInstance.Name)
+	PetFrame.SideFrameBlocker.Visible = false
+	
+	if SideFrame:FindFirstChild("Title") then
+		SideFrame.Title.Visible = false
+	end
+
+	if SideFrame.Display:FindFirstChild("PetModel") then
+		SideFrame.Display.PetModel:Destroy()
+	end
+
+	local PetTemplate = getPetTemplate(PetInstance)
+	if not PetTemplate then
+		SideFrame.Multiplier.Amount.Text = "x1"
+		return
+	end
+	local PetModel = PetTemplate:Clone()
+	PetModel.Name = "PetModel"
+	PetModel.Parent = SideFrame.Display
+
+	local MainPart = PetModel:FindFirstChild("MainPart") or PetModel.PrimaryPart or PetModel:FindFirstChildWhichIsA("BasePart", true)
+	if not MainPart then
+		SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
+		return
+	end
+	local Pos = MainPart.Position
+	local Camera = Instance.new("Camera")
+	SideFrame.Display.CurrentCamera = Camera
+	PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
+	Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
+
+	SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
+	local selectedPetId, selectedPetName = getSelectedPetKeys()
+	local cachedState = selectedPetId and (
+		CachedPetStateByKey[selectedPetId]
+			or (selectedPetName and CachedPetStateByKey[tostring(selectedPetName)])
+	) or nil
+	if cachedState then
+		updateSideFrameState(cachedState)
+	elseif PetStateEvent then
+		pcall(function()
+			PetStateEvent:FireServer("RequestOwnedPetsState")
+		end)
 	end
 end
 
-function EquipPet(Player, Pet)
-	if Pet.Equipped.Value then return end -- Already equipped
-	if Multipliers.GetMaxPetsEquipped(Player) <= Player.NonSaveValues.PetsEquipped.Value then return end -- Too many pets equipped
-	Pet.Equipped.Value = true
-	PetMultipliers.AddPet(Player.Name, Pet)
-	Player.NonSaveValues.PetsEquipped.Value = PetMultipliers.GetPetsEquipped(Player.Name)
+local function setBar(sideFrame, barName, value, maxValue)
+	local barFill = sideFrame:FindFirstChild(barName) or findDescendantByNameInsensitive(sideFrame, barName)
+	if not barFill then return end
+
+	maxValue = maxValue and math.max(maxValue, 1) or 100
+	local normalizedValue = math.clamp((tonumber(value) or 0) / maxValue, 0, 1)
+	barFill.Size = UDim2.new(normalizedValue, 0, barFill.Size.Y.Scale, barFill.Size.Y.Offset)
+
+	local textLabel = barFill:FindFirstChild("Text")
+		or barFill:FindFirstChild("Amount")
+		or barFill:FindFirstChildWhichIsA("TextLabel")
+		or barFill.Parent and barFill.Parent:FindFirstChild(barName:gsub("Fill", "Text"))
+		or (barFill.Parent and (barFill.Parent:FindFirstChild("Text") or barFill.Parent:FindFirstChild("Amount") or barFill.Parent:FindFirstChildWhichIsA("TextLabel")))
+	if textLabel then
+		textLabel.Text = ("%d / %d"):format(math.floor(tonumber(value) or 0), math.floor(maxValue))
+	end
 end
 
-function UnequipPet(Player, Pet)
-	if not Pet.Equipped.Value then return end -- Already unequipped
-	Pet.Equipped.Value = false
-	PetMultipliers.RemovePet(Player.Name, tonumber(Pet.Name))
-	Player.NonSaveValues.PetsEquipped.Value = PetMultipliers.GetPetsEquipped(Player.Name)
-end
+updateSideFrameState = function(payload)
+	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
 
-function EquipAction(Player, Pet) -- this is the action for equipping a pet
-	disableAllEquipsForPlayer(Player)
-	return
-end
+	setBar(SideFrame, "hungerbarfill", payload.hunger, 100)
+	setBar(SideFrame, "wetbarfill", payload.wetness, 100)
+	setBar(SideFrame, "dirtbarfill", payload.dirtiness, 100)
 
-function DeleteAction(Player, Pet) -- this is the action for deleting a pet
-	if Pet.Equipped.Value then UnequipPet(Player, Pet) end -- unequip if it's equipped
-	Pet:Destroy()
-end
-
-Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
-	if type(Parameter) ~= "table" then -- so if this condition is true, then Parameter should be the id of the pet
-		local Pet = Player.Data.Pets[Parameter]
-		if not Pet then return end
-
-		if Action == "Equip" then
-			EquipAction(Player, Pet)
-		elseif Action == "Delete" then
-			if not canDeleteFromSellRing(Player) then return end
-			DeleteAction(Player, Pet)
-		end
-
-		disableAllEquipsForPlayer(Player)
-	else -- there are multiple ids
-		if Action == "Equip" then -- equip all pets
-			disableAllEquipsForPlayer(Player)
-
-		elseif Action == "Delete" then -- delete all pets
-			if not canDeleteFromSellRing(Player) then return end
-			for _,PetId in Parameter do
-				local Pet = Player.Data.Pets[PetId]
-				if not Pet then continue end
-				DeleteAction(Player, Pet)				
+	local xpFill = findSideFrameObject("xpbarfill")
+	if xpFill then
+		local progress = math.clamp(tonumber(payload.levelProgress) or 0, 0, 1)
+		xpFill.Size = UDim2.new(progress, 0, xpFill.Size.Y.Scale, xpFill.Size.Y.Offset)
+		local xpText = xpFill:FindFirstChild("Text")
+			or xpFill:FindFirstChild("Amount")
+			or xpFill:FindFirstChildWhichIsA("TextLabel")
+			or (xpFill.Parent and (xpFill.Parent:FindFirstChild("Text") or xpFill.Parent:FindFirstChild("Amount") or xpFill.Parent:FindFirstChildWhichIsA("TextLabel")))
+		if xpText then
+			if payload.xpInLevel and payload.xpForNext and payload.xpForNext ~= math.huge then
+				xpText.Text = ("%d / %d XP"):format(math.max(0, payload.xpInLevel), math.max(1, math.floor(payload.xpForNext)))
+			else
+				xpText.Text = ("%d XP"):format(math.max(0, payload.xp or 0))
 			end
 		end
-
-		disableAllEquipsForPlayer(Player)
 	end
+end
+
+getSelectedPetKeys = function()
+	if CurrentlySelected == 0 then return nil, nil end
+	local selectedId = tostring(CurrentlySelected)
+	local selectedPetFolder = Data.Pets:FindFirstChild(selectedId)
+	local selectedPetName = selectedPetFolder and selectedPetFolder:FindFirstChild("PetName") and selectedPetFolder.PetName.Value or nil
+	return selectedId, selectedPetName
+end
+
+local function updateSideFrameState(payload)
+	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
+
+	setBar(SideFrame, "hungerbarfill", payload.hunger, 100)
+	setBar(SideFrame, "wetbarfill", payload.wetness, 100)
+	setBar(SideFrame, "dirtbarfill", payload.dirtiness, 100)
+
+	local xpFill = findSideFrameObject("xpbarfill")
+	if xpFill then
+		local progress = math.clamp(tonumber(payload.levelProgress) or 0, 0, 1)
+		xpFill.Size = UDim2.new(progress, 0, xpFill.Size.Y.Scale, xpFill.Size.Y.Offset)
+		local xpText = xpFill:FindFirstChild("Text")
+			or xpFill:FindFirstChild("Amount")
+			or xpFill:FindFirstChildWhichIsA("TextLabel")
+			or (xpFill.Parent and (xpFill.Parent:FindFirstChild("Text") or xpFill.Parent:FindFirstChild("Amount") or xpFill.Parent:FindFirstChildWhichIsA("TextLabel")))
+		if xpText then
+			if payload.xpInLevel and payload.xpForNext and payload.xpForNext ~= math.huge then
+				xpText.Text = ("%d / %d XP"):format(math.max(0, payload.xpInLevel), math.max(1, math.floor(payload.xpForNext)))
+			else
+				xpText.Text = ("%d XP"):format(math.max(0, payload.xp or 0))
+			end
+		end
+	end
+end
+
+local function getSelectedPetKeys()
+	if CurrentlySelected == 0 then return nil, nil end
+	local selectedId = tostring(CurrentlySelected)
+	local selectedPetFolder = Data.Pets:FindFirstChild(selectedId)
+	local selectedPetName = selectedPetFolder and selectedPetFolder:FindFirstChild("PetName") and selectedPetFolder.PetName.Value or nil
+	return selectedId, selectedPetName
+end
+
+
+
+for _,v in Data.Pets:GetChildren() do -- load pets on join
+	coroutine.wrap(function()
+		AddPet(v)
+	end)()
+end
+
+
+function UpdateCounters()
+	PetFrame.InventoryCounters.Storage.Text = #Player.Data.Pets:GetChildren().."/"..Multipliers.GetMaxPetsStorage(Player)
+	PetFrame.InventoryCounters.Equipped.Text = Player.NonSaveValues.PetsEquipped.Value.."/"..Multipliers.GetMaxPetsEquipped(Player)
+end
+
+UpdateCounters()
+
+coroutine.wrap(function()
+	task.wait(0.5)
+	SortInventory() -- made it wait 0.5 seconds before it sorted inventory because the pets are not yet loaded
+end)()
+
+function OnPetAdded(Child) -- this function is ran when a pet is added, which updates the counters & adds a new pet ui instance
+	UpdateCounters()
+	AddPet(Child)
+	SortInventory()
+end
+
+function OnPetRemoved(Child)
+	UpdateCounters()
+	PetFrame.MainFrame.ObjectHolder[Child.Name]:Destroy()
+	SortInventory()
+end
+
+Data.Pets.ChildAdded:Connect(OnPetAdded)
+Data.Pets.ChildRemoved:Connect(OnPetRemoved)
+
+Player.NonSaveValues.PetsEquipped.Changed:Connect(UpdateCounters) -- if player equips a pet
+
+-- Pet Sideframe scripts
+Utilities.ButtonAnimations.Create(SideFrame.Delete, 1.04)
+
+if SideFrame:FindFirstChild("Equip") then
+	SideFrame.Equip.Visible = false
+end
+
+SideFrame.Delete.Click.MouseButton1Click:Connect(function()
+	if not CanDeletePets then return end
+	Remotes.Pet:FireServer("Delete", CurrentlySelected)
+	PetFrame.SideFrameBlocker.Visible = true
+	Utilities.Audio.PlayAudio("Click")
 end)
 
-Players.PlayerRemoving:Connect(function(Player)
-	Cooldowns[Player.Name] = nil
-	workspace.PlayerPets[Player.Name]:Destroy()
+-- Bottom Buttons
+for _, Button in PetFrame.Buttons:GetChildren() do
+	if not Button:IsA("Frame") then continue end
+	Utilities.ButtonAnimations.Create(Button)
+end
+
+PetFrame.Buttons.MultiDelete.Click.MouseButton1Click:Connect(function()	
+	if not CanDeletePets then return end
+	IsMultiDeleting = not IsMultiDeleting
+
+	if not IsMultiDeleting then
+		PetFrame.Buttons.MultiDelete.Title.Text = "Multi Delete"
+		Remotes.Pet:FireServer("Delete", SelectedForDelete)
+		for _,v in SelectedForDelete do
+			local PetFrame = PetFrame.MainFrame.ObjectHolder[v]
+			PetFrame.Delete.Visible = false
+		end
+		SelectedForDelete = {}
+	else
+		PetFrame.Buttons.MultiDelete.Title.Text = "Confirm"
+	end
+	Utilities.Audio.PlayAudio("Click")
 end)
+
+if PetFrame.Buttons:FindFirstChild("EquipBest") then
+	PetFrame.Buttons.EquipBest.Visible = false
+end
+
+if PetFrame.InventoryCounters:FindFirstChild("Equipped") then
+	PetFrame.InventoryCounters.Equipped.Visible = false
+end
+
+if PetStateEvent then
+	local function requestOwnedPetStates()
+		pcall(function()
+			PetStateEvent:FireServer("RequestOwnedPetsState")
+		end)
+	end
+	
+	requestOwnedPetStates()
+	task.spawn(function()
+		while true do
+			task.wait(6)
+			requestOwnedPetStates()
+		end
+	end)
+	
+	PetStateEvent.OnClientEvent:Connect(function(action, petModel, payload)
+		if action ~= "UpdatePetState" or not payload then return end
+
+		local payloadId = tostring(payload.petName or "")
+		local modelName = petModel and tostring(petModel.Name) or ""
+		if payloadId ~= "" then
+			CachedPetStateByKey[payloadId] = payload
+		end
+		if modelName ~= "" then
+			CachedPetStateByKey[modelName] = payload
+		end
+
+		local selectedPetId, selectedPetName = getSelectedPetKeys()
+		if not selectedPetId then return end
+
+		local payloadCompareId = tostring(payload.petName or (petModel and petModel.Name) or "")
+		if payloadCompareId ~= selectedPetId
+			and payloadCompareId ~= tostring(selectedPetName)
+			and modelName ~= selectedPetId
+			and modelName ~= tostring(selectedPetName) then
+			return
+		end
+
+		updateSideFrameState(payload)
+	end)
+end
