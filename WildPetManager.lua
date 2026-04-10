@@ -356,6 +356,57 @@ function WildPetManager:ClearPlayerPetsForRebirth(player)
 	end
 end
 
+function WildPetManager:RemoveOwnedPetByUid(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then
+		return false, 0
+	end
+
+	local removedCount = 0
+	local petsToRemove = {}
+
+	for petModel, state in pairs(self.petState) do
+		if petModel and state and not state.wild and tostring(state.ownerUserId) == tostring(player.UserId) then
+			local stateUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+			if stateUid == petUid then
+				table.insert(petsToRemove, petModel)
+			end
+		end
+	end
+
+	for _, petModel in ipairs(petsToRemove) do
+		if self.carryingPetByUserId[player.UserId] == petModel then
+			self.carryingPetByUserId[player.UserId] = nil
+		end
+
+		if self.wildPetPickupConns[petModel] then
+			pcall(function() self.wildPetPickupConns[petModel]:Disconnect() end)
+			self.wildPetPickupConns[petModel] = nil
+		end
+		if self.ownedPetPickupConns[petModel] then
+			pcall(function() self.ownedPetPickupConns[petModel]:Disconnect() end)
+			self.ownedPetPickupConns[petModel] = nil
+		end
+
+		self.wildPets[petModel] = nil
+		self.petState[petModel] = nil
+
+		if petModel.Parent then
+			pcall(function() petModel:Destroy() end)
+		end
+		removedCount += 1
+	end
+
+	if removedCount > 0 then
+		self:UpdateOwnedPetRegistryForPlayer(player)
+		if self.SaveManager then
+			self.SaveManager:ScheduleSave(player)
+		end
+	end
+
+	return removedCount > 0, removedCount
+end
+
+
 function WildPetManager:UpdateOwnedPetRegistryForPlayer(player)
 	if not player then return end
 	local playerDataRoot = ServerStorage:FindFirstChild("PlayerData")
