@@ -1,5 +1,7 @@
 local PetStandManager = {}
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 function PetStandManager:Initialize(stateTable, carryingTable, playersService, petMovement, saveManager, config)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
@@ -17,6 +19,7 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
+	self.Multipliers = require(ReplicatedStorage.Modules.Multipliers)
 	self.TycoonUtils:Initialize(self.Config)
 
 	self:WatchPurchaseContainers()
@@ -271,10 +274,30 @@ function PetStandManager:AddCurrencyToPlayer(player, amount)
 		warn("[PetStandManager] Player has no Currency value:", player.Name)
 		return 0
 	end
+	
+	local totalCurrency = playerData:FindFirstChild("TotalCurrency")
+
+	local currencyMultiplier = 1
+	if self.Multipliers and self.Multipliers.CurrencyMultiplier then
+		local ok, resolvedMultiplier = pcall(self.Multipliers.CurrencyMultiplier, player)
+		if ok and tonumber(resolvedMultiplier) and resolvedMultiplier > 0 then
+			currencyMultiplier = resolvedMultiplier
+		else
+			warn("[PetStandManager] Failed to resolve currency multiplier for:", player.Name)
+		end
+	end
+
+	local finalAward = math.max(1, math.floor((amount * currencyMultiplier) + 0.5))
+
 
 	if currency:IsA("NumberValue") or currency:IsA("IntValue") then
-		currency.Value = currency.Value + amount
-		return amount
+		currency.Value = currency.Value + finalAward
+
+		if totalCurrency and (totalCurrency:IsA("NumberValue") or totalCurrency:IsA("IntValue")) then
+			totalCurrency.Value = totalCurrency.Value + finalAward
+		end
+
+		return finalAward
 	end
 
 	return 0
