@@ -7,6 +7,65 @@ local Players = game:GetService("Players")
 --// Variables
 
 local GamepassFolder = ReplicatedStorage.Gamepasses
+local PetGrantBridgeName = "PetGamepassGrantBridge"
+local PetGrantBridge = ReplicatedStorage:FindFirstChild(PetGrantBridgeName)
+
+if not PetGrantBridge or not PetGrantBridge:IsA("BindableEvent") then
+	PetGrantBridge = Instance.new("BindableEvent")
+	PetGrantBridge.Name = PetGrantBridgeName
+	PetGrantBridge.Parent = ReplicatedStorage
+end
+
+--[[
+	Optional fallback configuration for pet-pack gamepasses.
+	Preferred setup is configuring each ReplicatedStorage.Gamepasses.<Gamepass> with:
+	- Attribute "GrantedPetsCsv" (example: "Dog, Cat, Bunny")
+]]
+local PET_GAMEPASS_CONFIG = {
+	-- Example:
+	-- ["StarterPetPack"] = {"Dog", "Cat"},
+}
+
+local function splitAndTrimCsv(csvText)
+	local pets = {}
+	if type(csvText) ~= "string" then return pets end
+
+	for rawName in string.gmatch(csvText, "([^,]+)") do
+		local cleanName = tostring(rawName):gsub("^%s+", ""):gsub("%s+$", "")
+		if cleanName ~= "" then
+			table.insert(pets, cleanName)
+		end
+	end
+
+	return pets
+end
+
+local function getGrantedPetsForGamepass(gamepassValueObject)
+	if not gamepassValueObject then return {} end
+
+	local configuredCsv = gamepassValueObject:GetAttribute("GrantedPetsCsv")
+	local petsFromAttributes = splitAndTrimCsv(configuredCsv)
+	if #petsFromAttributes > 0 then
+		return petsFromAttributes
+	end
+
+	local fallbackPets = PET_GAMEPASS_CONFIG[gamepassValueObject.Name]
+	if type(fallbackPets) == "table" and #fallbackPets > 0 then
+		return fallbackPets
+	end
+
+	return {}
+end
+
+local function getPurchaseType(valueObject)
+	if not valueObject then return "GamePass" end
+	local configuredType = tostring(valueObject:GetAttribute("PurchaseType") or "")
+	configuredType = string.lower(configuredType)
+	if configuredType == "developerproduct" or configuredType == "devproduct" or configuredType == "product" then
+		return "DeveloperProduct"
+	end
+	return "GamePass"
+end
 
 function GetGamepassFromID(ID)
 	for _, Gamepass in GamepassFolder:GetChildren() do
@@ -25,8 +84,17 @@ MarketPlaceService.PromptGamePassPurchaseFinished:Connect(function(Player, Gamep
 
 	local GP = Player.Data.Gamepasses:FindFirstChild(GamepassType.Name)
 	if not GP then warn("Gamepass: "..GamepassType.Name.." does not exist in Player.Data.Gamepasses! Edit Datastore.Datastore.Values to add it!") return end
-
+	
+	local wasOwned = GP.Value
+	
 	GP.Value = true
+	
+	if not wasOwned then
+		local petsToGrant = getGrantedPetsForGamepass(GamepassType)
+		if #petsToGrant > 0 then
+			PetGrantBridge:Fire(Player, GamepassType.Name, petsToGrant)
+		end
+	end
 end)
 
 local function GetPet(SelectedEgg)
@@ -71,6 +139,23 @@ end
 
 MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 	local Player = Players:GetPlayerByUserId(ReceiptInfo.PlayerId)
+	if not Player then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	for _, purchaseEntry in GamepassFolder:GetChildren() do
+		if tonumber(purchaseEntry.Value) ~= tonumber(ReceiptInfo.ProductId) then continue end
+		local explicitType = getPurchaseType(purchaseEntry)
+		local petsToGrant = getGrantedPetsForGamepass(purchaseEntry)
+		local hasPetGrantConfig = #petsToGrant > 0
+		if explicitType ~= "DeveloperProduct" and not hasPetGrantConfig then continue end
+
+		if #petsToGrant > 0 then
+			PetGrantBridge:Fire(Player, purchaseEntry.Name, petsToGrant)
+		end
+
+		return Enum.ProductPurchaseDecision.PurchaseGranted
+	end
 
 	for _, EggInfo in ReplicatedStorage.Eggs:GetChildren() do
 		if not EggInfo:FindFirstChild("ProductId") then continue end
