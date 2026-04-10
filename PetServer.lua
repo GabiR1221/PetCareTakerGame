@@ -1,6 +1,7 @@
 --// Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 
 --// Variables
 local GameSettings = ReplicatedStorage["Game Settings"]
@@ -12,6 +13,33 @@ local PetMultipliers = require(Modules.PetMultipliers)
 
 local Cooldowns = {}
 local SELL_RING_MAX_DISTANCE = 12
+
+local function disableAllEquipsForPlayer(player)
+	if not player then return end
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if petsFolder then
+		for _, pet in ipairs(petsFolder:GetChildren()) do
+			local equippedValue = pet:FindFirstChild("Equipped")
+			if equippedValue then
+				equippedValue.Value = false
+			end
+		end
+	end
+
+	PetMultipliers.Multipliers[player.Name] = {}
+
+	local nonSave = player:FindFirstChild("NonSaveValues")
+	if nonSave and nonSave:FindFirstChild("PetsEquipped") then
+		nonSave.PetsEquipped.Value = 0
+	end
+
+	local playerPetFolder = workspace:FindFirstChild("PlayerPets") and workspace.PlayerPets:FindFirstChild(player.Name)
+	if playerPetFolder then
+		playerPetFolder:ClearAllChildren()
+	end
+end
+
 
 local function canDeleteFromSellRing(player)
 	if not player then return false end
@@ -30,20 +58,7 @@ local function canDeleteFromSellRing(player)
 	return (hrp.Position - sellMainPart.Position).Magnitude <= SELL_RING_MAX_DISTANCE
 end
 
---// Script
 
-Players.PlayerAdded:Connect(function(Player)
-	Cooldowns[Player.Name] = false
-
-	local PetFolder = Instance.new("Folder")
-	PetFolder.Name = Player.Name
-	PetFolder.Parent = workspace.PlayerPets
-
-	repeat wait() until Player:FindFirstChild("Loaded") and Player.Loaded.Value or Player.Parent == nil
-	if Player.Parent == nil then return end
-
-	LoadEquipped(Player)
-end)
 
 
 
@@ -84,7 +99,34 @@ local function getNextPetId(petsFolder)
 	return tostring(nextId)
 end
 
-local function createInventoryPet(player, petName)
+local function ensurePetUidValue(petFolder, desiredUid)
+	if not petFolder then return nil end
+	local uidValue = petFolder:FindFirstChild("PetUID")
+	if not uidValue then
+		uidValue = Instance.new("StringValue")
+		uidValue.Name = "PetUID"
+		uidValue.Parent = petFolder
+	end
+
+	if type(desiredUid) == "string" and desiredUid ~= "" then
+		uidValue.Value = desiredUid
+	elseif uidValue.Value == "" then
+		uidValue.Value = HttpService:GenerateGUID(false)
+	end
+
+	return uidValue.Value
+end
+
+local function ensureAllPlayerPetUids(player)
+	local petsFolder = getPetsFolder(player)
+	if not petsFolder then return end
+
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		ensurePetUidValue(petFolder)
+	end
+end
+
+local function createInventoryPet(player, petName, petUid)
 	if type(petName) ~= "string" then return nil end
 	if not ReplicatedStorage:FindFirstChild("Pets") then return nil end
 	if not ReplicatedStorage.Pets:FindFirstChild(petName) then
@@ -111,6 +153,7 @@ local function createInventoryPet(player, petName)
 	petNameValue.Name = "PetName"
 	petNameValue.Value = petName
 	petNameValue.Parent = petFolder
+	ensurePetUidValue(petFolder, petUid)
 
 	local equippedValue = Instance.new("BoolValue")
 	equippedValue.Name = "Equipped"
@@ -127,9 +170,9 @@ if not inventoryBridge or not inventoryBridge:IsA("BindableEvent") then
 	inventoryBridge.Parent = ReplicatedStorage
 end
 
-inventoryBridge.Event:Connect(function(player, petName)
+inventoryBridge.Event:Connect(function(player, petName, petUid)
 	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
-	createInventoryPet(player, petName)
+	createInventoryPet(player, petName, petUid)
 end)
 
 
@@ -185,11 +228,8 @@ function UnequipPet(Player, Pet)
 end
 
 function EquipAction(Player, Pet) -- this is the action for equipping a pet
-	if Pet.Equipped.Value then
-		UnequipPet(Player, Pet)
-	else
-		EquipPet(Player, Pet)
-	end
+	disableAllEquipsForPlayer(Player)
+	return
 end
 
 function DeleteAction(Player, Pet) -- this is the action for deleting a pet
@@ -209,14 +249,10 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 			DeleteAction(Player, Pet)
 		end
 
-		LoadEquipped(Player)
+		disableAllEquipsForPlayer(Player)
 	else -- there are multiple ids
 		if Action == "Equip" then -- equip all pets
-			for _,PetId in Parameter do
-				local Pet = Player.Data.Pets[PetId]
-				if not Pet then continue end
-				EquipAction(Player, Pet)
-			end
+			disableAllEquipsForPlayer(Player)
 
 		elseif Action == "Delete" then -- delete all pets
 			if not canDeleteFromSellRing(Player) then return end
@@ -227,6 +263,27 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 			end
 		end
 
-		LoadEquipped(Player)
+		disableAllEquipsForPlayer(Player)
 	end
+end)
+
+Players.PlayerRemoving:Connect(function(Player)
+	Cooldowns[Player.Name] = nil
+	workspace.PlayerPets[Player.Name]:Destroy()
+end)
+
+--// Script
+
+Players.PlayerAdded:Connect(function(Player)
+	Cooldowns[Player.Name] = false
+
+	local PetFolder = Instance.new("Folder")
+	PetFolder.Name = Player.Name
+	PetFolder.Parent = workspace.PlayerPets
+
+	repeat wait() until Player:FindFirstChild("Loaded") and Player.Loaded.Value or Player.Parent == nil
+	if Player.Parent == nil then return end
+	
+	ensureAllPlayerPetUids(Player)
+	disableAllEquipsForPlayer(Player)
 end)
