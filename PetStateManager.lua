@@ -2,6 +2,23 @@ local PetStateManager = {}
 local LEVEL_THRESHOLDS = { 0, 50, 150, 350, 750, 1550 }
 local Players = game:GetService("Players")
 
+local function resolveInventoryPetIdByUid(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then return nil end
+	local data = player:FindFirstChild("Data")
+	local pets = data and data:FindFirstChild("Pets")
+	if not pets then return nil end
+
+	for _, petFolder in ipairs(pets:GetChildren()) do
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		if uidValue and uidValue.Value == petUid then
+			return tostring(petFolder.Name)
+		end
+	end
+
+	return nil
+end
+
+
 function PetStateManager:Initialize(stateTable, petStateEvent, carryingTable)
 	self.petState = stateTable or {}
 	self.petStateEvent = petStateEvent
@@ -87,10 +104,16 @@ function PetStateManager:SendStateToOwner(petModel)
 		wetness = tonumber(st.wetness) or 0,
 		hunger = tonumber(st.hunger) or 100,
 		petName = tostring(petModel.Name),
+		petUid = tostring(st.petUid or petModel:GetAttribute("PetUID") or ""),
+		inventoryPetId = nil,
 		levelProgress = progress,
 		xpInLevel = xpInLevel,
 		xpForNext = xpForNext
 	}
+	if payload.petUid ~= "" then
+		st.petUid = payload.petUid
+	end
+	payload.inventoryPetId = resolveInventoryPetIdByUid(player, payload.petUid)
 
 	pcall(function()
 		self.petStateEvent:FireClient(player, "UpdatePetState", petModel, payload)
