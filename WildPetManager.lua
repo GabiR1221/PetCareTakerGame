@@ -4,6 +4,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local INVENTORY_BRIDGE_NAME = "PetInventoryAdoptionBridge"
+local HttpService = game:GetService("HttpService")
 
 local function normalizePetName(name)
 	if not name then return "" end
@@ -23,11 +24,28 @@ local function grantAdoptedPetToInventory(player, petModel)
 	if not player or not petModel then return end
 	local templateName = petModel:GetAttribute("TemplateName") or petModel.Name
 	if type(templateName) ~= "string" or templateName == "" then return end
+	local petUid = petModel:GetAttribute("PetUID")
+	if type(petUid) ~= "string" or petUid == "" then
+		petUid = HttpService:GenerateGUID(false)
+		petModel:SetAttribute("PetUID", petUid)
+	end
 
 	local bridge = ReplicatedStorage:FindFirstChild(INVENTORY_BRIDGE_NAME)
 	if bridge and bridge:IsA("BindableEvent") then
-		bridge:Fire(player, templateName)
+		bridge:Fire(player, templateName, petUid)
 	end
+end
+
+local function ensurePetUid(modelOrStateCarrier)
+	if not modelOrStateCarrier then return nil end
+	local uid = modelOrStateCarrier:GetAttribute("PetUID")
+	if type(uid) == "string" and uid ~= "" then
+		return uid
+	end
+
+	uid = HttpService:GenerateGUID(false)
+	modelOrStateCarrier:SetAttribute("PetUID", uid)
+	return uid
 end
 
 
@@ -123,6 +141,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 	local pet = template:Clone()
 	pet.Name = templateName
 	pet:SetAttribute("TemplateName", templateName)
+	local petUid = ensurePetUid(pet)
 	pet.Parent = workspace
 
 	local power = template:GetAttribute("Power") or 1
@@ -145,6 +164,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		accessories = {A = false, B = false},
 		power = power,
 		rarityMultiplier = rarityMult,
+		petUid = petUid,
 	}
 
 	self.PetRigManager:EnsurePetRig(pet)
@@ -786,6 +806,7 @@ function WildPetManager:AutoAdoptCarriedWildPet(player)
 	state.wild = false
 	state.location = "player"
 	state.carrierUserId = nil
+	state.petUid = ensurePetUid(pet)
 	self:_resetDirtVisualCache(pet)
 
 	local adoptionEvent = ReplicatedStorage:FindFirstChild("PetAdoptionEvent")
@@ -877,7 +898,9 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 	-- Position the pet
 	pet:SetPrimaryPartCFrame(CFrame.new(randomPos))
 	pet.Parent = workspace
-	pet.Name = "WildPet_" .. tostring(math.random(10000, 99999))
+	local petUid = ensurePetUid(pet)
+	local displayId = string.sub(tostring(petUid or math.random(10000, 99999)), 1, 8)
+	pet.Name = ("%s_%s"):format(selectedModel.Name, displayId)
 	pet:SetAttribute("TemplateName", selectedModel.Name)
 	if pet.PrimaryPart then
 		pet:SetPrimaryPartCFrame(CFrame.new(randomPos))
@@ -905,7 +928,8 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		wetness = math.random(20, 60),
 		hunger = 100,
 		power = power,
-		rarityMultiplier = rarityMult
+		rarityMultiplier = rarityMult,
+		petUid = petUid
 	}
 
 	self.wildPets[pet] = spawnArea
@@ -1046,6 +1070,7 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 		self.petState[pet].ownerUserId = player.UserId
 		self.petState[pet].wild = false
 		self.petState[pet].location = "player"
+		self.petState[pet].petUid = ensurePetUid(pet)
 		self:_resetDirtVisualCache(pet)
 
 		-- Update carrying tables
@@ -1157,12 +1182,17 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			local pet = template:Clone()
 			pet.Name = petInfo.modelName
 			pet:SetAttribute("TemplateName", petInfo.modelName)
+			if type(petInfo.petUid) == "string" and petInfo.petUid ~= "" then
+				pet:SetAttribute("PetUID", petInfo.petUid)
+			end
+			local resolvedPetUid = ensurePetUid(pet)
 			pet.Parent = workspace
 
 			-- restore state
 			self.petState[pet] = petInfo
 			self.petState[pet].ownerUserId = player.UserId
 			self.petState[pet].wild = false
+			self.petState[pet].petUid = resolvedPetUid
 
 			if not self.petState[pet].power then
 				self.petState[pet].power = petInfo.power or 1
