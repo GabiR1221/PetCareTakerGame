@@ -114,6 +114,28 @@ function PetStateManager:SendStateToOwner(petModel)
 		st.petUid = payload.petUid
 	end
 	payload.inventoryPetId = resolveInventoryPetIdByUid(player, payload.petUid)
+	if payload.inventoryPetId then
+		local data = player:FindFirstChild("Data")
+		local petsFolder = data and data:FindFirstChild("Pets")
+		local inventoryPet = petsFolder and petsFolder:FindFirstChild(payload.inventoryPetId)
+		if inventoryPet then
+			local levelValue = inventoryPet:FindFirstChild("Level")
+			if not levelValue then
+				levelValue = Instance.new("IntValue")
+				levelValue.Name = "Level"
+				levelValue.Parent = inventoryPet
+			end
+			levelValue.Value = level
+
+			local xpValue = inventoryPet:FindFirstChild("XP")
+			if not xpValue then
+				xpValue = Instance.new("IntValue")
+				xpValue.Name = "XP"
+				xpValue.Parent = inventoryPet
+			end
+			xpValue.Value = xp
+		end
+	end
 
 	pcall(function()
 		self.petStateEvent:FireClient(player, "UpdatePetState", petModel, payload)
