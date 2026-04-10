@@ -45,6 +45,7 @@ local accessoryEvent = ReplicatedStorage:FindFirstChild("PetAccessoryEvent")
 local petStateEvent = ReplicatedStorage:FindFirstChild("PetStateEvent")
 local petCarryEvent = ReplicatedStorage:FindFirstChild("PetCarryEvent")
 local PetGamepassGrantBridgeName = "PetGamepassGrantBridge"
+local PetSellBridgeName = "PetSellBridge"
 
 -- Configuration
 local SHOWER_HOLD_TIME = 3
@@ -321,6 +322,20 @@ end
 			end
 		end
 	end)
+	
+local petSellBridge = ReplicatedStorage:FindFirstChild(PetSellBridgeName)
+if not petSellBridge or not petSellBridge:IsA("BindableEvent") then
+	petSellBridge = Instance.new("BindableEvent")
+	petSellBridge.Name = PetSellBridgeName
+	petSellBridge.Parent = ReplicatedStorage
+end
+
+petSellBridge.Event:Connect(function(player, petUid)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	if type(petUid) ~= "string" or petUid == "" then return end
+	WildPetManager:RemoveOwnedPetByUid(player, petUid)
+end)
+
 
 
 
