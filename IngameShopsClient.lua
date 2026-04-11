@@ -242,22 +242,23 @@ local function GemRing()
 		local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 		local gemPart = workspace.Map.Rings.GemShop.MainPart
 		local inRange = humanoidRootPart and (humanoidRootPart.Position - gemPart.Position).Magnitude < 10
+		local isVisible = Frames.GemShop.Visible
+
+		if wasInRange and wasVisible and not isVisible then
+			ringDismissedWhileInside.Gem = true
+		end
 
 		if inRange then
-			if not Frames.GemShop.Visible and not ringDismissedWhileInside.Gem then
+			if not isVisible and not ringDismissedWhileInside.Gem then
 				Utilities.ButtonHandler.OnClick(Frames.GemShop, UDim2.new(0.359,0,0.414,0))
 			end
 		else
-			if Frames.GemShop.Visible then
+			if isVisible then
 				Utilities.ButtonHandler.OnClick(Frames.GemShop, UDim2.new(0.359,0,0.414,0))
 			end
 			ringDismissedWhileInside.Gem = false
 		end
 
-		if wasInRange and wasVisible and not Frames.GemShop.Visible then
-			ringDismissedWhileInside.Gem = true
-		end
-		
 		wasInRange = inRange and true or false
 		wasVisible = Frames.GemShop.Visible
 
@@ -276,23 +277,27 @@ local function BankRing()
 		local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 		local bankPart = workspace.Map.Rings.Bank.MainPart
 		local inRange = humanoidRootPart and (humanoidRootPart.Position - bankPart.Position).Magnitude < 10
+		local isVisible = Frames.Bank.Visible
+
+		if wasInRange and wasVisible and not isVisible then
+			ringDismissedWhileInside.Bank = true
+		end
 
 		if inRange then
-			if not Frames.Bank.Visible and not ringDismissedWhileInside.Bank then
+			if not isVisible and not ringDismissedWhileInside.Bank then
 				Utilities.ButtonHandler.OnClick(Frames.Bank, BANK_OPEN_POSITION)
-			elseif Frames.Bank.Visible then
+			elseif isVisible then
 				showPetsNextToBank()
 			end
 		else
-			if Frames.Bank.Visible then
+			if isVisible then
 				Utilities.ButtonHandler.OnClick(Frames.Bank, BANK_OPEN_POSITION)
 			end
 			ringDismissedWhileInside.Bank = false
 		end
 
-		if wasInRange and wasVisible and not Frames.Bank.Visible then
-			ringDismissedWhileInside.Bank = true
-		end
+		wasInRange = inRange and true or false
+		wasVisible = Frames.Bank.Visible
 	end
 end
 
@@ -306,20 +311,21 @@ local function SellRing()
 		local rings = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Rings")
 		local sellPart = rings and rings:FindFirstChild("Sell") and rings.Sell:FindFirstChild("MainPart")
 		local inRange = humanoidRootPart and sellPart and (humanoidRootPart.Position - sellPart.Position).Magnitude < 10
+		local isVisible = SellShopFrame and SellShopFrame.Visible or false
+
+		if wasInRange and wasVisible and not isVisible then
+			ringDismissedWhileInside.Sell = true
+		end
 
 		if inRange then
 			if not ringDismissedWhileInside.Sell then
 				showPetsForSell()
 			end
 		else
-			if SellShopFrame and SellShopFrame.Visible then
+			if isVisible then
 				hideSellShop()
 			end
 			ringDismissedWhileInside.Sell = false
-		end
-
-		if wasInRange and wasVisible and SellShopFrame and not SellShopFrame.Visible then
-			ringDismissedWhileInside.Sell = true
 		end
 
 		wasInRange = inRange and true or false
@@ -338,6 +344,11 @@ local function FoodRing()
 		local foodRing = rings and (rings:FindFirstChild("FoodShop") or rings:FindFirstChild("Food") or rings:FindFirstChild("Shop"))
 		local foodPart = foodRing and foodRing:FindFirstChild("MainPart")
 		local inRange = humanoidRootPart and foodPart and (humanoidRootPart.Position - foodPart.Position).Magnitude < 10
+		local isVisible = FoodShopFrame and FoodShopFrame.Visible or false
+
+		if wasInRange and wasVisible and not isVisible then
+			ringDismissedWhileInside.Food = true
+		end
 
 		if inRange then
 			if not wasInRange and not ringDismissedWhileInside.Food then
@@ -345,14 +356,10 @@ local function FoodRing()
 				task.spawn(refreshFoodShop)
 			end
 		else
-			if FoodShopFrame and FoodShopFrame.Visible then
+			if isVisible then
 				closeFoodShop()
 			end
 			ringDismissedWhileInside.Food = false
-		end
-
-		if wasInRange and wasVisible and FoodShopFrame and not FoodShopFrame.Visible then
-			ringDismissedWhileInside.Food = true
 		end
 
 		wasInRange = inRange and true or false
