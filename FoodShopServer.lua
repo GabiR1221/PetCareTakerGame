@@ -50,7 +50,9 @@ end
 
 
 local function getRandomOutOfStockIndices(totalItems)
-	local targetOutOfStock = math.min(3, totalItems)
+	-- Keep at least one item eligible for stock so the shop never rolls fully empty.
+	local maxOutOfStock = math.max(0, totalItems - 1)
+	local targetOutOfStock = math.min(3, maxOutOfStock)
 	local picks = {}
 	local maxAttempts = math.max(20, totalItems * 3)
 	local attempts = 0
