@@ -13,6 +13,7 @@ local PetMultipliers = require(Modules.PetMultipliers)
 
 local Cooldowns = {}
 local SELL_RING_MAX_DISTANCE = 12
+local PetSellRequestBridgeName = "PetSellRequestBridge"
 local PetSellQuoteRemote = Remotes:FindFirstChild("PetSellQuote")
 if not PetSellQuoteRemote or not PetSellQuoteRemote:IsA("RemoteFunction") then
 	PetSellQuoteRemote = Instance.new("RemoteFunction")
@@ -74,6 +75,15 @@ local function canDeleteFromSellRing(player)
 	return (hrp.Position - sellMainPart.Position).Magnitude <= SELL_RING_MAX_DISTANCE
 end
 
+local function canSellPetFromSource(player, options)
+	options = options or {}
+	if options.allowOffRing == true then
+		return true
+	end
+	return canDeleteFromSellRing(player)
+end
+
+
 local function resolvePetTemplate(petFolder)
 	if not petFolder then return nil end
 	local petNameValue = petFolder:FindFirstChild("PetName")
@@ -111,9 +121,9 @@ local function resolvePetLevel(petFolder)
 	return math.max(1, math.floor(level))
 end
 
-local function calculatePetSellPrice(player, petFolder)
+local function calculatePetSellPrice(player, petFolder, options)
 	if not player or not petFolder then return 0 end
-	if not canDeleteFromSellRing(player) then return 0 end
+	if not canSellPetFromSource(player, options) then return 0 end
 
 	local petTemplate = resolvePetTemplate(petFolder)
 	local basePrice = resolveSellBasePrice(petFolder, petTemplate)
@@ -305,8 +315,8 @@ function DeleteAction(Player, Pet) -- this is the action for deleting a pet
 	Pet:Destroy()
 end
 
-function SellAction(Player, Pet)
-	local payout = calculatePetSellPrice(Player, Pet)
+function SellAction(Player, Pet, options)
+	local payout = calculatePetSellPrice(Player, Pet, options)
 	if payout <= 0 then return end
 
 	local currencyValue = Player:FindFirstChild("Data")
@@ -316,14 +326,18 @@ function SellAction(Player, Pet)
 
 	local petUidValue = Pet:FindFirstChild("PetUID")
 	local petUid = petUidValue and tostring(petUidValue.Value) or ""
+	local petNameValue = Pet:FindFirstChild("PetName")
+	local petName = petNameValue and tostring(petNameValue.Value) or ""
 
 	currencyValue.Value += payout
 	DeleteAction(Player, Pet)
 
 	local sellBridge = ReplicatedStorage:FindFirstChild("PetSellBridge")
-	if petUid ~= "" and sellBridge and sellBridge:IsA("BindableEvent") then
-		sellBridge:Fire(Player, petUid)
+	if sellBridge and sellBridge:IsA("BindableEvent") then
+		sellBridge:Fire(Player, petUid, petName)
 	end
+	
+	return payout
 end
 
 PetSellQuoteRemote.OnServerInvoke = function(player, petId)
@@ -335,6 +349,31 @@ PetSellQuoteRemote.OnServerInvoke = function(player, petId)
 	return calculatePetSellPrice(player, pet)
 end
 
+local petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+if not petSellRequestBridge or not petSellRequestBridge:IsA("BindableFunction") then
+	petSellRequestBridge = Instance.new("BindableFunction")
+	petSellRequestBridge.Name = PetSellRequestBridgeName
+	petSellRequestBridge.Parent = ReplicatedStorage
+end
+
+petSellRequestBridge.OnInvoke = function(player, petId, options)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then
+		return false, "InvalidPlayer", 0
+	end
+
+	local pets = player:FindFirstChild("Data") and player.Data:FindFirstChild("Pets")
+	local pet = pets and pets:FindFirstChild(tostring(petId))
+	if not pet then
+		return false, "PetMissing", 0
+	end
+
+	local payout = SellAction(player, pet, options)
+	if not payout or payout <= 0 then
+		return false, "SellRejected", 0
+	end
+
+	return true, "Sold", payout
+end
 
 
 Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
