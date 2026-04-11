@@ -4,17 +4,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local event = ReplicatedStorage:WaitForChild("DailyRewardEvent")
 
-local ui = script.Parent
 local main = script.Parent
 
-local openButton = ui.GiftButton
-local closeButton = main.CloseButton
 
 local rewardsFrame = main.RewardsFrame
 local day7Frame = main:WaitForChild("Day7")
 
 local defaultSize = main.Size
-local defaultGiftSize = openButton.Size
 
 ------------------------------------------------
 -- REWARD DATA
@@ -27,54 +23,6 @@ local lastClaimTime = 0
 local notifiedReady = false
 
 main.Visible = false
-
-------------------------------------------------
--- FLOATING GIFT
-
-local basePos = openButton.Position
-
-task.spawn(function()
-	while true do
-
-		TweenService:Create(
-			openButton,
-			TweenInfo.new(2,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut),
-			{Position = basePos - UDim2.new(0,0,0,10),Rotation = 6}
-		):Play()
-
-		task.wait(2)
-
-		TweenService:Create(
-			openButton,
-			TweenInfo.new(2,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut),
-			{Position = basePos,Rotation = -6}
-		):Play()
-
-		task.wait(2)
-
-	end
-end)
-
-------------------------------------------------
--- BUTTON HOVER
-
-local function addHover(button)
-
-	local normal = button.Size
-	local hover = normal + UDim2.new(0,4,0,4)
-
-	button.MouseEnter:Connect(function()
-		TweenService:Create(button,TweenInfo.new(.15),{Size = hover}):Play()
-	end)
-
-	button.MouseLeave:Connect(function()
-		TweenService:Create(button,TweenInfo.new(.15),{Size = normal}):Play()
-	end)
-
-end
-
-addHover(openButton)
-addHover(closeButton)
 
 ------------------------------------------------
 -- TIME FORMAT
@@ -104,7 +52,7 @@ local function showCoins(amount)
 	label.TextColor3 = Color3.fromRGB(255,221,0)
 	label.Font = Enum.Font.GothamBold
 
-	label.Parent = ui
+	label.Parent = main
 
 	local tween = TweenService:Create(
 		label,
@@ -219,37 +167,6 @@ local function removeGlow(frame)
 
 end
 
-------------------------------------------------
--- GIFT PULSE
-
-local pulse
-
-local function startPulse()
-
-	if pulse then return end
-
-	pulse = TweenService:Create(
-		openButton,
-		TweenInfo.new(.7,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true),
-		{Size = defaultGiftSize + UDim2.new(0,6,0,6)}
-	)
-
-	pulse:Play()
-
-end
-
-local function stopPulse()
-
-	if pulse then
-		pulse:Cancel()
-		pulse = nil
-	end
-
-	openButton.Size = defaultGiftSize
-
-end
-
-------------------------------------------------
 -- UPDATE UI
 
 local function updateUI()
@@ -271,7 +188,6 @@ local function updateUI()
 				button.Text = "CLAIM"
 				button.BackgroundColor3 = Color3.fromRGB(0,255,120)
 
-				startPulse()
 				addGlow(frame)
 
 				if not notifiedReady then
@@ -284,7 +200,6 @@ local function updateUI()
 				button.Text = formatTime(remaining)
 				button.BackgroundColor3 = Color3.fromRGB(255,170,0)
 
-				stopPulse()
 				removeGlow(frame)
 
 				notifiedReady = false
@@ -321,8 +236,6 @@ for _,frame in pairs(getAllDays()) do
 
 	if button and day then
 
-		addHover(button)
-
 		button.MouseButton1Click:Connect(function()
 
 			if day ~= currentDay then return end
@@ -354,44 +267,6 @@ event.OnClientEvent:Connect(function(day,lastClaim)
 
 end)
 
-------------------------------------------------
--- OPEN UI
-
-openButton.MouseButton1Click:Connect(function()
-
-	if main.Visible then return end
-
-	main.Visible = true
-	main.Size = UDim2.new(0,0,0,0)
-
-	TweenService:Create(
-		main,
-		TweenInfo.new(.35,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
-		{Size = defaultSize}
-	):Play()
-
-end)
-
-------------------------------------------------
--- CLOSE UI
-
-closeButton.MouseButton1Click:Connect(function()
-
-	local tween = TweenService:Create(
-		main,
-		TweenInfo.new(.25,Enum.EasingStyle.Quad,Enum.EasingDirection.In),
-		{Size = UDim2.new(0,0,0,0)}
-	)
-
-	tween:Play()
-	tween.Completed:Wait()
-
-	main.Visible = false
-	main.Size = defaultSize
-
-end)
-
-------------------------------------------------
 
 task.spawn(function()
 	while task.wait(1) do
