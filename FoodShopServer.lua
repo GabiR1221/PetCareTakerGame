@@ -4,19 +4,12 @@ local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 
 -- Remotes
-local RemoteFolder = Instance.new("Folder")
-RemoteFolder.Name = "ShopRemotes"
-RemoteFolder.Parent = ReplicatedStorage
-
-local RequestItems = ReplicatedStorage:WaitForChild("FoodShopRemotes"):WaitForChild("RequestItems")
-
-local BuyItem = ReplicatedStorage:WaitForChild("FoodShopRemotes"):WaitForChild("BuyItem")
-
-local TimerEvent = ReplicatedStorage:WaitForChild("FoodShopRemotes"):WaitForChild("TimerEvent")
-
-local RestockShop = ReplicatedStorage:WaitForChild("FoodShopRemotes"):WaitForChild("RestockShop")
-
-local UpdateShop = ReplicatedStorage:WaitForChild("FoodShopRemotes"):WaitForChild("UpdateShop")
+local remotesFolder = ReplicatedStorage:WaitForChild("FoodShopRemotes")
+local RequestItems = remotesFolder:WaitForChild("RequestItems")
+local BuyItem = remotesFolder:WaitForChild("BuyItem")
+local TimerEvent = remotesFolder:WaitForChild("TimerEvent")
+local RestockShop = remotesFolder:WaitForChild("RestockShop")
+local UpdateShop = remotesFolder:WaitForChild("UpdateShop")
 
 -- Shop Items
 local ShopItems = ReplicatedStorage:WaitForChild("ShopItems")
@@ -29,6 +22,7 @@ local timeLeft = RESTOCK_INTERVAL
 
 -- Track last out-of-stock indices
 local lastOutOfStock = {}
+local purchaseLocks = {}
 
 -- Map DevProductId → ItemName
 local ProductMap = {}
@@ -41,23 +35,47 @@ for _, folder in ipairs(ShopItems:GetChildren()) do
 	end
 end
 
--- Initialize stock randomly
-local function InitializeStock()
+local function buildFolders()
 	local folders = {}
 	for _, folder in ipairs(ShopItems:GetChildren()) do
 		if folder:IsA("Folder") then
 			table.insert(folders, folder)
 		end
 	end
+	table.sort(folders, function(a, b)
+		return a.Name < b.Name
+	end)
+	return folders
+end
 
-	local outOfStock = {}
-	while #outOfStock < 3 and #folders >= 3 do
-		local idx = math.random(1, #folders)
-		if not table.find(outOfStock, idx) then
-			table.insert(outOfStock, idx)
+
+local function getRandomOutOfStockIndices(totalItems)
+	local targetOutOfStock = math.min(3, totalItems)
+	local picks = {}
+	local maxAttempts = math.max(20, totalItems * 3)
+	local attempts = 0
+
+	while #picks < targetOutOfStock and attempts < maxAttempts do
+		attempts += 1
+		local idx = math.random(1, totalItems)
+		if not table.find(picks, idx) and not table.find(lastOutOfStock, idx) then
+			table.insert(picks, idx)
 		end
 	end
 
+	while #picks < targetOutOfStock do
+		local idx = math.random(1, totalItems)
+		if not table.find(picks, idx) then
+			table.insert(picks, idx)
+		end
+	end
+
+	return picks
+end
+
+local function applyStockRoll(folders, outOfStock)
+	local inStockCount = 0
+	local eligibleFallback = {}
 	for i, folder in ipairs(folders) do
 		local stock = folder:FindFirstChild("Stock")
 		local chance = folder:FindFirstChild("StockChance") and folder.StockChance.Value or 100
@@ -65,74 +83,71 @@ local function InitializeStock()
 			if table.find(outOfStock, i) then
 				stock.Value = 0
 			else
-				if math.random(1,100) <= chance then
+				table.insert(eligibleFallback, stock)
+				if math.random(1, 100) <= chance then
 					stock.Value = math.random(1, MAX_STOCK)
 				else
 					stock.Value = 0
+				end
+				if stock.Value > 0 then
+					inStockCount += 1
 				end
 			end
 		end
 	end
 
+	if inStockCount <= 0 and #eligibleFallback > 0 then
+		local targetStock = eligibleFallback[math.random(1, #eligibleFallback)]
+		if targetStock then
+			targetStock.Value = math.random(1, MAX_STOCK)
+		end
+	end
+end
+
+-- Initialize stock randomly
+local function initializeStock()
+	local folders = buildFolders()
+	if #folders == 0 then return end
+
+	local outOfStock = getRandomOutOfStockIndices(#folders)
+	applyStockRoll(folders, outOfStock)
 	lastOutOfStock = outOfStock
 end
-InitializeStock()
+initializeStock()
+
+local function getPlayerCurrencyValue(player)
+	local data = player:FindFirstChild("Data")
+	local playerData = data and data:FindFirstChild("PlayerData")
+	local coins = playerData and playerData:FindFirstChild("Currency")
+	if coins and (coins:IsA("NumberValue") or coins:IsA("IntValue")) then
+		return coins
+	end
+	return nil
+end
 
 -- Build data for client
-local function GetItemData()
+local function getItemData()
 	local items = {}
-	for _, folder in ipairs(ShopItems:GetChildren()) do
-		if folder:IsA("Folder") then
-			table.insert(items, {
-				Name = folder.Name,
-				Description = folder:FindFirstChild("Description") and folder.Description.Value or "",
-				Image = folder:FindFirstChild("Image") and folder.Image.Value or "",
-				Stock = folder:FindFirstChild("Stock") and folder.Stock.Value or 0,
-				Price = folder:FindFirstChild("Price") and folder.Price.Value or 0,
-				DevProductId = folder:FindFirstChild("DevProductId") and folder.DevProductId.Value or nil
-			})
-		end
+	for _, folder in ipairs(buildFolders()) do
+		table.insert(items, {
+			Name = folder.Name,
+			Description = folder:FindFirstChild("Description") and folder.Description.Value or "",
+			Image = folder:FindFirstChild("Image") and folder.Image.Value or "",
+			Stock = folder:FindFirstChild("Stock") and folder.Stock.Value or 0,
+			Price = folder:FindFirstChild("Price") and folder.Price.Value or 0,
+			DevProductId = folder:FindFirstChild("DevProductId") and folder.DevProductId.Value or nil,
+		})
 	end
 	return items
 end
 
 -- Restock logic
-local function Restock(force)
-	local folders = {}
-	for _, folder in ipairs(ShopItems:GetChildren()) do
-		if folder:IsA("Folder") then
-			table.insert(folders, folder)
-		end
-	end
-
+local function Restock()
+	local folders = buildFolders()
 	if #folders == 0 then return end
 
-	-- Pick 3 items to be out of stock (cannot repeat last time)
-	local outOfStock = {}
-	while #outOfStock < 3 and #folders >= 3 do
-		local idx = math.random(1, #folders)
-		if not table.find(outOfStock, idx) and not table.find(lastOutOfStock, idx) then
-			table.insert(outOfStock, idx)
-		end
-	end
-
-	-- Randomize stock for all items
-	for i, folder in ipairs(folders) do
-		local stock = folder:FindFirstChild("Stock")
-		local chance = folder:FindFirstChild("StockChance") and folder.StockChance.Value or 100
-		if stock then
-			if table.find(outOfStock, i) then
-				stock.Value = 0
-			else
-				if math.random(1,100) <= chance then
-					stock.Value = math.random(1, MAX_STOCK)
-				else
-					stock.Value = 0
-				end
-			end
-		end
-	end
-
+	local outOfStock = getRandomOutOfStockIndices(#folders)
+	applyStockRoll(folders, outOfStock)
 	lastOutOfStock = outOfStock
 end
 
@@ -150,14 +165,14 @@ task.spawn(function()
 			task.wait(1)
 			timeLeft -= 1
 		end
-		Restock(false)
+		Restock()
 		UpdateShop:FireAllClients()
 	end
 end)
 
 -- Request items
-RequestItems.OnServerInvoke = function(player)
-	return GetItemData()
+RequestItems.OnServerInvoke = function()
+	return getItemData()
 end
 
 -- Give item
@@ -187,8 +202,20 @@ end
 
 -- Buy with Coins
 BuyItem.OnServerInvoke = function(player, itemName)
+	if type(itemName) ~= "string" then
+		return false, "Invalid item request"
+	end
+
+	if purchaseLocks[itemName] then
+		return false, "Please try again"
+	end
+	purchaseLocks[itemName] = true
+
 	local folder = ShopItems:FindFirstChild(itemName)
-	if not folder then return false, "Item not found" end
+	if not folder then
+		purchaseLocks[itemName] = nil
+		return false, "Item not found"
+	end
 
 	local stock = folder:FindFirstChild("Stock")
 	local price = folder:FindFirstChild("Price")
@@ -201,22 +228,29 @@ BuyItem.OnServerInvoke = function(player, itemName)
 	end
 
 	if not stock or not price or not tool then
+		purchaseLocks[itemName] = nil
 		return false, "Item not configured properly"
 	end
 	if stock.Value <= 0 then
+		purchaseLocks[itemName] = nil
 		return false, "Out of stock"
 	end
 
-	local coins = player:FindFirstChild("Data"):FindFirstChild("PlayerData"):FindFirstChild("Currency")
-	if not coins then return false, "No Coins stat found" end
+	local coins = getPlayerCurrencyValue(player)
+	if not coins then
+		purchaseLocks[itemName] = nil
+		return false, "No Coins stat found"
+	end
 	if coins.Value < price.Value then
+		purchaseLocks[itemName] = nil
 		return false, "Not enough Coins"
 	end
 
 	coins.Value -= price.Value
-	stock.Value -= 1
+	stock.Value = math.max(0, stock.Value - 1)
 	GiveItem(player, itemName)
 
+	purchaseLocks[itemName] = nil
 	UpdateShop:FireAllClients()
 	return true, "Purchased " .. itemName
 end
@@ -225,13 +259,13 @@ end
 MarketplaceService.ProcessReceipt = function(receiptInfo)
 	local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
 	if not player then
-		return Enum.ProductPurchaseDecision.NotProcessed
+		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
 	local productId = receiptInfo.ProductId
 
 	if productId == RESTOCK_PRODUCT_ID then
-		Restock(true)
+		Restock()
 		timeLeft = RESTOCK_INTERVAL
 		TimerEvent:FireAllClients(timeLeft)
 		UpdateShop:FireAllClients()
@@ -245,9 +279,9 @@ MarketplaceService.ProcessReceipt = function(receiptInfo)
 			UpdateShop:FireAllClients()
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		else
-			return Enum.ProductPurchaseDecision.NotProcessed
+			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 	end
 
-	return Enum.ProductPurchaseDecision.NotProcessed
+	return Enum.ProductPurchaseDecision.NotProcessedYet
 end
