@@ -406,6 +406,60 @@ function WildPetManager:RemoveOwnedPetByUid(player, petUid)
 	return removedCount > 0, removedCount
 end
 
+function WildPetManager:RemoveOneOwnedPetByName(player, petName)
+	if not player or type(petName) ~= "string" or petName == "" then
+		return false
+	end
+
+	local normalizedTarget = normalizePetName(petName)
+	local candidate = nil
+	local carryingCandidate = self.carryingPetByUserId[player.UserId]
+
+	for petModel, state in pairs(self.petState) do
+		if petModel and state and not state.wild and tostring(state.ownerUserId) == tostring(player.UserId) then
+			local templateName = tostring(petModel:GetAttribute("TemplateName") or petModel.Name or "")
+			if normalizePetName(templateName) == normalizedTarget then
+				if carryingCandidate and carryingCandidate == petModel then
+					candidate = petModel
+					break
+				end
+				candidate = candidate or petModel
+			end
+		end
+	end
+
+	if not candidate then
+		return false
+	end
+
+	if self.carryingPetByUserId[player.UserId] == candidate then
+		self.carryingPetByUserId[player.UserId] = nil
+	end
+
+	if self.wildPetPickupConns[candidate] then
+		pcall(function() self.wildPetPickupConns[candidate]:Disconnect() end)
+		self.wildPetPickupConns[candidate] = nil
+	end
+	if self.ownedPetPickupConns[candidate] then
+		pcall(function() self.ownedPetPickupConns[candidate]:Disconnect() end)
+		self.ownedPetPickupConns[candidate] = nil
+	end
+
+	self.wildPets[candidate] = nil
+	self.petState[candidate] = nil
+
+	if candidate.Parent then
+		pcall(function() candidate:Destroy() end)
+	end
+
+	self:UpdateOwnedPetRegistryForPlayer(player)
+	if self.SaveManager then
+		self.SaveManager:ScheduleSave(player)
+	end
+
+	return true
+end
+
 
 function WildPetManager:UpdateOwnedPetRegistryForPlayer(player)
 	if not player then return end
