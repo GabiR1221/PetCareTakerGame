@@ -16,6 +16,24 @@ local CachedPetStateByKey = {}
 local SellSlotByPetId = {}
 local OpenSellFramePetId = nil
 
+local function setSideFrameOpen(isOpen)
+	if not SideFrame then return end
+	SideFrame.Visible = isOpen and true or false
+	PetFrame.SideFrameBlocker.Visible = not isOpen
+
+	if not isOpen then
+		if SideFrame.Display and SideFrame.Display:FindFirstChild("PetModel") then
+			SideFrame.Display.PetModel:Destroy()
+		end
+		if SideFrame:FindFirstChild("Title") then
+			SideFrame.Title.Visible = true
+		end
+	end
+end
+
+setSideFrameOpen(false)
+
+
 local function setDeleteMode(canDelete)
 	CanDeletePets = canDelete and true or false
 	SideFrame.Delete.Visible = CanDeletePets
@@ -305,7 +323,7 @@ end
 
 function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pets
 	CurrentlySelected = tonumber(PetInstance.Name)
-	PetFrame.SideFrameBlocker.Visible = false
+	setSideFrameOpen(true)
 	
 	if SideFrame:FindFirstChild("Title") then
 		SideFrame.Title.Visible = false
@@ -472,6 +490,10 @@ end
 
 function OnPetRemoved(Child)
 	UpdateCounters()
+	if tonumber(Child.Name) == tonumber(CurrentlySelected) then
+		CurrentlySelected = 0
+		setSideFrameOpen(false)
+	end
 	if PetFrame.MainFrame.ObjectHolder:FindFirstChild(Child.Name) then
 		PetFrame.MainFrame.ObjectHolder[Child.Name]:Destroy()
 	end
@@ -516,7 +538,7 @@ end
 SideFrame.Delete.Click.MouseButton1Click:Connect(function()
 	if not CanDeletePets then return end
 	Remotes.Pet:FireServer("Delete", CurrentlySelected)
-	PetFrame.SideFrameBlocker.Visible = true
+	setSideFrameOpen(false)
 	Utilities.Audio.PlayAudio("Click")
 end)
 
