@@ -46,6 +46,7 @@ local petStateEvent = ReplicatedStorage:FindFirstChild("PetStateEvent")
 local petCarryEvent = ReplicatedStorage:FindFirstChild("PetCarryEvent")
 local PetGamepassGrantBridgeName = "PetGamepassGrantBridge"
 local PetSellBridgeName = "PetSellBridge"
+local PetSellRequestBridgeName = "PetSellRequestBridge"
 
 -- Configuration
 local SHOWER_HOLD_TIME = 3
@@ -62,7 +63,9 @@ local petGroundConnected = {}
 local petGroundXPTasks = {}
 local petGroundDirtinessTasks = {}
 local petPickupPromptConns = {}
+local sellPromptConns = {}
 local attachDropPickupPrompt
+local isInsideTycoonBounds
 
 local function getTycoonReturnPartForPlayer(userId)
 	local tycoonModel = TycoonUtils:FindTycoonByOwnerId(userId)
@@ -91,6 +94,56 @@ local function canPlayerDropCarriedPet(player, carriedPet)
 	end
 	return state.wild ~= true
 end
+
+local function canPlayerDropCarriedPetAtCurrentPosition(player, carriedPet)
+	if not canPlayerDropCarriedPet(player, carriedPet) then
+		return false
+	end
+
+	local character = player.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	if not root then
+		return false
+	end
+
+	local tycoonModel, returnPart = getTycoonReturnPartForPlayer(player.UserId)
+	local boundaryReference = carriedPet and (carriedPet.PrimaryPart or carriedPet:FindFirstChildWhichIsA("BasePart")) or root
+	if tycoonModel and returnPart and not isInsideTycoonBounds(boundaryReference, tycoonModel, returnPart) then
+		return false
+	end
+
+	return true
+end
+
+local function resolveInventoryPetIdByUid(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then return nil end
+	local data = player:FindFirstChild("Data")
+	local pets = data and data:FindFirstChild("Pets")
+	if not pets then return nil end
+	for _, petFolder in ipairs(pets:GetChildren()) do
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		if uidValue and uidValue.Value == petUid then
+			return tostring(petFolder.Name)
+		end
+	end
+	return nil
+end
+
+local function resolveInventoryPetIdByPetName(player, petName)
+	if not player or type(petName) ~= "string" or petName == "" then return nil end
+	local data = player:FindFirstChild("Data")
+	local pets = data and data:FindFirstChild("Pets")
+	if not pets then return nil end
+	for _, petFolder in ipairs(pets:GetChildren()) do
+		local petNameValue = petFolder:FindFirstChild("PetName")
+		if petNameValue and tostring(petNameValue.Value) == petName then
+			return tostring(petFolder.Name)
+		end
+	end
+	return nil
+end
+
+
 
 local function dropCarriedPet(player, options)
 	options = options or {}
@@ -137,7 +190,7 @@ local function dropCarriedPet(player, options)
 	return true
 end
 
-local function isInsideTycoonBounds(referencePart, tycoonModel, returnPart)
+isInsideTycoonBounds = function(referencePart, tycoonModel, returnPart)
 	if not referencePart or not tycoonModel then return true end
 
 	local boundaryPartName = tostring(tycoonModel:GetAttribute("CarryBoundaryPartName") or "PetCarryBoundary")
@@ -173,18 +226,57 @@ local function isInsideTycoonBounds(referencePart, tycoonModel, returnPart)
 		and math.abs(localPoint.Z) <= (boxSize.Z * 0.5 + margin)
 end
 
-local function forceReturnPlayerAndPetToTycoon(player, carriedPet, tycoonModel, returnPart)
-	if not player or not carriedPet or not carriedPet.Parent then
-		return false
-	end
-	if not tycoonModel or not returnPart or not returnPart:IsA("BasePart") then
-		return false
-	end
+local function connectSellPrompt(sellPart, petSellRequestBridge)
+	if not sellPart or not sellPart:IsA("BasePart") then return end
+	if not petSellRequestBridge or not petSellRequestBridge:IsA("BindableFunction") then return end
 
-	local returnPosition = returnPart.Position
-	local dropped = dropCarriedPet(player, { forcePosition = returnPosition })
+	local prompt = sellPart:FindFirstChild("SellPrompt")
+	if not prompt or not prompt:IsA("ProximityPrompt") then return end
+	if sellPromptConns[prompt] then return end
 
-	return dropped
+	sellPromptConns[prompt] = prompt.Triggered:Connect(function(player)
+		if not player then return end
+		local carriedPet = carryingPetByUserId[player.UserId]
+		if not carriedPet or not carriedPet.Parent then return end
+		
+		local state = petState[carriedPet]
+		if not state or state.wild == true then return end
+		if tostring(state.ownerUserId) ~= tostring(player.UserId) then return end
+
+		local petUid = tostring(state.petUid or carriedPet:GetAttribute("PetUID") or "")
+		local carriedPetName = tostring(carriedPet:GetAttribute("TemplateName") or carriedPet.Name or "")
+		local inventoryPetId = nil
+		if petUid ~= "" then
+			inventoryPetId = resolveInventoryPetIdByUid(player, petUid)
+		end
+		if not inventoryPetId then
+			inventoryPetId = resolveInventoryPetIdByPetName(player, carriedPetName)
+		end
+		if not inventoryPetId then return end
+
+		local ok, sold = pcall(function()
+			return petSellRequestBridge:Invoke(player, inventoryPetId, { allowOffRing = true, source = "SellPrompt" })
+		end)
+		if ok and sold then
+			carryingPetByUserId[player.UserId] = nil
+		end
+	end)
+
+	prompt.Destroying:Connect(function()
+		if sellPromptConns[prompt] then
+			pcall(function() sellPromptConns[prompt]:Disconnect() end)
+			sellPromptConns[prompt] = nil
+		end
+	end)
+end
+
+local function scanAndConnectSellPrompts(petSellRequestBridge)
+	if not petSellRequestBridge or not petSellRequestBridge:IsA("BindableFunction") then return end
+	for _, part in ipairs(workspace:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name == "SellPart" then
+			connectSellPrompt(part, petSellRequestBridge)
+		end
+	end
 end
 
 
@@ -330,12 +422,54 @@ if not petSellBridge or not petSellBridge:IsA("BindableEvent") then
 	petSellBridge.Parent = ReplicatedStorage
 end
 
-petSellBridge.Event:Connect(function(player, petUid)
+petSellBridge.Event:Connect(function(player, petUid, petName)
 	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
-	if type(petUid) ~= "string" or petUid == "" then return end
-	WildPetManager:RemoveOwnedPetByUid(player, petUid)
+	if type(petUid) == "string" and petUid ~= "" then
+		local removed = WildPetManager:RemoveOwnedPetByUid(player, petUid)
+		if removed then
+			return
+		end
+	end
+	if type(petName) == "string" and petName ~= "" then
+		WildPetManager:RemoveOneOwnedPetByName(player, petName)
+	end
 end)
 
+local petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+scanAndConnectSellPrompts(petSellRequestBridge)
+workspace.DescendantAdded:Connect(function(descendant)
+	if not petSellRequestBridge or not petSellRequestBridge:IsA("BindableFunction") then
+		petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+	end
+	if descendant:IsA("BasePart") and descendant.Name == "SellPart" then
+		connectSellPrompt(descendant, petSellRequestBridge)
+	end
+end)
+task.spawn(function()
+	while not (petSellRequestBridge and petSellRequestBridge:IsA("BindableFunction")) do
+		petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+		task.wait(1)
+	end
+	scanAndConnectSellPrompts(petSellRequestBridge)
+end)
+
+local petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+scanAndConnectSellPrompts(petSellRequestBridge)
+workspace.DescendantAdded:Connect(function(descendant)
+	if not petSellRequestBridge or not petSellRequestBridge:IsA("BindableFunction") then
+		petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+	end
+	if descendant:IsA("BasePart") and descendant.Name == "SellPart" then
+		connectSellPrompt(descendant, petSellRequestBridge)
+	end
+end)
+task.spawn(function()
+	while not (petSellRequestBridge and petSellRequestBridge:IsA("BindableFunction")) do
+		petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
+		task.wait(1)
+	end
+	scanAndConnectSellPrompts(petSellRequestBridge)
+end)
 
 
 
@@ -351,7 +485,7 @@ petCarryEvent.OnServerEvent:Connect(function(player, action)
 		local carriedPet = carryingPetByUserId[player.UserId]
 		local currentlyCarrying = carriedPet ~= nil
 		local petName = currentlyCarrying and tostring(carriedPet.Name) or nil
-		local canDrop = currentlyCarrying and canPlayerDropCarriedPet(player, carriedPet) or false
+		local canDrop = currentlyCarrying and canPlayerDropCarriedPetAtCurrentPosition(player, carriedPet) or false
 		petCarryEvent:FireClient(player, "CarryState", currentlyCarrying, petName, canDrop)
 		return
 	end
@@ -402,32 +536,6 @@ end
 			task.wait(6)
 		end
 	end)
-	
-	task.spawn(function()
-		while true do
-			for _, player in ipairs(Players:GetPlayers()) do
-				local carriedPet = carryingPetByUserId[player.UserId]
-				if carriedPet and carriedPet.Parent then
-				local state = petState[carriedPet]
-				if not state or state.wild == true then
-					continue
-				end
-					local character = player.Character
-					local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
-					if root then
-						local tycoonModel, returnPart = getTycoonReturnPartForPlayer(player.UserId)
-						local boundaryReference = carriedPet.PrimaryPart or carriedPet:FindFirstChildWhichIsA("BasePart") or root
-						if tycoonModel and returnPart and boundaryReference and not isInsideTycoonBounds(boundaryReference, tycoonModel, returnPart) then
-							forceReturnPlayerAndPetToTycoon(player, carriedPet, tycoonModel, returnPart)
-						end
-					end
-				end
-			end
-			task.wait(0.5)
-		end
-	end)
-
-
 
 	Players.PlayerAdded:Connect(function(player)
 			player.CharacterAdded:Connect(function(character)
