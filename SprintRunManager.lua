@@ -18,9 +18,20 @@ local DEFAULT_ZONE_MAX_OBSTACLES = 4
 local DEFAULT_OBSTACLE_STAMINA_DAMAGE = 8
 local DEFAULT_OBSTACLE_SPEED_MULTIPLIER = 0.55
 local OBSTACLE_SPEED_PENALTY_DURATION = 2
-local JUMP_DURATION = 1
-local JUMP_FORCE_DURATION = 0.5
-local JUMP_PUSH_FORCE = 36
+local MIN_JUMP_DURATION = 0.15
+local JUMP_UPWARD_FORCE_DURATION = 0.05
+local JUMP_FORWARD_FORCE_DURATION = 0.14
+local JUMP_UPWARD_SPEED = 10
+local JUMP_FORWARD_SPEED_MULTIPLIER = 1.0
+
+local MIN_SLIDE_DURATION = 0.85
+local SLIDE_LANDING_GRACE = 0.12
+local JUMP_FALLBACK_TIMEOUT = 2.25
+local JUMP_STAMINA_COST_PERCENT = 0.30
+
+local STUMBLE_DURATION_MIN = 0.5
+local STUMBLE_DURATION_MAX = 1.25
+local STUMBLE_SPEED_MULTIPLIER = 0.62
 local HITBOX_SIZE = Vector3.new(8, 6, 10)
 
 local function getOrCreateRemote(name)
@@ -130,6 +141,8 @@ function SprintRunManager:_connectRemotes()
 			self:RequestJump(player)
 		elseif action == "GoBack" then
 			self:GoBackToPlot(player)
+		elseif action == "JumpAnimEnded" then
+			self:OnJumpAnimationEnded(player)
 		end
 	end)
 end
@@ -149,20 +162,43 @@ function SprintRunManager:_startHeartbeat()
 				continue
 			end
 
-			if state.jumpEndAt and os.clock() >= state.jumpEndAt then
-				self:_clearJumpForce(state)
-				state.jumping = false
-				state.jumpEndAt = nil
-				hum.JumpPower = 0
-				hum.JumpHeight = 0
-				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
-				player:SetAttribute("RunnerJumping", false)
-				self:_finalizeJumpCarryPose(player)
-				self.stateRemote:FireClient(player, "JumpState", false)
+			local now = os.clock()
+
+			if state.stumbling then
+				if state.stumbleEndAt and now >= state.stumbleEndAt then
+					self:_clearStumbleForce(state)
+					state.stumbling = false
+					state.stumbleEndAt = nil
+					state.stumbleStartedAt = nil
+					state.stumbleSpeed = nil
+					player:SetAttribute("RunnerStumbling", false)
+					self.stateRemote:FireClient(player, "StumbleState", false)
+				else
+					hum.WalkSpeed = 0
+					hum.JumpPower = 0
+					hum.JumpHeight = 0
+					hum.AutoRotate = true
+					hum.Jump = false
+					hum:Move(Vector3.zero, false)
+				end
+
+			elseif state.jumping then
+				if state.jumpUpForceEndAt and now >= state.jumpUpForceEndAt then
+					state.jumpUpForceEndAt = nil
+					self:_setJumpForwardOnly(state)
+				end
+
+				if not state.slideStateSent and state.jumpEndAt and now >= state.jumpEndAt then
+					self:_beginSlidePhase(player, state)
+				end
+
+				if state.slideStateSent and state.slideEndAt and now >= state.slideEndAt then
+					self:_endJumpState(player, state, true)
+				end
 			end
-			if state.jumpForceEndAt and os.clock() >= state.jumpForceEndAt then
-				self:_clearJumpForce(state)
-				state.jumpForceEndAt = nil
+
+			if state.jumping and state.jumpForwardForceEndAt and os.clock() >= state.jumpForwardForceEndAt then
+				state.jumpForwardForceEndAt = nil
 			end
 			
 			dt = math.max(dt or 0, 0)
@@ -181,8 +217,7 @@ function SprintRunManager:_startHeartbeat()
 				local penaltyMultiplier = state.speedPenaltyMultiplier or DEFAULT_OBSTACLE_SPEED_MULTIPLIER
 				speed *= math.clamp(penaltyMultiplier, 0.1, 1)
 			end
-			local canMove = (not state.exhausted) and (not state.jumping)
-			if not canMove then
+			if state.exhausted then
 				if hum.WalkSpeed ~= 0 then
 					hum.WalkSpeed = 0
 				end
@@ -192,6 +227,13 @@ function SprintRunManager:_startHeartbeat()
 				hum.Jump = false
 				hum:Move(Vector3.zero, false)
 				root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+			elseif state.jumping then
+				hum.WalkSpeed = 0
+				hum.JumpPower = 0
+				hum.JumpHeight = 0
+				hum.AutoRotate = true
+				hum.Jump = false
+				hum:Move(Vector3.zero, false)
 			else
 				if hum.WalkSpeed ~= speed then
 					hum.WalkSpeed = speed
@@ -332,15 +374,21 @@ function SprintRunManager:_connectObstacleTouch(zoneState, obstacleInstance)
 	local function onTouched(otherPart)
 		if not otherPart then return end
 		if obstacleInstance:GetAttribute("Consumed") then return end
+
 		local character = otherPart.Parent
 		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 		if not humanoid then return end
+
 		local player = self.Players:GetPlayerFromCharacter(character)
 		if not player then return end
+
 		local state = self.playerState[player]
 		if not state or not state.active then return end
+
 		obstacleInstance:SetAttribute("Consumed", true)
+
 		self:_applyObstaclePenalty(player, state, obstacleInstance)
+		self:_startStumble(player, state, obstacleInstance)
 		self:_despawnObstacle(zoneState, obstacleInstance)
 	end
 
@@ -428,17 +476,195 @@ function SprintRunManager:_tickObstacleZones()
 	end
 end
 
+function SprintRunManager:_clearStumbleForce(state)
+	if not state then return end
+
+	if state.stumbleLinearVelocity then
+		pcall(function() state.stumbleLinearVelocity:Destroy() end)
+		state.stumbleLinearVelocity = nil
+	end
+
+	if state.stumbleAttachment then
+		pcall(function() state.stumbleAttachment:Destroy() end)
+		state.stumbleAttachment = nil
+	end
+
+	state.stumbleDirection = nil
+end
+
+function SprintRunManager:_applyStumbleForce(state, root, stumbleSpeed)
+	self:_clearStumbleForce(state)
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "RunnerStumbleAttachment"
+	attachment.Parent = root
+
+	local look = root.CFrame.LookVector
+	local horizontalLook = Vector3.new(look.X, 0, look.Z)
+	if horizontalLook.Magnitude <= 0 then
+		horizontalLook = Vector3.new(0, 0, -1)
+	else
+		horizontalLook = horizontalLook.Unit
+	end
+
+	local stumbleVelocity = Instance.new("LinearVelocity")
+	stumbleVelocity.Name = "RunnerStumbleVelocity"
+	stumbleVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	stumbleVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	stumbleVelocity.MaxForce = math.huge
+	stumbleVelocity.Attachment0 = attachment
+	stumbleVelocity.VectorVelocity = horizontalLook * math.max(0, stumbleSpeed or 0)
+	stumbleVelocity.Parent = root
+
+	state.stumbleAttachment = attachment
+	state.stumbleLinearVelocity = stumbleVelocity
+	state.stumbleDirection = horizontalLook
+end
+
+function SprintRunManager:_endJumpState(player, state, sendClientEvent)
+	if not state then return end
+
+	self:_clearJumpForce(state)
+
+	state.jumping = false
+	state.jumpEndAt = nil
+	state.slideEndAt = nil
+	state.jumpUpForceEndAt = nil
+	state.jumpForwardForceEndAt = nil
+	state.slideStateSent = false
+
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.JumpPower = 0
+		hum.JumpHeight = 0
+		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	end
+
+	player:SetAttribute("RunnerJumping", false)
+	self:_finalizeJumpCarryPose(player)
+
+	if sendClientEvent then
+		self.stateRemote:FireClient(player, "JumpState", false)
+	end
+end
+
+function SprintRunManager:_beginSlidePhase(player, state)
+	if not state or state.slideStateSent then
+		return
+	end
+
+	state.slideStateSent = true
+	state.slideStartedAt = os.clock()
+	state.slideDuration = math.max(MIN_SLIDE_DURATION, state.jumpForwardDuration or JUMP_FORWARD_FORCE_DURATION)
+	state.slideEndAt = state.slideStartedAt + state.slideDuration
+	state.jumpEndAt = state.slideEndAt + SLIDE_LANDING_GRACE
+
+	self:_setJumpForwardOnly(state)
+
+	self.stateRemote:FireClient(player, "JumpState", true, {
+		phase = "Slide",
+		slideDuration = state.slideDuration,
+	})
+end
+
+function SprintRunManager:_startStumble(player, state, obstacleInstance)
+	if not state or not state.active then return end
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+	if not hum or not root then return end
+
+	local now = os.clock()
+
+	local stumbleDuration = obstacleInstance and tonumber(obstacleInstance:GetAttribute("StumbleDuration"))
+	if not stumbleDuration then
+		stumbleDuration = STUMBLE_DURATION_MIN + (self.obstacleRng:NextNumber() * (STUMBLE_DURATION_MAX - STUMBLE_DURATION_MIN))
+	end
+	stumbleDuration = math.max(0.1, stumbleDuration)
+
+	local stumbleMultiplier = obstacleInstance and tonumber(obstacleInstance:GetAttribute("StumbleSpeedMultiplier"))
+	if not stumbleMultiplier then
+		stumbleMultiplier = STUMBLE_SPEED_MULTIPLIER
+	end
+	stumbleMultiplier = math.clamp(stumbleMultiplier, 0.1, 1)
+
+	if state.jumping then
+		self:_endJumpState(player, state, true)
+	end
+
+	state.stumbling = true
+	state.stumbleStartedAt = now
+	state.stumbleEndAt = now + stumbleDuration
+	state.nextAllowedJumpAt = math.max(state.nextAllowedJumpAt or 0, state.stumbleEndAt)
+
+	local stumbleSpeed = math.max(0, (state.runSpeed or RUN_SPEED) * stumbleMultiplier)
+	state.stumbleSpeed = stumbleSpeed
+	self:_applyStumbleForce(state, root, stumbleSpeed)
+
+	hum.WalkSpeed = 0
+	hum.JumpPower = 0
+	hum.JumpHeight = 0
+	hum.AutoRotate = true
+	hum.Jump = false
+	hum:Move(Vector3.zero, false)
+
+	self.stateRemote:FireClient(player, "StumbleState", true, {
+		duration = stumbleDuration,
+	})
+end
+
+function SprintRunManager:OnJumpAnimationEnded(player)
+	local state = self.playerState[player]
+	if not state or not state.active then return end
+	if not state.jumping then return end
+	if state.stumbling then return end
+
+	self:_beginSlidePhase(player, state)
+end
+
+function SprintRunManager:_isGrounded(hum, root)
+	if not hum or not root then
+		return false
+	end
+
+	if hum.FloorMaterial ~= Enum.Material.Air then
+		return true
+	end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { root.Parent }
+	rayParams.IgnoreWater = true
+
+	local result = workspace:Raycast(root.Position, Vector3.new(0, -4, 0), rayParams)
+	return result ~= nil
+end
+
+function SprintRunManager:_clearSingleJumpForce(state, forceField)
+	if not state then return end
+	local forceObject = state[forceField]
+	if forceObject then
+		pcall(function() forceObject:Destroy() end)
+		state[forceField] = nil
+	end
+
+	if state.jumpAttachment and (not state.jumpLinearVelocity) then
+		pcall(function() state.jumpAttachment:Destroy() end)
+		state.jumpAttachment = nil
+	end
+end
 
 function SprintRunManager:_clearJumpForce(state)
 	if not state then return end
-	if state.jumpLinearVelocity then
-		pcall(function() state.jumpLinearVelocity:Destroy() end)
-		state.jumpLinearVelocity = nil
-	end
+	self:_clearSingleJumpForce(state, "jumpLinearVelocity")
+
 	if state.jumpAttachment then
 		pcall(function() state.jumpAttachment:Destroy() end)
 		state.jumpAttachment = nil
 	end
+
+	state.jumpDirection = nil
 end
 
 function SprintRunManager:_finalizeJumpCarryPose(player)
@@ -453,24 +679,46 @@ function SprintRunManager:_finalizeJumpCarryPose(player)
 	end
 end
 
-
-function SprintRunManager:_applyJumpForce(state, root)
+function SprintRunManager:_applyJumpForce(state, root, forwardSpeed)
 	self:_clearJumpForce(state)
+
 	local attachment = Instance.new("Attachment")
 	attachment.Name = "RunnerJumpAttachment"
 	attachment.Parent = root
 
-	local linearVelocity = Instance.new("LinearVelocity")
-	linearVelocity.Name = "RunnerJumpVelocity"
-	linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
-	linearVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
-	linearVelocity.MaxForce = math.huge
-	linearVelocity.VectorVelocity = (root.CFrame.LookVector * JUMP_PUSH_FORCE) + Vector3.new(0, 8, 0)
-	linearVelocity.Attachment0 = attachment
-	linearVelocity.Parent = root
+	local look = root.CFrame.LookVector
+	local horizontalLook = Vector3.new(look.X, 0, look.Z)
+	if horizontalLook.Magnitude <= 0 then
+		horizontalLook = Vector3.new(0, 0, -1)
+	else
+		horizontalLook = horizontalLook.Unit
+	end
+
+	local jumpVelocity = Instance.new("LinearVelocity")
+	jumpVelocity.Name = "RunnerJumpVelocity"
+	jumpVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	jumpVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	jumpVelocity.MaxForce = math.huge
+	jumpVelocity.Attachment0 = attachment
+	jumpVelocity.VectorVelocity = (horizontalLook * math.max(0, forwardSpeed or 0)) + Vector3.new(0, JUMP_UPWARD_SPEED, 0)
+	jumpVelocity.Parent = root
 
 	state.jumpAttachment = attachment
-	state.jumpLinearVelocity = linearVelocity
+	state.jumpLinearVelocity = jumpVelocity
+	state.jumpDirection = horizontalLook
+end
+
+function SprintRunManager:_setJumpForwardOnly(state)
+	if not state or not state.jumpLinearVelocity then
+		return
+	end
+
+	local dir = state.jumpDirection
+	if not dir then
+		return
+	end
+
+	state.jumpLinearVelocity.VectorVelocity = dir * math.max(0, state.jumpForwardSpeed or 0)
 end
 
 function SprintRunManager:ScanStartLines()
@@ -563,9 +811,13 @@ function SprintRunManager:StartRunning(player, startLine)
 	state.lastStaminaUpdateAt = 0
 	state.speedPenaltyUntil = 0
 	state.speedPenaltyMultiplier = 1
+	state.jumpForwardDuration = math.max(MIN_SLIDE_DURATION, self:GetJumpForwardDurationForPlayer(player, JUMP_FORWARD_FORCE_DURATION))
+	state.jumpForwardSpeed = math.max(0, state.runSpeed * JUMP_FORWARD_SPEED_MULTIPLIER)
+	state.defaultFreefallEnabled = hum:GetStateEnabled(Enum.HumanoidStateType.Freefall)
 
 	player:SetAttribute("RunnerJumping", false)
 	hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
 	hum.JumpPower = 0
 	hum.JumpHeight = 0
 	hum.WalkSpeed = state.runSpeed
@@ -575,6 +827,9 @@ function SprintRunManager:StartRunning(player, startLine)
 	self.stateRemote:FireClient(player, "RunnerState", true, {
 		runAnimationId = startLine and startLine:GetAttribute("RunAnimationId") or nil,
 		jumpAnimationId = startLine and startLine:GetAttribute("JumpAnimationId") or nil,
+		jumpStartAnimationId = startLine and (startLine:GetAttribute("JumpStartAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
+		jumpSlideAnimationId = startLine and (startLine:GetAttribute("JumpSlideAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
+		stumbleAnimationId = startLine and (startLine:GetAttribute("StumbleAnimationId") or startLine:GetAttribute("JumpSlideAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
 		currentStamina = state.currentStamina,
 		maxStamina = state.maxStamina,
 	})
@@ -594,13 +849,20 @@ function SprintRunManager:GetMaxStaminaForPlayer(player, baseStamina)
 	return applyGemShopReward(stamina, reward, upgradeValue)
 end
 
-
+function SprintRunManager:GetJumpForwardDurationForPlayer(player, baseDuration)
+	local duration = baseDuration or JUMP_FORWARD_FORCE_DURATION
+	local upgradeValue = getGemUpgradeValue(player, 5)
+	local reward = getGemRewardConfig(self.gemShopFolder, 5)
+	return applyGemShopReward(duration, reward, upgradeValue)
+end
 
 function SprintRunManager:RequestJump(player)
 	local state = self.playerState[player]
 	if not state or not state.active then return end
+
 	local now = os.clock()
 	if state.jumping then return end
+	if state.stumbling then return end
 	if state.exhausted then return end
 	if now < (state.nextAllowedJumpAt or 0) then return end
 
@@ -611,28 +873,59 @@ function SprintRunManager:RequestJump(player)
 
 	state.lastJumpAt = now
 	state.jumping = true
-	state.jumpEndAt = now + JUMP_DURATION
-	state.jumpForceEndAt = now + JUMP_FORCE_DURATION
-	state.nextAllowedJumpAt = state.jumpEndAt
+	state.slideStateSent = false
+
+	local forwardDuration = math.max(MIN_SLIDE_DURATION, state.jumpForwardDuration or JUMP_FORWARD_FORCE_DURATION)
+	state.slideDuration = forwardDuration
+	state.slideEndAt = nil
+	state.jumpUpForceEndAt = now + JUMP_UPWARD_FORCE_DURATION
+	state.jumpEndAt = now + JUMP_FALLBACK_TIMEOUT
+	state.nextAllowedJumpAt = now + math.max(MIN_JUMP_DURATION, forwardDuration + 0.15)
+	state.jumpForwardSpeed = math.max(0, (state.runSpeed or RUN_SPEED) * JUMP_FORWARD_SPEED_MULTIPLIER)
+
+	local currentStamina = state.currentStamina or state.maxStamina or DEFAULT_STAMINA
+	local staminaCost = math.max(1, math.floor(currentStamina * JUMP_STAMINA_COST_PERCENT + 0.5))
+	state.currentStamina = math.max(0, currentStamina - staminaCost)
+	state.exhausted = state.currentStamina <= 0
+
+	self.stateRemote:FireClient(player, "StaminaUpdate", true, {
+		current = state.currentStamina,
+		max = state.maxStamina or DEFAULT_STAMINA,
+		exhausted = state.exhausted == true,
+	})
 
 	hum.WalkSpeed = 0
 	hum.JumpPower = 0
 	hum.JumpHeight = 0
 	hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
 	hum.Jump = false
-	self:_applyJumpForce(state, root)
+
+	self:_applyJumpForce(state, root, state.jumpForwardSpeed)
+
+	pcall(function()
+		hum:ChangeState(Enum.HumanoidStateType.Freefall)
+	end)
+
 	player:SetAttribute("RunnerJumping", true)
-	self.stateRemote:FireClient(player, "JumpState", true)
+	self.stateRemote:FireClient(player, "JumpState", true, {
+		phase = "Start",
+		slideDuration = forwardDuration,
+	})
 end
 
 function SprintRunManager:GoBackToPlot(player)
 	local state = self.playerState[player]
 	if not state or not state.active then return end
 	if state.isReturning then return end
+	if state.jumping then return end
+	if state.stumbling then return end
+	if state.jumpEndAt and os.clock() < state.jumpEndAt then return end
+
 	state.isReturning = true
 
 	self:StopRunning(player, true)
-	
+
 	local tycoonUtils = self.WildPetManager and self.WildPetManager.TycoonUtils
 	local desk
 	local tycoonModel
@@ -659,17 +952,28 @@ function SprintRunManager:GoBackToPlot(player)
 
 	state.isReturning = false
 end
+
 function SprintRunManager:StopRunning(player, notifyClient)
 	local state = self.playerState[player]
 	if not state or not state.active then return end
 	state.active = false
 	state.jumping = false
 	state.jumpEndAt = nil
-	state.jumpForceEndAt = nil
+	state.jumpUpForceEndAt = nil
+	state.jumpForwardForceEndAt = nil
+	state.slideEndAt = nil
+	state.slideDuration = nil
+	state.slideStartedAt = nil
 	state.nextAllowedJumpAt = 0
 	state.exhausted = false
 	state.speedPenaltyUntil = 0
 	state.speedPenaltyMultiplier = 1
+	state.slideStateSent = false
+	state.stumbling = false
+	state.stumbleEndAt = nil
+	state.stumbleStartedAt = nil
+	state.stumbleSpeed = nil
+	self:_clearStumbleForce(state)
 	player:SetAttribute("RunnerJumping", false)
 	self:_clearJumpForce(state)
 
@@ -681,6 +985,7 @@ function SprintRunManager:StopRunning(player, notifyClient)
 		hum.JumpHeight = state.defaultJumpHeight or hum.JumpHeight
 		hum.AutoRotate = state.defaultAutoRotate
 		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+		hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, state.defaultFreefallEnabled ~= false)
 		task.delay(0.1, function()
 			if hum and hum.Parent then
 				hum.WalkSpeed = state.defaultWalkSpeed or DEFAULT_WALK_SPEED
@@ -688,6 +993,7 @@ function SprintRunManager:StopRunning(player, notifyClient)
 				hum.JumpHeight = state.defaultJumpHeight or hum.JumpHeight
 				hum.AutoRotate = state.defaultAutoRotate
 				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+				hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, state.defaultFreefallEnabled ~= false)
 			end
 		end)
 	end
