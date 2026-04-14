@@ -1,4 +1,18 @@
 --// Shop
+local canPromptPetPurchase = ReplicatedStorage:WaitForChild("CanPromptPetPurchase")
+local localNotifyBridge = ReplicatedStorage:FindFirstChild("ClientNotificationEvent")
+if not localNotifyBridge or not localNotifyBridge:IsA("BindableEvent") then
+	localNotifyBridge = Instance.new("BindableEvent")
+	localNotifyBridge.Name = "ClientNotificationEvent"
+	localNotifyBridge.Parent = ReplicatedStorage
+end
+
+local function notifyPlayer(notificationType, message)
+	if localNotifyBridge and localNotifyBridge:IsA("BindableEvent") then
+		localNotifyBridge:Fire(notificationType, message)
+	end
+end
+
 local function parseColorAttribute(value)
 	if typeof(value) == "Color3" then
 		return value
@@ -195,6 +209,26 @@ for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 
 
 		NewGamepass.InnerPart.Button.MouseButton1Click:Connect(function()
+			local canPrompt, reason = true, "Allowed"
+			if canPromptPetPurchase and canPromptPetPurchase:IsA("RemoteFunction") then
+				local ok, allowed, denyReason = pcall(function()
+					return canPromptPetPurchase:InvokeServer(Gamepass.Name)
+				end)
+				if ok then
+					canPrompt = allowed == true
+					reason = tostring(denyReason or "")
+				end
+			end
+			if not canPrompt then
+				if reason == "InventoryFull" then
+					notifyPlayer("error", "❌ Inventory full. Free slots before buying pet packs.")
+				else
+					notifyPlayer("error", "❌ Purchase unavailable right now. Try again in a moment.")
+				end
+				Utilities.Audio.PlayAudio("Click")
+				return
+			end
+
 			if purchaseType == "DeveloperProduct" then
 				MarketPlaceService:PromptProductPurchase(Player, Gamepass.Value)
 			else
