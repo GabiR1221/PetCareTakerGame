@@ -3,102 +3,132 @@ local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local MarketplaceService = game:GetService("MarketplaceService")
 
-local rewardEvent = ReplicatedStorage:WaitForChild("ClaimSpinReward")
 local startSpinEvent = ReplicatedStorage:WaitForChild("StartSpinAnimation")
+local requestSpinReward = ReplicatedStorage:WaitForChild("RequestSpinReward")
+local Modules = ReplicatedStorage.Modules
+local Utilities = require(Modules.Utilities)
 
--- UI References
 local mainFrame = script.Parent
-local wheel = mainFrame:WaitForChild("WheelContainer"):WaitForChild("Wheel")
-local spinButton = mainFrame:WaitForChild("SpinButton") 
-local buy3Button = mainFrame:WaitForChild("Buy3Button") 
+local wheelContainer = mainFrame:WaitForChild("WheelContainer")
+local wheel = wheelContainer:WaitForChild("Wheel")
+local spinButton = mainFrame:WaitForChild("SpinButton")
+local buy3Button = mainFrame:WaitForChild("Buy3Button")
 
--- Navigation/Reward Refs
 local rewardFrame = mainFrame:WaitForChild("RewardFrame")
 local prizeText = rewardFrame:WaitForChild("PrizeText")
-local rewardIcon = rewardFrame:WaitForChild("RewardIcon") 
+local rewardIcon = rewardFrame:WaitForChild("RewardIcon")
 local rewardClose = rewardFrame:WaitForChild("CloseButton")
 
--- PRODUCT CONFIG
-local ID_SINGLE = 3546187801 
-local ID_TRIPLE = 3546187800 
+local ID_SINGLE = 3574227749
+local ID_TRIPLE = 3574767447
 
-local isSpinning = false
-local totalSegments = 8 
+local totalSegments = 8
 local segmentAngle = 360 / totalSegments
+local isSpinning = false
+local queuedSpinCount = 0
+local mainFrameBaseSize = mainFrame.Size
 
--- 1. BUTTON VISUALS SETUP (HOVER & CLICK)
+local SoundSettings = {
+	Open = { ID = "rbxassetid://115591684874922", Volume = 0.5 },
+	Close = { ID = "rbxassetid://129356016246166", Volume = 0.4 },
+	SpinClick = { ID = "rbxassetid://88389157974523", Volume = 1 },
+	Win = { ID = "rbxassetid://132919665409307", Volume = 0.6 },
+}
+
+local PrizeImages = {
+	["100 Gem"] = "rbxassetid://6995306743",
+	["200 Gem"] = "rbxassetid://6995306743",
+	["500 Gem"] = "rbxassetid://6995306743",
+	["1000 Gem"] = "rbxassetid://6995306743",
+	["1000 Cash"] = "rbxassetid://18885492705",
+	["500 Cash"] = "rbxassetid://18885492705",
+	["200 Cash"] = "rbxassetid://18885492705",
+	["100 Cash"] = "rbxassetid://18885492705",
+}
+
+local function playSound(name)
+	local data = SoundSettings[name]
+	if not data then return end
+
+	local sound = Instance.new("Sound")
+	sound.SoundId = data.ID
+	sound.Volume = data.Volume
+	sound.Parent = mainFrame
+	sound:Play()
+	Debris:AddItem(sound, 2)
+end
+
 local function setupButtonVisuals(button)
 	local originalSize = button.Size
 	local hoverSize = UDim2.new(originalSize.X.Scale * 1.05, originalSize.X.Offset, originalSize.Y.Scale * 1.05, originalSize.Y.Offset)
 	local clickSize = UDim2.new(originalSize.X.Scale * 0.95, originalSize.X.Offset, originalSize.Y.Scale * 0.95, originalSize.Y.Offset)
 
-	-- Hover In
 	button.MouseEnter:Connect(function()
-		TweenService:Create(button, TweenInfo.new(0.2, Enum.EasingStyle.Quart), {Size = hoverSize}):Play()
+		TweenService:Create(button, TweenInfo.new(0.2, Enum.EasingStyle.Quart), { Size = hoverSize }):Play()
 	end)
 
-	-- Hover Out
 	button.MouseLeave:Connect(function()
-		TweenService:Create(button, TweenInfo.new(0.2, Enum.EasingStyle.Quart), {Size = originalSize}):Play()
+		TweenService:Create(button, TweenInfo.new(0.2, Enum.EasingStyle.Quart), { Size = originalSize }):Play()
 	end)
 
-	-- Click Down
 	button.MouseButton1Down:Connect(function()
-		TweenService:Create(button, TweenInfo.new(0.1, Enum.EasingStyle.Back), {Size = clickSize}):Play()
+		TweenService:Create(button, TweenInfo.new(0.1, Enum.EasingStyle.Back), { Size = clickSize }):Play()
 	end)
 
-	-- Click Up
 	button.MouseButton1Up:Connect(function()
-		TweenService:Create(button, TweenInfo.new(0.1, Enum.EasingStyle.Back), {Size = hoverSize}):Play()
+		TweenService:Create(button, TweenInfo.new(0.1, Enum.EasingStyle.Back), { Size = hoverSize }):Play()
 	end)
 end
 
--- Apply to all buttons
-setupButtonVisuals(spinButton)
-setupButtonVisuals(buy3Button)
+local function hideMainFrame()
+	local utilities = _G.Utilities or Utilities
+	if utilities and utilities.ButtonHandler and utilities.ButtonHandler.OnClick then
+		utilities.ButtonHandler.OnClick(mainFrame, mainFrameBaseSize)
+		return
+	end
+	mainFrame.Visible = false
+end
 
-setupButtonVisuals(rewardClose)
-
--- PRIZES
-local prizes = {
-	{Name = "100 Gem", Image = "rbxassetid://6995306743"},
-	{Name = "200 Gem", Image = "rbxassetid://6995306743"},
-	{Name = "500 Gem", Image = "rbxassetid://6995306743"},
-	{Name = "1000 Gem", Image = "rbxassetid://6995306743"},
-	{Name = "1000 Cash", Image = "rbxassetid://18885492705"},
-	{Name = "500 Cash", Image = "rbxassetid://18885492705"},
-	{Name = "200 Cash", Image = "rbxassetid://18885492705"},
-	{Name = "100 Cash", Image = "rbxassetid://18885492705"}
-}
-
-local SoundSettings = {
-	["Open"] = {ID = "rbxassetid://115591684874922", Volume = 0.5},   
-	["Close"] = {ID = "rbxassetid://129356016246166", Volume = 0.4},  
-	["SpinClick"] = {ID = "rbxassetid://88389157974523", Volume = 1}, 
-	["Win"] = {ID = "rbxassetid://132919665409307", Volume = 0.6},    
-}
-
-local function playSound(name)
-	local data = SoundSettings[name]
-	if data then
-		local sound = Instance.new("Sound")
-		sound.SoundId = data.ID; sound.Volume = data.Volume
-		sound.Parent = mainFrame; sound:Play()
-		Debris:AddItem(sound, 2) 
+local function connectMainFrameClose()
+	local closeContainer = mainFrame:FindFirstChild("Close")
+	local closeButton = closeContainer and closeContainer:FindFirstChild("Click")
+	if not (closeButton and closeButton:IsA("GuiButton")) then
+		closeButton = mainFrame:FindFirstChild("CloseButton")
+	end
+	if closeButton and closeButton:IsA("GuiButton") then
+		setupButtonVisuals(closeButton)
+		closeButton.MouseButton1Click:Connect(function()
+			playSound("Close")
+			hideMainFrame()
+		end)
 	end
 end
 
--- FUNCTION: CORE SPIN LOGIC
-local function executeSpin()
+setupButtonVisuals(spinButton)
+setupButtonVisuals(buy3Button)
+setupButtonVisuals(rewardClose)
+connectMainFrameClose()
+
+local function showReward(prizeName)
+	prizeText.Text = "YOU WON: " .. tostring(prizeName)
+	rewardIcon.Image = PrizeImages[prizeName] or ""
+	rewardFrame.Visible = true
+	rewardFrame.Size = UDim2.new(0, 0, 0, 0)
+
+	local pop = TweenService:Create(rewardFrame, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = UDim2.new(0, 350, 0, 250) })
+	pop:Play()
+	pop.Completed:Wait()
+end
+
+local function executeSpin(winningIndex, prizeName)
 	isSpinning = true
-	rewardFrame.Visible = false 
+	rewardFrame.Visible = false
 	playSound("SpinClick")
 
-	local winningIndex = math.random(1, totalSegments)
-	local extraSpins = math.random(5, 8) * 360 
+	local extraSpins = math.random(5, 8) * 360
 	local targetAngle = extraSpins + (winningIndex * segmentAngle) - (segmentAngle / 2)
 
-	local spinTween = TweenService:Create(wheel, TweenInfo.new(5, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Rotation = targetAngle})
+	local spinTween = TweenService:Create(wheel, TweenInfo.new(5, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Rotation = targetAngle })
 	spinTween:Play()
 
 	task.spawn(function()
@@ -110,31 +140,56 @@ local function executeSpin()
 	end)
 
 	spinTween.Completed:Wait()
+	wheel.Rotation = wheel.Rotation % 360
 
-	-- Impact Flash & Dim
 	playSound("Win")
-	local flash = Instance.new("Frame", mainFrame)
-	flash.Size = UDim2.new(1, 0, 1, 0); flash.BackgroundColor3 = Color3.fromRGB(255, 255, 255); flash.ZIndex = 30
-	TweenService:Create(flash, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+	local flash = Instance.new("Frame")
+	flash.Size = UDim2.new(1, 0, 1, 0)
+	flash.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	flash.ZIndex = 30
+	flash.Parent = mainFrame
+	TweenService:Create(flash, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
 	Debris:AddItem(flash, 0.3)
 
-	-- Show Reward
-	wheel.Rotation = wheel.Rotation % 360
-	local wonPrize = prizes[winningIndex]
-	prizeText.Text = "YOU WON: " .. wonPrize.Name
-	rewardIcon.Image = wonPrize.Image
-	rewardEvent:FireServer(wonPrize.Name)
-
-	rewardFrame.Visible = true
-	rewardFrame.Size = UDim2.new(0, 0, 0, 0)
-	local pop = TweenService:Create(rewardFrame, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, 350, 0, 250)})
-	pop:Play()
-	pop.Completed:Wait()
-
+	showReward(prizeName)
 	isSpinning = false
 end
 
--- BUTTON CLICK PROMPTS
+local function requestAndRunSingleSpin()
+	local ok, result = pcall(function()
+		return requestSpinReward:InvokeServer()
+	end)
+	if not ok or type(result) ~= "table" then
+		warn("[SpinWheel] Failed to request reward from server.")
+		return false
+	end
+
+	local winningIndex = tonumber(result.winningIndex)
+	local prizeName = result.name
+	if not winningIndex or winningIndex < 1 or winningIndex > totalSegments or type(prizeName) ~= "string" then
+		warn("[SpinWheel] Invalid reward payload from server.")
+		return false
+	end
+
+	executeSpin(winningIndex, prizeName)
+	return true
+end
+
+local function flushQueuedSpins()
+	if isSpinning then return end
+	while queuedSpinCount > 0 do
+		queuedSpinCount -= 1
+		local success = requestAndRunSingleSpin()
+		if not success then
+			queuedSpinCount = 0
+			break
+		end
+		if queuedSpinCount > 0 then
+			task.wait(1.5)
+		end
+	end
+end
+
 spinButton.MouseButton1Click:Connect(function()
 	if isSpinning then return end
 	MarketplaceService:PromptProductPurchase(game.Players.LocalPlayer, ID_SINGLE)
@@ -145,16 +200,20 @@ buy3Button.MouseButton1Click:Connect(function()
 	MarketplaceService:PromptProductPurchase(game.Players.LocalPlayer, ID_TRIPLE)
 end)
 
--- START SPIN UPON SUCCESSFUL PURCHASE
 startSpinEvent.OnClientEvent:Connect(function(amount)
-	for i = 1, amount do
-		executeSpin()
-		if amount > 1 and i < amount then task.wait(1.5) end
-	end
+	local spinAmount = math.max(0, math.floor(tonumber(amount) or 0))
+	if spinAmount <= 0 then return end
+	queuedSpinCount += spinAmount
+	task.spawn(flushQueuedSpins)
 end)
-
 
 rewardClose.MouseButton1Click:Connect(function()
 	playSound("Close")
-	rewardFrame.Visible = false; task.wait(0.3); backScreen.Visible = false
+	rewardFrame.Visible = false
+end)
+
+mainFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+	if mainFrame.Visible then
+		playSound("Open")
+	end
 end)
