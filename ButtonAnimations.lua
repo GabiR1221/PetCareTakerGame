@@ -3,6 +3,39 @@ local ButtonAnimations = {}
 local Tween = require(script.Parent.Tween)
 local TweenService = game:GetService("TweenService")
 
+ButtonAnimations.Pulse = function(Target : GuiObject, Modifier : number?, Length : number?)
+	if not Target or not Target:IsA("GuiObject") then return end
+
+	Modifier = Modifier or 0.5
+	Length = Length or 0.11
+
+	local baseSize = Target.Size
+	local grownSize = UDim2.new(
+		baseSize.X.Scale * Modifier,
+		math.floor(baseSize.X.Offset * Modifier + 0.5),
+		baseSize.Y.Scale * Modifier,
+		math.floor(baseSize.Y.Offset * Modifier + 0.5)
+	)
+
+	local growTween = TweenService:Create(
+		Target,
+		TweenInfo.new(Length, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{Size = grownSize}
+	)
+
+	local shrinkTween = TweenService:Create(
+		Target,
+		TweenInfo.new(Length, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{Size = baseSize}
+	)
+
+	growTween:Play()
+	growTween.Completed:Connect(function()
+		shrinkTween:Play()
+	end)
+end
+
+
 --// Creates the animation of the buttons
 ButtonAnimations.Create = function(Frame : Button, Modifier : SizeModifier, Length : TweenLength)
 	local BaseSize = {X = Frame.Size.X.Scale, Y = Frame.Size.Y.Scale}
