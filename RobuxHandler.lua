@@ -9,6 +9,7 @@ local Players = game:GetService("Players")
 local GamepassFolder = ReplicatedStorage.Gamepasses
 local PetGrantBridgeName = "PetGamepassGrantBridge"
 local PetGrantBridge = ReplicatedStorage:FindFirstChild(PetGrantBridgeName)
+local NotifyEvent = ReplicatedStorage:FindFirstChild("GameNotificationEvent")
 
 if not PetGrantBridge or not PetGrantBridge:IsA("BindableEvent") then
 	PetGrantBridge = Instance.new("BindableEvent")
@@ -67,6 +68,44 @@ local function getPurchaseType(valueObject)
 	return "GamePass"
 end
 
+local function hasInventorySpaceFor(player, requiredSlots)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return false end
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if not petsFolder then return false end
+	local multipliersModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Multipliers")
+	if not multipliersModule then return true end
+	local multipliers = require(multipliersModule)
+	local maxStorage = tonumber(multipliers.GetMaxPetsStorage(player)) or 0
+	return (#petsFolder:GetChildren() + math.max(requiredSlots or 0, 0)) <= maxStorage
+end
+
+local canPromptRemote = ReplicatedStorage:FindFirstChild("CanPromptPetPurchase")
+if not canPromptRemote or not canPromptRemote:IsA("RemoteFunction") then
+	canPromptRemote = Instance.new("RemoteFunction")
+	canPromptRemote.Name = "CanPromptPetPurchase"
+	canPromptRemote.Parent = ReplicatedStorage
+end
+
+canPromptRemote.OnServerInvoke = function(player, purchaseEntryName)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then
+		return false, "InvalidPlayer"
+	end
+	local purchaseEntry = GamepassFolder:FindFirstChild(tostring(purchaseEntryName or ""))
+	if not purchaseEntry then
+		return false, "EntryMissing"
+	end
+	local petsToGrant = getGrantedPetsForGamepass(purchaseEntry)
+	if #petsToGrant <= 0 then
+		return true, "NoPetGrant"
+	end
+	if not hasInventorySpaceFor(player, #petsToGrant) then
+		return false, "InventoryFull"
+	end
+	return true, "Allowed"
+end
+
+
 function GetGamepassFromID(ID)
 	for _, Gamepass in GamepassFolder:GetChildren() do
 		if Gamepass.Value == ID then
@@ -92,7 +131,12 @@ MarketPlaceService.PromptGamePassPurchaseFinished:Connect(function(Player, Gamep
 	if not wasOwned then
 		local petsToGrant = getGrantedPetsForGamepass(GamepassType)
 		if #petsToGrant > 0 then
+			if not hasInventorySpaceFor(Player, #petsToGrant) then
+				NotifyEvent:FireClient(Player, "error", "❌ Purchase blocked: free pet inventory slots before buying this pet pack.")
+				return
+			end
 			PetGrantBridge:Fire(Player, GamepassType.Name, petsToGrant)
+			NotifyEvent:FireClient(Player, "success", "✅ Purchase successful! Pet pack added to your inventory.")
 		end
 	end
 end)
@@ -151,7 +195,12 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 		if explicitType ~= "DeveloperProduct" and not hasPetGrantConfig then continue end
 
 		if #petsToGrant > 0 then
+			if not hasInventorySpaceFor(Player, #petsToGrant) then
+				NotifyEvent:FireClient(Player, "error", "❌ Inventory full. Purchase will be delivered after you free space.")
+				return Enum.ProductPurchaseDecision.NotProcessedYet
+			end
 			PetGrantBridge:Fire(Player, purchaseEntry.Name, petsToGrant)
+			NotifyEvent:FireClient(Player, "success", "✅ Purchase successful! Pet pack added to your inventory.")
 		end
 
 		return Enum.ProductPurchaseDecision.PurchaseGranted
@@ -171,5 +220,31 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
-	end	
+	end
+
+	local spinReceiptBridge = ReplicatedStorage:FindFirstChild("SpinWheelHandleReceipt")
+	if spinReceiptBridge and spinReceiptBridge:IsA("BindableFunction") then
+		local ok, result = pcall(function()
+			return spinReceiptBridge:Invoke(ReceiptInfo)
+		end)
+		if ok and result == Enum.ProductPurchaseDecision.PurchaseGranted then
+			return result
+		elseif not ok then
+			warn("[RobuxHandler] SpinWheel receipt bridge failed: " .. tostring(result))
+		end
+	end
+
+	local foodReceiptBridge = ReplicatedStorage:FindFirstChild("FoodShopHandleReceipt")
+	if foodReceiptBridge and foodReceiptBridge:IsA("BindableFunction") then
+		local ok, result = pcall(function()
+			return foodReceiptBridge:Invoke(ReceiptInfo)
+		end)
+		if ok and result == Enum.ProductPurchaseDecision.PurchaseGranted then
+			return result
+		elseif not ok then
+			warn("[RobuxHandler] FoodShop receipt bridge failed: " .. tostring(result))
+		end
+	end
+
+	return Enum.ProductPurchaseDecision.NotProcessedYet
 end
