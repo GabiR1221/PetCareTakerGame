@@ -643,3 +643,114 @@ if PetStateEvent then
 		updateSideFrameState(payload)
 	end)
 end
+
+--// Egg Hatching and VIEWPORT --------------------somewhere further in the client
+
+function HatchEgg(Egg: string, Result: string, Offset:number)
+	local OpeningTime = 3
+
+	local NewViewport = script.EggViewport:Clone()
+	NewViewport.Parent = UI.OpenEgg
+
+	Player.CameraMinZoomDistance = 15
+	Frames.Visible = false
+	UI[GameSettings.ButtonSide.Value].Buttons.Visible = false
+
+	local Clone = workspace.Map.Eggs[Egg].EggModel:Clone()
+	Clone:ScaleTo(0.5)
+	Clone.Parent = workspace
+
+	local Rot, X, Y, Z = Instance.new("NumberValue"), Instance.new("NumberValue"), Instance.new("NumberValue"), Instance.new("NumberValue")
+	Rot.Value = 30 Z.Value = -4 X.Value = 10
+
+	local Camera = workspace.CurrentCamera
+	local PL = Instance.new("PointLight")
+	PL.Shadows = false PL.Range = 4 PL.Brightness *= 1.5
+	PL.Parent = Clone.Egg
+
+	Clone:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z))
+	local CameraConnection1 = RunService.Heartbeat:Connect(function()
+		local X, Y, Z = X.Value, Y.Value, Z.Value
+		Clone:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z)*CFrame.Angles(0,0,math.rad(Rot.Value)))
+	end)
+
+	local CameraConnection2 = Camera:GetPropertyChangedSignal("CFrame"):Connect(function()
+		local X, Y, Z = X.Value, Y.Value, Z.Value
+		Clone:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z)*CFrame.Angles(0,0,math.rad(Rot.Value)))
+	end)
+
+	local TweenIn = TweenService:Create(X, TweenInfo.new(OpeningTime*0.2, Enum.EasingStyle.Back), {Value = Offset})
+	TweenIn:Play()
+
+	local RotTweenIn = TweenService:Create(Rot, TweenInfo.new(OpeningTime*0.2, Enum.EasingStyle.Back), {Value = 0})
+	RotTweenIn:Play()
+
+	-- add an audio for the egg flying in
+	TweenIn.Completed:Wait()
+
+	local Eggdelay = 0.075
+	for i = 1,(OpeningTime * 1.5) + 1 do
+		local Tween = TweenService:Create(Rot, TweenInfo.new(Eggdelay, Enum.EasingStyle.Back), {Value = 6})
+		Tween:Play()
+		-- add an audio for rotating here
+		Tween.Completed:Wait()
+
+		local Tween = TweenService:Create(Rot, TweenInfo.new(Eggdelay, Enum.EasingStyle.Back), {Value = -6})
+		-- add an audio for rotating here
+		Tween:Play()
+		Tween.Completed:Wait()
+
+		Eggdelay -= .005
+	end
+
+	CameraConnection1:Disconnect()
+	CameraConnection2:Disconnect()	
+	Clone:Destroy()	
+
+	-- Now we're going to show the pet
+
+	local PetModel = game.ReplicatedStorage.Pets[Result]:Clone()
+	PetModel:ScaleTo(0.6)
+	PetModel.Parent = workspace
+
+	NewViewport.Deleted.Visible = Data.AutoDelete[Result].Value
+	NewViewport.PetName.Text = Result
+	NewViewport.PetName.Visible = true
+	NewViewport.PetRarity.Text = game.ReplicatedStorage.Pets[Result].Settings.Rarity.Value
+	NewViewport.PetRarity.Visible = true
+
+	local PL = Instance.new("PointLight")
+	PL.Shadows = false PL.Range = 4 PL.Brightness *= 2
+	PL.Parent = PetModel.MainPart
+
+	X.Value = Offset Y.Value = 0 Z.Value = -4 Rot.Value = 175
+	local CameraConnection1 = RunService.Heartbeat:Connect(function()
+		local X, Y, Z = X.Value, Y.Value, Z.Value
+		PetModel:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z) * CFrame.Angles(0, math.rad(Rot.Value), 0))
+	end)
+
+	local CameraConnection2 = Camera:GetPropertyChangedSignal("CFrame"):Connect(function()
+		local X, Y, Z = X.Value, Y.Value, Z.Value
+		PetModel:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z) * CFrame.Angles(0, math.rad(Rot.Value), 0))
+	end)
+
+	task.wait(OpeningTime*0.25)
+
+	NewViewport:TweenPosition(UDim2.new(NewViewport.Position.X.Scale, 0, NewViewport.Position.Y.Scale + 10, 0), Enum.EasingDirection.InOut, Enum.EasingStyle.Quad, OpeningTime * 0.1)
+	TweenService:Create(Y, TweenInfo.new(OpeningTime*0.15, Enum.EasingStyle.Back), {Value = -5}):Play()
+	NewViewport.Deleted.Visible = false
+	NewViewport.PetName.Visible = false
+	NewViewport.PetRarity.Visible = false
+	task.wait(OpeningTime * 0.15)
+
+	CameraConnection1:Disconnect()
+	CameraConnection2:Disconnect()
+	X:Destroy() Y:Destroy() Z:Destroy() Rot:Destroy()
+
+	PetModel:Destroy()
+	NewViewport:Destroy()
+
+	Player.CameraMinZoomDistance = 0.5
+	UI[GameSettings.ButtonSide.Value].Buttons.Visible = true
+	Frames.Visible = true	
+end
