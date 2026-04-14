@@ -294,6 +294,14 @@ local function CombineTables(tbl1, tbl2)
 	return tbl1
 end
 
+local function FindObjectInTycoonContainers(tycoonModel: Instance, objectName: string)
+	if not tycoonModel or not objectName then return nil end
+	return (tycoonModel:FindFirstChild("Purchases") and tycoonModel.Purchases:FindFirstChild(objectName))
+		or (tycoonModel:FindFirstChild("PurchasedObjects") and tycoonModel.PurchasedObjects:FindFirstChild(objectName))
+		or (tycoonModel:FindFirstChild("Essentials") and tycoonModel.Essentials:FindFirstChild(objectName))
+end
+
+
 function Tycoon:Initialize()
 	local purchasedFolder = self.Tycoon:FindFirstChild("PurchasedObjects")
 		or Instance.new("Folder", self.Tycoon)
@@ -394,7 +402,7 @@ function Tycoon:Initialize()
 			local owner = Players:GetPlayerByUserId(self.Tycoon:GetAttribute("OwnerId"))
 			if not owner or not player or player ~= owner then return end
 			
-			local ownerFolder = ServerStorage.PlayerData:FindFirstChild(owner.UserId)
+			local ownerFolder = ServerStorage.PlayerData:FindFirstChild(tostring(owner.UserId))
 			if not ownerFolder then return end
 			globalButtonDebounce = false
 			
@@ -441,7 +449,22 @@ function Tycoon:Initialize()
 				button.Instance:SetAttribute("Purchased", true)
 				
 				if button.Instance:HasTag("KeepOnRebirth") then
-					table.insert(self.RebirthPersistentButtons, button.Instance.Name)
+					local entry = {
+						ButtonName = button.Instance.Name,
+						PurchaseObjects = {},
+						RemoveObjects = {},
+					}
+					if button.PurchaseObjects then
+						for _, object in ipairs(button.PurchaseObjects) do
+							table.insert(entry.PurchaseObjects, object.Name)
+						end
+					end
+					if button.RemoveObjects then
+						for _, object in ipairs(button.RemoveObjects) do
+							table.insert(entry.RemoveObjects, object.Name)
+						end
+					end
+					table.insert(self.RebirthPersistentButtons, entry)
 				end
 				
 				local completionPercentage = self:GetCompletionPercentage()
@@ -539,7 +562,7 @@ function Tycoon:AssignTycoon(player: Player)
 	if not player then return end
 	if self.Tycoon:GetAttribute("OwnerId") and self.Tycoon:GetAttribute("OwnerId") ~= 0 and self.Tycoon:GetAttribute("OwnerId") ~= player.UserId then return end
 	
-	local playerFolder = ServerStorage:FindFirstChild("PlayerData"):FindFirstChild(player.UserId)
+	local playerFolder = ServerStorage:FindFirstChild("PlayerData"):FindFirstChild(tostring(player.UserId))
 	if not playerFolder then return end
 	
 	local playerTycoonValue = playerFolder:FindFirstChild("Tycoon")
@@ -578,13 +601,16 @@ function Tycoon:ResetTycoon(isRebirth: boolean)
 	local purchasesToKeep = {{}, {}, {}}
 	
 	if isRebirth == true then
-		for _, button in ipairs(self.RebirthPersistentButtons) do
-			if #button >= 2 then
-				table.insert(purchasesToKeep[1], button[1]) -- Button name
-				table.insert(purchasesToKeep[2], button[2]) -- Purchase objects
-				if #button == 3 then
-					table.insert(purchasesToKeep[3], button[3]) -- Remove objects
-				end
+		for _, buttonData in ipairs(self.RebirthPersistentButtons) do
+			if type(buttonData) ~= "table" then continue end
+			if type(buttonData.ButtonName) == "string" and buttonData.ButtonName ~= "" then
+				table.insert(purchasesToKeep[1], buttonData.ButtonName)
+			end
+			for _, purchaseName in ipairs(buttonData.PurchaseObjects or {}) do
+				table.insert(purchasesToKeep[2], purchaseName)
+			end
+			for _, removeName in ipairs(buttonData.RemoveObjects or {}) do
+				table.insert(purchasesToKeep[3], removeName)
 			end
 		end
 	else
@@ -645,10 +671,10 @@ function Tycoon:ResetTycoon(isRebirth: boolean)
 			
 			-- Loop through each kept RemoveObject and remove it
 			for _, removeObjectName in ipairs(purchasesToKeep[3]) do
-				local removeObject = purchasedFolder:FindFirstChild(removeObjectName)
+				local removeObject = FindObjectInTycoonContainers(self.Tycoon, removeObjectName)
 				if removeObject then
 					removeObject:Destroy()
-					table.insert(self.PurchasedObjects, removeObjectName)
+					table.insert(self.RemovedObjects, removeObjectName)
 				end
 			end
 		end
@@ -659,21 +685,21 @@ end
 
 function Tycoon:Rebirth()
 	local player = Players:GetPlayerByUserId(self.Tycoon:GetAttribute("OwnerId"))
-	if not player then return end
+	if not player then return false, "PlayerMissing" end
 	
-	local playerFolder = ServerStorage.PlayerData:FindFirstChild(player.UserId)
-	if not playerFolder then return end
+	local playerFolder = ServerStorage.PlayerData:FindFirstChild(tostring(player.UserId))
+	if not playerFolder then return false, "PlayerDataMissing" end
 	
 	local percentComplete = self:GetCompletionPercentage()
 	if not canPlayerRebirthNow(player, playerFolder, percentComplete) then
-		return
+		return false, "RequirementsNotMet"
 	end
 
 	local rebirthCount = tonumber(playerFolder:GetAttribute(configModule.RebirthsName)) or 0
 	local tierRequirements = resolveRebirthRequirementForTier(rebirthCount)
 	local requiredCurrency = tierRequirements.RequiredCurrency or configModule.RebirthRequiredCurrency
 	if not chargeRequirements(player, requiredCurrency) then
-		return
+		return false, "CurrencyMissing"
 	end
 
 	playerFolder:SetAttribute(configModule.RebirthsName, rebirthCount + 1)
@@ -683,6 +709,11 @@ function Tycoon:Rebirth()
 	clearLivePetsForPlayer(player)
 	clearPetDataStoreForPlayer(player)
 	playerFolder:SetAttribute("OwnedPetNamesCsv", "")
+	local dataRoot = player:FindFirstChild("Data")
+	local inventoryPets = dataRoot and dataRoot:FindFirstChild("Pets")
+	if inventoryPets then
+		inventoryPets:ClearAllChildren()
+	end
 
 	-- Reset each configured currency to 0 and reset totals if needed
 	local ownerPlayer = player
@@ -700,10 +731,11 @@ function Tycoon:Rebirth()
 	self:ResetTycoon(true)
 	self:AssignTycoon(Players:GetPlayerByUserId(self.Tycoon:GetAttribute("OwnerId")))
 	PlaySoundAtSource("RebirthSound", self.Tycoon, "Client")
+	return true, "RebirthCompleted"
 end
 
 function Tycoon:GetCompletionPercentage()
-	local playerFolder = ServerStorage.PlayerData:FindFirstChild(self.Tycoon:GetAttribute("OwnerId"))
+	local playerFolder = ServerStorage.PlayerData:FindFirstChild(tostring(self.Tycoon:GetAttribute("OwnerId")))
 	if not playerFolder then return end
 	
 	local unlockedButtons = self.TotalPurchasedButtons
