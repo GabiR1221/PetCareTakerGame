@@ -66,6 +66,41 @@ local function cloneDictionary(dictValue)
 	return out
 end
 
+local function normalizePetName(name)
+	if not name then return "" end
+	return string.lower((tostring(name):gsub("^%s+", ""):gsub("%s+$", "")))
+end
+
+local function splitCsv(csv)
+	local out = {}
+	if type(csv) ~= "string" or csv == "" then return out end
+	for token in string.gmatch(csv, "([^,]+)") do
+		local cleaned = normalizePetName(token)
+		if cleaned ~= "" then
+			out[cleaned] = true
+		end
+	end
+	return out
+end
+
+local function getPlayerCurrency(player, currencyName)
+	currencyName = tostring(currencyName or "Currency")
+	local dataFolder = player and player:FindFirstChild("Data")
+	local playerDataFolder = dataFolder and dataFolder:FindFirstChild("PlayerData")
+	local currencyValue = playerDataFolder and playerDataFolder:FindFirstChild(currencyName)
+	if currencyValue and (currencyValue:IsA("IntValue") or currencyValue:IsA("NumberValue")) then
+		return tonumber(currencyValue.Value) or 0
+	end
+
+	local serverPlayerData = ServerStorage:FindFirstChild("PlayerData")
+	local playerFolder = serverPlayerData and serverPlayerData:FindFirstChild(tostring(player.UserId))
+	if playerFolder then
+		return tonumber(playerFolder:GetAttribute(currencyName)) or 0
+	end
+	return 0
+end
+
+
 getRebirthRequirementsFunction.OnServerInvoke = function(player)
 	local rebirthsName = configModule.RebirthsName or "Rebirths"
 	local rebirthCount = 0
@@ -82,14 +117,51 @@ getRebirthRequirementsFunction.OnServerInvoke = function(player)
 		tierRequirements = configModule.RebirthRequirementsByTier[nextTier]
 	end
 	tierRequirements = tierRequirements or {}
+	
+	local requiredPets = cloneArray(tierRequirements.RequiredPets or configModule.RebirthRequiredPets or {})
+	local requiredCurrency = cloneDictionary(tierRequirements.RequiredCurrency or configModule.RebirthRequiredCurrency or {})
+	local requiredCompletion = tonumber(configModule.RebirthCompletionPercentage) or 100
+
+	local ownedPets = playerFolder and splitCsv(playerFolder:GetAttribute("OwnedPetNamesCsv")) or {}
+	local requiredPetStatus = {}
+	local hasRequiredPets = true
+	for _, petName in ipairs(requiredPets) do
+		local hasPet = ownedPets[normalizePetName(petName)] == true
+		requiredPetStatus[tostring(petName)] = hasPet
+		if not hasPet then
+			hasRequiredPets = false
+		end
+	end
+
+	local hasRequiredCurrency = true
+	for currencyName, amount in pairs(requiredCurrency) do
+		local needed = tonumber(amount) or 0
+		if needed > 0 and getPlayerCurrency(player, currencyName) < needed then
+			hasRequiredCurrency = false
+			break
+		end
+	end
+
+	local completionPercentage = 0
+	for _, tycoon in ipairs(tycoons) do
+		if tycoon.Tycoon:GetAttribute("OwnerId") == player.UserId then
+			completionPercentage = tonumber(tycoon:GetCompletionPercentage()) or 0
+			break
+		end
+	end
 
 	return {
 		RebirthCount = rebirthCount,
 		NextTier = nextTier,
 		RebirthLimit = tonumber(configModule.RebirthLimit) or 0,
-		CompletionPercentage = tonumber(configModule.RebirthCompletionPercentage) or 100,
-		RequiredPets = cloneArray(tierRequirements.RequiredPets or configModule.RebirthRequiredPets or {}),
-		RequiredCurrency = cloneDictionary(tierRequirements.RequiredCurrency or configModule.RebirthRequiredCurrency or {}),
+		CompletionPercentage = requiredCompletion,
+		CurrentCompletionPercentage = completionPercentage,
+		RequiredPets = requiredPets,
+		RequiredPetStatus = requiredPetStatus,
+		RequiredCurrency = requiredCurrency,
+		HasRequiredPets = hasRequiredPets,
+		HasRequiredCurrency = hasRequiredCurrency,
+		IsEligible = hasRequiredPets and hasRequiredCurrency and completionPercentage >= requiredCompletion,
 	}
 end
 
