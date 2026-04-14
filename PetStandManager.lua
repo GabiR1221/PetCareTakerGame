@@ -1,6 +1,7 @@
 local PetStandManager = {}
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 function PetStandManager:Initialize(stateTable, carryingTable, playersService, petMovement, saveManager, config)
 	self.petState = stateTable or {}
@@ -15,6 +16,8 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.standIncomeTasks = {}         -- [petModel] = true
 	self.standPickupPromptConns = {}   -- [petModel] = RBXScriptConnection
 	self.collectorTouchDebounces = {}  -- [collectorPart] = {[userId] = true}
+	self.collectorAnimState = {}       -- [collectorPart] = true while tweening
+	self.surfacePulseState = {}        -- [standRoot] = true while pulsing
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
@@ -104,6 +107,14 @@ function PetStandManager:GetDisplayLabel(standRoot)
 	if displayPart then
 		local gui = displayPart:FindFirstChildWhichIsA("SurfaceGui")
 		if gui then
+			local frame = gui:FindFirstChild("Frame")
+			if frame and frame:IsA("Frame") then
+				local frameLabel = frame:FindFirstChildWhichIsA("TextLabel", true)
+				if frameLabel then
+					return frameLabel
+				end
+			end
+
 			local label = gui:FindFirstChildWhichIsA("TextLabel", true)
 			if label then
 				return label
@@ -119,6 +130,66 @@ function PetStandManager:GetDisplayLabel(standRoot)
 
 	return nil
 end
+
+function PetStandManager:PulseSurfaceDisplay(standRoot, label)
+	if not standRoot or not label then return end
+	if self.surfacePulseState[standRoot] then return end
+
+	self.surfacePulseState[standRoot] = true
+
+	local originalSize = label.Size
+	local originalStrokeThickness = nil
+	local stroke = label:FindFirstChildWhichIsA("UIStroke")
+	if stroke then
+		originalStrokeThickness = stroke.Thickness
+	end
+
+	local growSize = UDim2.new(
+		originalSize.X.Scale * 1.05,
+		math.floor(originalSize.X.Offset * 1.05 + 0.3),
+		originalSize.Y.Scale * 1.05,
+		math.floor(originalSize.Y.Offset * 1.05 + 0.3)
+	)
+
+	local growTween = TweenService:Create(
+		label,
+		TweenInfo.new(0.12, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{Size = growSize}
+	)
+
+	local shrinkTween = TweenService:Create(
+		label,
+		TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{Size = originalSize}
+	)
+
+	if stroke then
+		local growStroke = TweenService:Create(
+			stroke,
+			TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{Thickness = originalStrokeThickness * 1.15}
+		)
+		growStroke:Play()
+	end
+
+	growTween:Play()
+	growTween.Completed:Connect(function()
+		if stroke and originalStrokeThickness then
+			local shrinkStroke = TweenService:Create(
+				stroke,
+				TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{Thickness = originalStrokeThickness}
+			)
+			shrinkStroke:Play()
+		end
+
+		shrinkTween:Play()
+		shrinkTween.Completed:Connect(function()
+			self.surfacePulseState[standRoot] = nil
+		end)
+	end)
+end
+
 
 function PetStandManager:EnsureStandId(standRoot)
 	if not standRoot then return nil end
@@ -169,8 +240,40 @@ function PetStandManager:UpdateStandDisplay(standRoot)
 	local stored = self:GetStoredMoneyValue(standRoot)
 	if stored then
 		label.Text = tostring(math.floor(stored.Value))
+		self:PulseSurfaceDisplay(standRoot, label)
 	end
 end
+
+function PetStandManager:AnimateCollectorPress(collectorPart)
+	if not collectorPart then return end
+	if self.collectorAnimState[collectorPart] then return end
+
+	self.collectorAnimState[collectorPart] = true
+
+	local baseCFrame = collectorPart.CFrame
+	local pressedCFrame = baseCFrame * CFrame.new(0, -0.35, 0)
+
+	local downTween = TweenService:Create(
+		collectorPart,
+		TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{CFrame = pressedCFrame}
+	)
+
+	local upTween = TweenService:Create(
+		collectorPart,
+		TweenInfo.new(0.11, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{CFrame = baseCFrame}
+	)
+
+	downTween:Play()
+	downTween.Completed:Connect(function()
+		upTween:Play()
+		upTween.Completed:Connect(function()
+			self.collectorAnimState[collectorPart] = nil
+		end)
+	end)
+end
+
 
 function PetStandManager:ScanContainer(container)
 	if not container then return end
@@ -524,6 +627,7 @@ function PetStandManager:ConnectCollector(standRoot, collectorPart)
 
 		local collected = self:CollectStandMoney(player, standRoot)
 		if collected > 0 then
+			self:AnimateCollectorPress(collectorPart)
 			print(("[PetStandManager] %s collected %d from stand %s"):format(
 				tostring(player.Name), collected, tostring(standRoot:GetFullName())))
 		end
