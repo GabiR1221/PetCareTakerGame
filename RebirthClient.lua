@@ -4,6 +4,19 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TycoonRebirthEvent = ReplicatedStorage:WaitForChild("TycoonRebirthEvent")
 local GetTycoonRebirthRequirements = ReplicatedStorage:WaitForChild("TycoonGetRebirthRequirementsFunction")
 
+local LocalNotifyBridge = ReplicatedStorage:FindFirstChild("ClientNotificationEvent")
+if not LocalNotifyBridge or not LocalNotifyBridge:IsA("BindableEvent") then
+	LocalNotifyBridge = Instance.new("BindableEvent")
+	LocalNotifyBridge.Name = "ClientNotificationEvent"
+	LocalNotifyBridge.Parent = ReplicatedStorage
+end
+
+local function notifyLocal(notificationType, message)
+	if LocalNotifyBridge and LocalNotifyBridge:IsA("BindableEvent") then
+		LocalNotifyBridge:Fire(notificationType, message)
+	end
+end
+
 local RebirthCanBuy = true
 local RebirthRequirementsHolder = nil
 local RebirthPetSlots = {}
@@ -261,6 +274,7 @@ Utilities.ButtonAnimations.Create(Frames.Rebirth.Buy)
 
 Frames.Rebirth.Buy.Click.MouseButton1Click:Connect(function()
 	if not RebirthCanBuy then
+		notifyLocal("error", "❌ You can't rebirth yet. Complete the listed requirements first.")
 		Utilities.Audio.PlayAudio("Click")
 		return
 	end
@@ -268,6 +282,7 @@ Frames.Rebirth.Buy.Click.MouseButton1Click:Connect(function()
 	if TycoonRebirthEvent then
 		TycoonRebirthEvent:FireServer()
 	end
+	notifyLocal("info", "⏳ Rebirth request sent...")
 	Utilities.Audio.PlayAudio("Click")
 end)
 
