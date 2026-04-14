@@ -21,6 +21,8 @@ local rebirthEvent = Instance.new("RemoteEvent")
 rebirthEvent.Name = "TycoonRebirthEvent"
 rebirthEvent.Parent = ReplicatedStorage
 
+local notifyEvent = ReplicatedStorage:FindFirstChild("GameNotificationEvent")
+
 local soundEvent = Instance.new("RemoteEvent")
 soundEvent.Name = "TycoonSoundEvent"
 soundEvent.Parent = ReplicatedStorage
@@ -32,6 +34,7 @@ animationEvent.Parent = ReplicatedStorage
 local getAnimationsFunction = Instance.new("RemoteFunction")
 getAnimationsFunction.Name = "TycoonGetObjectAnimationsFunction"
 getAnimationsFunction.Parent = ReplicatedStorage
+
 
 local getRebirthRequirementsFunction = Instance.new("RemoteFunction")
 getRebirthRequirementsFunction.Name = "TycoonGetRebirthRequirementsFunction"
@@ -350,7 +353,19 @@ local function OnRebirth(player)
 	local tycoon = GetTycoonFromOwner(player)
 	if not tycoon then return end
 	if player.UserId == tycoon.Tycoon:GetAttribute("OwnerId") then
-		tycoon:Rebirth()
+		local didRebirth, reason = tycoon:Rebirth()
+		if didRebirth then
+			notifyEvent:FireClient(player, "success", "✅ Rebirth successful! Your progress and pets were reset.")
+			return
+		end
+
+		if reason == "CurrencyMissing" then
+			notifyEvent:FireClient(player, "error", "❌ You do not have enough currency to rebirth.")
+		elseif reason == "RequirementsNotMet" then
+			notifyEvent:FireClient(player, "error", "❌ You can't rebirth yet. Complete your requirements first.")
+		else
+			notifyEvent:FireClient(player, "error", "❌ Rebirth failed, please try again.")
+		end
 	end
 end
 
