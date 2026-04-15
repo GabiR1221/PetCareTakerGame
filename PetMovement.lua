@@ -1,6 +1,7 @@
 -- ServerScriptService.PetMovement
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
+local Players = game:GetService("Players")
 
 local PetMovement = {}
 
@@ -14,7 +15,7 @@ local WALK_SPEED_MAX = 7.2
 
 local MOVE_TIMEOUT = 8
 local CLOSE_DIST = 1.5
-local FLOOR_PADDING = 2
+local FLOOR_PADDING = 1.8
 local OBSTACLE_CLEARANCE = Vector3.new(2.8, 3.4, 2.8)
 local TARGET_SAMPLE_ATTEMPTS = 8
 
@@ -25,6 +26,14 @@ local TURN_MAX_TORQUE = 100000
 local IDLE_PAUSE_CHANCE = 0.55
 local IDLE_PAUSE_MIN = 0.7
 local IDLE_PAUSE_MAX = 2.4
+
+local FLEE_TRIGGER_RANGE = 20
+local FLEE_COOLDOWN = 0.35
+local FLEE_MIN_DURATION = 1.5
+local FLEE_MAX_DURATION = 2.8
+local FLEE_START_MAX_WAIT = 0.3
+local FLEE_SPEED_MIN = 6.5
+local FLEE_SPEED_MAX = 10
 
 local FLOOR_NAME_CANDIDATES = {
 	"Floor",
@@ -276,6 +285,7 @@ local function loadTracks(state)
 		idles = {},
 		pause = {},
 		turn = nil,
+		fleeStart = {},
 	}
 
 	local folder = findAnimationsFolder(state.pet)
@@ -313,6 +323,14 @@ local function loadTracks(state)
 					state.tracks.turn = animator:LoadAnimation(obj)
 					state.tracks.turn.Looped = false
 				end
+
+			elseif string.find(n, "flee", 1, true)
+				or string.find(n, "fear", 1, true)
+				or string.find(n, "scare", 1, true)
+				or string.find(n, "startle", 1, true) then
+				local tr = animator:LoadAnimation(obj)
+				tr.Looped = false
+				table.insert(state.tracks.fleeStart, tr)
 			end
 		end
 	end
@@ -542,6 +560,131 @@ local function doIdlePause(state, anchorPos)
 	end
 end
 
+local function findNearestPlayerPosition(position, maxRange)
+	if not position then return nil end
+	local nearest = nil
+	local bestDist = maxRange or FLEE_TRIGGER_RANGE
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local character = plr.Character
+		local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+		local hum = character and character:FindFirstChildOfClass("Humanoid")
+		if root and hum and hum.Health > 0 then
+			local dist = (root.Position - position).Magnitude
+			if dist <= bestDist then
+				bestDist = dist
+				nearest = root.Position
+			end
+		end
+	end
+
+	return nearest
+end
+
+local function playFleeStartAnimation(state)
+	if not state then return end
+	loadTracks(state)
+	stopTrack(state.tracks and state.tracks.walk, 0.06)
+	for _, tr in ipairs((state.tracks and state.tracks.idles) or {}) do
+		stopTrack(tr, 0.06)
+	end
+	for _, tr in ipairs((state.tracks and state.tracks.pause) or {}) do
+		stopTrack(tr, 0.06)
+	end
+
+	local track = playRandomFromList(state.tracks and state.tracks.fleeStart, 0.08)
+	if not track then return end
+	pcall(function()
+		track.Priority = Enum.AnimationPriority.Action
+	end)
+
+	local endAt = os.clock() + math.clamp(track.Length > 0 and track.Length or 0.5, 0.2, FLEE_START_MAX_WAIT)
+	while state.wanderRunning and track.IsPlaying and os.clock() < endAt do
+		task.wait(0.03)
+	end
+	stopTrack(track, 0.05)
+end
+
+local function sampleFleeTarget(anchorPos, radius, bounds, threatPos, petPos)
+	local floorPart = bounds and bounds.floorPart or nil
+	local away = Vector3.new(1, 0, 0)
+	if threatPos and petPos then
+		local delta = Vector3.new(petPos.X - threatPos.X, 0, petPos.Z - threatPos.Z)
+		if delta.Magnitude > 0.05 then
+			away = delta.Unit
+		end
+	end
+
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+	if floorPart then
+		overlapParams.FilterDescendantsInstances = { floorPart }
+	end
+
+	for _ = 1, TARGET_SAMPLE_ATTEMPTS do
+		local jitter = (math.random() - 0.5) * math.rad(70)
+		local dir = (CFrame.Angles(0, jitter, 0):VectorToWorldSpace(away)).Unit
+		local dist = radius * (0.55 + math.random() * 0.45)
+		local target = anchorPos + dir * dist
+
+		if floorPart then
+			target = clampPointToPartXZ(floorPart, target, FLOOR_PADDING)
+		end
+
+		local clearanceCenter = target + Vector3.new(0, OBSTACLE_CLEARANCE.Y * 0.5, 0)
+		local nearby = workspace:GetPartBoundsInBox(CFrame.new(clearanceCenter), OBSTACLE_CLEARANCE, overlapParams)
+		local blocked = false
+		for _, part in ipairs(nearby) do
+			if part and part.CanCollide and (not floorPart or part ~= floorPart) then
+				blocked = true
+				break
+			end
+		end
+		if not blocked then
+			return target
+		end
+	end
+
+	return sampleWanderTarget(anchorPos, radius, bounds)
+end
+
+local function tryFleeFromNearbyPlayer(state, hrp, wanderRadius, bounds)
+	if not state or not hrp then return false end
+	if state.pet:GetAttribute("WildPet") ~= true then return false end
+
+	local threatPos = findNearestPlayerPosition(hrp.Position, FLEE_TRIGGER_RANGE)
+	if not threatPos then
+		return false
+	end
+
+	if (os.clock() - (state.lastFleeAt or 0)) < FLEE_COOLDOWN then
+		return false
+	end
+
+	state.lastFleeAt = os.clock()
+	setMode(state, "Idle")
+	playFleeStartAnimation(state)
+
+	local fleeStartedAt = os.clock()
+	local fleeEndAt = fleeStartedAt + (FLEE_MIN_DURATION + math.random() * (FLEE_MAX_DURATION - FLEE_MIN_DURATION))
+
+	while state.wanderRunning and state.pet.Parent and os.clock() < fleeEndAt do
+		local nearestThreat = findNearestPlayerPosition(hrp.Position, FLEE_TRIGGER_RANGE + 3)
+		if nearestThreat then
+			threatPos = nearestThreat
+		elseif os.clock() >= (fleeStartedAt + FLEE_MIN_DURATION) then
+			break
+		end
+
+		local fleeTarget = sampleFleeTarget(hrp.Position, wanderRadius, bounds, threatPos, hrp.Position)
+		local runSpeed = FLEE_SPEED_MIN + (math.random() * (FLEE_SPEED_MAX - FLEE_SPEED_MIN))
+		moveToPositionSmooth(state, fleeTarget, runSpeed)
+		task.wait(0.02)
+	end
+
+	return true
+end
+
 local function cleanupState(pet)
 	local state = petTasks[pet]
 	if not state then return end
@@ -621,9 +764,15 @@ local function startWanderingInternal(pet, spawnPos, options)
 
 	local wanderRadius = tonumber(options.wanderRadius) or DEFAULT_WANDER_RADIUS
 	local ownerUserId = options.ownerUserId
+	local constraintPart = options.constraintPart
 
 	local bounds = nil
-	if ownerUserId ~= nil then
+	if constraintPart and constraintPart:IsA("BasePart") then
+		bounds = {
+			floorPart = constraintPart,
+			center = constraintPart.Position,
+		}
+	elseif ownerUserId ~= nil then
 		bounds = resolveWanderBounds(spawnPos, ownerUserId)
 	end
 	if bounds and bounds.floorPart then
@@ -642,6 +791,12 @@ local function startWanderingInternal(pet, spawnPos, options)
 			if not currentState or currentState ~= state or not currentState.wanderRunning then
 				break
 			end
+			
+			if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
+				task.wait(0.05)
+				continue
+			end
+
 
 			local target = sampleWanderTarget(spawnPos, wanderRadius, bounds)
 			local moveSpeed = WALK_SPEED_MIN + (math.random() * (WALK_SPEED_MAX - WALK_SPEED_MIN))
@@ -670,6 +825,11 @@ local function startWanderingInternal(pet, spawnPos, options)
 					if bounds and bounds.floorPart then
 						goal = clampPointToPartXZ(bounds.floorPart, goal, FLOOR_PADDING)
 					end
+
+					if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
+						break
+					end
+
 
 					local reached = moveToPositionSmooth(currentState, goal, moveSpeed)
 
@@ -702,8 +862,8 @@ local function startWanderingInternal(pet, spawnPos, options)
 	end)
 end
 
--- StartWandering(pet, originVector3?, wanderRadius?, ownerUserId?)
-function PetMovement.StartWandering(pet, origin, wanderRadius, ownerUserId)
+-- StartWandering(pet, originVector3?, wanderRadius?, ownerUserId?, constraintPart?)
+function PetMovement.StartWandering(pet, origin, wanderRadius, ownerUserId, constraintPart)
 	if not pet then return end
 
 	local spawnPos
@@ -723,6 +883,7 @@ function PetMovement.StartWandering(pet, origin, wanderRadius, ownerUserId)
 	startWanderingInternal(pet, spawnPos, {
 		wanderRadius = tonumber(wanderRadius) or DEFAULT_WANDER_RADIUS,
 		ownerUserId = ownerUserId,
+		constraintPart = constraintPart,
 	})
 
 	if not pet:GetAttribute("__petMovementHasAncestryHook") then
