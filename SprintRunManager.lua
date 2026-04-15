@@ -27,6 +27,8 @@ local JUMP_FORWARD_SPEED_MULTIPLIER = 1.5
 local JUMP_FALLBACK_TIMEOUT = 1.5
 local JUMP_STAMINA_COST_PERCENT = 0.30
 
+local EXHAUSTION_DECEL_DURATION = 0.9
+
 local STUMBLE_DURATION_MIN = 0.5
 local STUMBLE_DURATION_MAX = 1.25
 local STUMBLE_SPEED_MULTIPLIER = 0.62
@@ -145,6 +147,25 @@ function SprintRunManager:_connectRemotes()
 	end)
 end
 
+function SprintRunManager:_beginExhaustion(player, state, startingSpeed)
+	if not state or state.exhaustedStarted then
+		return
+	end
+
+	state.exhausted = true
+	state.exhaustedStarted = true
+	state.exhaustionStartedAt = os.clock()
+	state.exhaustionDecelDuration = EXHAUSTION_DECEL_DURATION
+	state.exhaustionStartSpeed = math.max(0, tonumber(startingSpeed) or state.runSpeed or RUN_SPEED)
+	state.exhaustionPhase = "Slide"
+
+	self.stateRemote:FireClient(player, "ExhaustionState", true, {
+		phase = "Slide",
+		duration = state.exhaustionDecelDuration,
+	})
+end
+
+
 function SprintRunManager:_startHeartbeat()
 	RunService.Heartbeat:Connect(function(dt)
 		for player, state in pairs(self.playerState) do
@@ -195,7 +216,7 @@ function SprintRunManager:_startHeartbeat()
 			if not state.exhausted then
 				state.currentStamina = math.max(0, (state.currentStamina or maxStamina) - (state.staminaDrainPerSecond or STAMINA_DRAIN_PER_SECOND) * dt)
 				if state.currentStamina <= 0 then
-					state.exhausted = true
+					self:_beginExhaustion(player, state, state.runSpeed)
 					state.currentStamina = 0
 				end
 			end
@@ -207,20 +228,44 @@ function SprintRunManager:_startHeartbeat()
 				speed *= math.clamp(penaltyMultiplier, 0.1, 1)
 			end
 			if state.exhausted then
-				if hum.WalkSpeed ~= 0 then
-					hum.WalkSpeed = 0
+				local exhaustedSpeed = 0
+				if state.exhaustedStarted and state.exhaustionPhase ~= "Collapsed" then
+					local elapsed = math.max(0, now - (state.exhaustionStartedAt or now))
+					local duration = math.max(0.05, state.exhaustionDecelDuration or EXHAUSTION_DECEL_DURATION)
+					local alpha = math.clamp(elapsed / duration, 0, 1)
+					exhaustedSpeed = (state.exhaustionStartSpeed or speed) * (1 - alpha)
+
+					if alpha >= 1 then
+						state.exhaustionPhase = "Collapsed"
+						self.stateRemote:FireClient(player, "ExhaustionState", true, { phase = "Collapsed" })
+					end
 				end
-				hum.JumpPower = 0
-				hum.JumpHeight = 0
-				hum.AutoRotate = false
-				hum.Jump = false
-				hum:Move(Vector3.zero, false)
-				root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+
+				if state.exhaustionPhase ~= "Collapsed" then
+					hum.WalkSpeed = 0
+					hum.JumpPower = 0
+					hum.JumpHeight = 0
+					hum.AutoRotate = false
+					hum.Jump = false
+					hum:Move(Vector3.zero, true)
+					local moveDir = root.CFrame.LookVector
+					root.AssemblyLinearVelocity = Vector3.new(moveDir.X * exhaustedSpeed, root.AssemblyLinearVelocity.Y, moveDir.Z * exhaustedSpeed)
+				else
+					if hum.WalkSpeed ~= 0 then
+						hum.WalkSpeed = 0
+					end
+					hum.JumpPower = 0
+					hum.JumpHeight = 0
+					hum.AutoRotate = false
+					hum.Jump = false
+					hum:Move(Vector3.zero, true)
+					root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+				end
 			elseif state.jumping then
 				hum.WalkSpeed = 0
 				hum.JumpPower = 0
+				hum.AutoRotate = false
 				hum.JumpHeight = 0
-				hum.AutoRotate = true
 				hum.Jump = false
 				hum:Move(Vector3.zero, false)
 			else
@@ -247,6 +292,7 @@ function SprintRunManager:_startHeartbeat()
 					current = state.currentStamina,
 					max = maxStamina,
 					exhausted = state.exhausted == true,
+					phase = state.exhaustionPhase,
 				})
 			end
 		end
@@ -428,7 +474,7 @@ function SprintRunManager:_applyObstaclePenalty(player, state, obstacleInstance)
 	state.speedPenaltyUntil = now + OBSTACLE_SPEED_PENALTY_DURATION
 	state.speedPenaltyMultiplier = speedMultiplier
 	if state.currentStamina <= 0 then
-		state.exhausted = true
+		self:_beginExhaustion(player, state, state.runSpeed)
 	end
 
 	self.stateRemote:FireClient(player, "StaminaUpdate", true, {
@@ -799,6 +845,8 @@ function SprintRunManager:StartRunning(player, startLine)
 		jumpStartAnimationId = startLine and (startLine:GetAttribute("JumpStartAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
 		jumpSlideAnimationId = startLine and (startLine:GetAttribute("JumpSlideAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
 		stumbleAnimationId = startLine and (startLine:GetAttribute("StumbleAnimationId") or startLine:GetAttribute("JumpSlideAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
+		exhaustedSlideAnimationId = startLine and (startLine:GetAttribute("ExhaustedSlideAnimationId") or startLine:GetAttribute("OutOfStaminaSlideAnimationId")) or nil,
+		exhaustedLoopAnimationId = startLine and (startLine:GetAttribute("ExhaustedLoopAnimationId") or startLine:GetAttribute("OutOfStaminaLoopAnimationId")) or nil,
 		currentStamina = state.currentStamina,
 		maxStamina = state.maxStamina,
 	})
@@ -848,7 +896,12 @@ function SprintRunManager:RequestJump(player)
 	local currentStamina = state.currentStamina or state.maxStamina or DEFAULT_STAMINA
 	local staminaCost = math.max(1, math.floor(currentStamina * JUMP_STAMINA_COST_PERCENT + 0.5))
 	state.currentStamina = math.max(0, currentStamina - staminaCost)
-	state.exhausted = state.currentStamina <= 0
+	if state.currentStamina <= 0 then
+		self:_beginExhaustion(player, state, state.runSpeed)
+	else
+		state.exhausted = false
+	end
+
 
 	self.stateRemote:FireClient(player, "StaminaUpdate", true, {
 		current = state.currentStamina,
@@ -928,6 +981,10 @@ function SprintRunManager:StopRunning(player, notifyClient)
 	state.slideStartedAt = nil
 	state.nextAllowedJumpAt = 0
 	state.exhausted = false
+	state.exhaustedStarted = false
+	state.exhaustionStartedAt = nil
+	state.exhaustionStartSpeed = nil
+	state.exhaustionPhase = nil
 	state.speedPenaltyUntil = 0
 	state.speedPenaltyMultiplier = 1
 	state.slideStateSent = false
@@ -970,6 +1027,7 @@ function SprintRunManager:StopRunning(player, notifyClient)
 	end
 
 	if notifyClient then
+		self.stateRemote:FireClient(player, "ExhaustionState", false)
 		self.stateRemote:FireClient(player, "RunnerState", false)
 	end
 end
