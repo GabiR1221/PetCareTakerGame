@@ -4,6 +4,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local workspaceService = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
 local stateRemote = ReplicatedStorage:WaitForChild("RunnerStateEvent")
@@ -79,6 +80,7 @@ local jumpStartStoppedConn = nil
 local staminaCurrent = 0
 local staminaMax = 50
 local hiddenUiState = {}
+local savedCameraSubject = nil
 
 local function animateButtonScale(button, scaleValue, time)
 	local scale = button:FindFirstChild("RunnerScale")
@@ -211,6 +213,30 @@ local function clearAllTracks()
 	stumbleTrack = nil
 end
 
+local function restoreRunnerCamera()
+	local camera = workspaceService.CurrentCamera
+	if camera and savedCameraSubject and savedCameraSubject.Parent then
+		camera.CameraSubject = savedCameraSubject
+	end
+	savedCameraSubject = nil
+end
+
+local function setRunnerCameraToHead()
+	local camera = workspaceService.CurrentCamera
+	local char = player.Character
+	if not camera or not char then return end
+
+	local head = char:FindFirstChild("Head")
+	if not head then return end
+
+	if not savedCameraSubject then
+		savedCameraSubject = camera.CameraSubject
+	end
+
+	camera.CameraSubject = head
+end
+
+
 jumpButton.Activated:Connect(function()
 	if not runnerActive or jumpingNow or stumblingNow then return end
 	actionRemote:FireServer("Jump")
@@ -237,6 +263,7 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 			staminaMax = 50
 			renderStamina(false)
 			updateControlsLocked()
+			restoreRunnerCamera()
 			return
 		end
 
@@ -266,6 +293,7 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		end
 
 		updateControlsLocked()
+		setRunnerCameraToHead()
 
 	elseif action == "JumpState" then
 		local jumping = enabled == true
@@ -332,5 +360,11 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		staminaCurrent = payload and payload.current or staminaCurrent
 		staminaMax = payload and payload.max or staminaMax
 		renderStamina(payload and payload.exhausted == true)
+	end
+end)
+
+player.CharacterAdded:Connect(function()
+	if runnerActive then
+		task.defer(setRunnerCameraToHead)
 	end
 end)
