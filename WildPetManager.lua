@@ -166,6 +166,8 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		rarityMultiplier = rarityMult,
 		petUid = petUid,
 	}
+	
+	pet:SetAttribute("WildPet", false)
 
 	self.PetRigManager:EnsurePetRig(pet)
 	self.PetAnimationManager:SetupAnimatorForPet(pet)
@@ -912,6 +914,7 @@ function WildPetManager:AutoAdoptCarriedWildPet(player)
 	state.location = "player"
 	state.carrierUserId = nil
 	state.petUid = ensurePetUid(pet)
+	pet:SetAttribute("WildPet", false)
 	self:_resetDirtVisualCache(pet)
 
 	local adoptionEvent = ReplicatedStorage:FindFirstChild("PetAdoptionEvent")
@@ -1036,7 +1039,8 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		rarityMultiplier = rarityMult,
 		petUid = petUid
 	}
-
+	
+	pet:SetAttribute("WildPet", true)
 	self.wildPets[pet] = spawnArea
 
 	-- Set up pet rig and animation
@@ -1044,7 +1048,7 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 	self.PetAnimationManager:SetupAnimatorForPet(pet)
 
 	-- Start wandering around the spawn area
-	self.PetMovement.StartWandering(pet, spawnArea.Position, self.WANDER_RADIUS)
+	self.PetMovement.StartWandering(pet, spawnArea.Position, self.WANDER_RADIUS, nil, spawnArea)
 
 	-- Add pickup prompt
 	self:AddWildPetPickupPrompt(pet)
@@ -1176,6 +1180,7 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 		self.petState[pet].wild = false
 		self.petState[pet].location = "player"
 		self.petState[pet].petUid = ensurePetUid(pet)
+		pet:SetAttribute("WildPet", false)
 		self:_resetDirtVisualCache(pet)
 
 		-- Update carrying tables
@@ -1298,6 +1303,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			self.petState[pet].ownerUserId = player.UserId
 			self.petState[pet].wild = false
 			self.petState[pet].petUid = resolvedPetUid
+			pet:SetAttribute("WildPet", false)
 
 			if not self.petState[pet].power then
 				self.petState[pet].power = petInfo.power or 1
