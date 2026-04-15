@@ -166,7 +166,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		rarityMultiplier = rarityMult,
 		petUid = petUid,
 	}
-	
+
 	pet:SetAttribute("WildPet", false)
 
 	self.PetRigManager:EnsurePetRig(pet)
@@ -620,7 +620,7 @@ function WildPetManager:FindPetTemplateByName(templateName)
 			return candidate
 		end
 	end
-	
+
 	local replicatedPets = ReplicatedStorage:FindFirstChild("Pets")
 	if replicatedPets then
 		local fallback = replicatedPets:FindFirstChild(templateName)
@@ -899,7 +899,8 @@ function WildPetManager:NormalizeRunnerCaughtPetHold(player)
 	return true
 end
 
-function WildPetManager:AutoAdoptCarriedWildPet(player)
+function WildPetManager:AutoAdoptCarriedWildPet(player, options)
+	options = options or {}
 	if not player then return false end
 	local pet = self.carryingPetByUserId[player.UserId]
 	if not pet or not pet.Parent then return false end
@@ -911,17 +912,53 @@ function WildPetManager:AutoAdoptCarriedWildPet(player)
 
 	state.ownerUserId = player.UserId
 	state.wild = false
-	state.location = "player"
+	state.location = "free"
 	state.carrierUserId = nil
 	state.petUid = ensurePetUid(pet)
 	pet:SetAttribute("WildPet", false)
 	self:_resetDirtVisualCache(pet)
 
+	-- Ensure adopted pets do NOT remain attached to the player.
+	-- We explicitly drop to world + re-rig + restart wander from adoption mat
+	-- to avoid carry-state stutter and to make reload behavior consistent.
+	self.PetAttachmentManager:DetachPetFromPlayer(pet)
+	pet.Parent = workspace
+
+	local dropPosition = nil
+	if typeof(options.adoptionPosition) == "Vector3" then
+		dropPosition = options.adoptionPosition
+	else
+		local tycoonModel, _ = self.TycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
+		local adoptionMat = tycoonModel and self:GetAdoptionMatForTycoon(tycoonModel)
+		dropPosition = adoptionMat and adoptionMat.Position or nil
+	end
+
+	pcall(function()
+		self.PetRigManager:EnsurePetRig(pet)
+		self.PetAnimationManager:SetupAnimatorForPet(pet)
+	end)
+
+	if dropPosition then
+		self:PlacePetOnGround(pet, dropPosition)
+		self.PetMovement.StartWandering(pet, dropPosition, 20, player.UserId)
+	else
+		-- safe fallback if adoption mat can't be resolved
+		local char = player.Character
+		local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+		if root then
+			self:PlacePetOnGround(pet, root.Position + (root.CFrame.LookVector * 3))
+			self.PetMovement.StartWandering(pet, root.Position, 20, player.UserId)
+		else
+			self.PetMovement.StartWandering(pet)
+		end
+	end
+	self:AddOwnedPetPickupPrompt(pet, player.UserId)
+
 	local adoptionEvent = ReplicatedStorage:FindFirstChild("PetAdoptionEvent")
 	if adoptionEvent and adoptionEvent:IsA("RemoteEvent") then
 		adoptionEvent:FireClient(player, "PetAdopted", pet)
 	end
-	
+
 	grantAdoptedPetToInventory(player, pet)
 
 	self:UpdateOwnedPetRegistryForPlayer(player)
@@ -973,7 +1010,7 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		print("[WildPetManager] No WildPetModels/PetModels folder found in ServerStorage")
 		return
 	end
-	
+
 	local templates = self:GetTemplatesForSpawnArea(spawnArea)
 	if #templates == 0 then
 		-- Refresh once in case templates were added after initialization.
@@ -1001,7 +1038,7 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		pet:Destroy()
 		return
 	end
-	
+
 
 	-- Position the pet
 	pet:SetPrimaryPartCFrame(CFrame.new(randomPos))
@@ -1015,7 +1052,7 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 	else
 		pet:PivotTo(CFrame.new(randomPos))
 	end
-	
+
 	-- Get power and rarity multiplier from the template
 	local power = selectedModel:GetAttribute("Power") or 1
 	local rarityMult = selectedModel:GetAttribute("RarityMultiplier") or 1
@@ -1039,7 +1076,7 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		rarityMultiplier = rarityMult,
 		petUid = petUid
 	}
-	
+
 	pet:SetAttribute("WildPet", true)
 	self.wildPets[pet] = spawnArea
 
@@ -1172,52 +1209,26 @@ function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 			return
 		end
 
-		-- ADOPT THE PET!
-		print(("[WildPetManager] Player %s adopting pet %s"):format(player.Name, pet.Name))
-
-		-- Set pet as owned by player
-		self.petState[pet].ownerUserId = player.UserId
-		self.petState[pet].wild = false
-		self.petState[pet].location = "player"
-		self.petState[pet].petUid = ensurePetUid(pet)
-		pet:SetAttribute("WildPet", false)
-		self:_resetDirtVisualCache(pet)
-
-		-- Update carrying tables
-		self.carryingPetByUserId[player.UserId] = pet
-		if self.petState[pet].carrierUserId then
-			self.petState[pet].carrierUserId = nil
+		local adopted = self:AutoAdoptCarriedWildPet(player, { adoptionPosition = adoptionMat.Position })
+		if adopted then
+			print(("[WildPetManager] Pet %s adopted by %s!"):format(pet.Name, player.Name))
 		end
-
-		-- Send adoption message to player
-		game.ReplicatedStorage:FindFirstChild("PetAdoptionEvent"):FireClient(player, "PetAdopted", pet)
-		grantAdoptedPetToInventory(player, pet)
-		self:UpdateOwnedPetRegistryForPlayer(player)
-		if self.SaveManager then
-			self.SaveManager:ScheduleSave(player)
-		end
-
-		-- Output server message
-		print(("[WildPetManager] Pet %s adopted by %s!"):format(pet.Name, player.Name))
-
-		-- Optional: Give adoption bonus XP
-		self.PetStateManager:AddXP(pet, 1) -- Adoption bonus
-		if self.PetMoodVisualManager and self.PetMoodVisualManager.UpdatePetVisuals then
-			task.defer(function()
-				pcall(function()
-					self.PetMoodVisualManager:UpdatePetVisuals(pet)
-				end)
-			end)
-		end
-
-		-- Create new pickup prompt for the now-owned pet
-		self:CreateOwnedPetPickupPrompt(pet, adoptionMat.Position)
 	end)
 
 	return conn
 end
 
 function WildPetManager:AddOwnedPetPickupPrompt(pet, ownerUserId)
+	if not pet or not pet.Parent then return end
+	local existingHelper = pet:FindFirstChild("PetPickupPart")
+	if existingHelper then
+		pcall(function() existingHelper:Destroy() end)
+	end
+	if self.ownedPetPickupConns[pet] then
+		pcall(function() self.ownedPetPickupConns[pet]:Disconnect() end)
+		self.ownedPetPickupConns[pet] = nil
+	end
+
 	-- Create helper part and prompt
 	local helper = Instance.new("Part")
 	helper.Name = "PetPickupPart"
