@@ -34,6 +34,7 @@ local FLEE_MAX_DURATION = 2.8
 local FLEE_START_MAX_WAIT = 0.3
 local FLEE_SPEED_MIN = 6.5
 local FLEE_SPEED_MAX = 10
+local FLEE_INTERRUPT_CHECK_INTERVAL = 0.12
 
 local FLOOR_NAME_CANDIDATES = {
 	"Floor",
@@ -451,9 +452,9 @@ local function setMode(state, mode, speed)
 	end
 end
 
-local function moveToPositionSmooth(state, targetPos, speed)
+local function moveToPositionSmooth(state, targetPos, speed, interruptCheck)
 	if not state or not state.humanoid or not state.hrp or not targetPos then
-		return false
+		return false, nil
 	end
 
 	local humanoid = state.humanoid
@@ -467,17 +468,27 @@ local function moveToPositionSmooth(state, targetPos, speed)
 
 	local startTime = os.clock()
 	local lastReissue = 0
+	local lastInterruptCheck = 0
 
 	while state.wanderRunning and humanoid.Parent and hrp.Parent do
 		local flatTarget = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
 		local dist = (flatTarget - hrp.Position).Magnitude
 
 		if dist <= CLOSE_DIST then
-			return true
+			return true, nil
 		end
 
 		if os.clock() - startTime > MOVE_TIMEOUT then
-			return false
+			return false, "timeout"
+		end
+
+		if interruptCheck and (os.clock() - lastInterruptCheck) >= FLEE_INTERRUPT_CHECK_INTERVAL then
+			lastInterruptCheck = os.clock()
+			local shouldInterrupt, reason = interruptCheck()
+			if shouldInterrupt then
+				humanoid:Move(Vector3.zero, true)
+				return false, reason or "interrupt"
+			end
 		end
 
 		setFacingTarget(state, targetPos)
@@ -490,7 +501,7 @@ local function moveToPositionSmooth(state, targetPos, speed)
 		task.wait(1 / 30)
 	end
 
-	return false
+	return false, "stopped"
 end
 
 local function sampleWanderTarget(anchorPos, radius, bounds)
@@ -581,6 +592,30 @@ local function findNearestPlayerPosition(position, maxRange)
 	return nearest
 end
 
+local function shouldInterruptForFlee(state, hrp)
+	if not state or not hrp then
+		return false, nil
+	end
+	if state.isFleeing then
+		return false, nil
+	end
+	if state.pet:GetAttribute("WildPet") ~= true then
+		return false, nil
+	end
+
+	if (os.clock() - (state.lastFleeAt or 0)) < FLEE_COOLDOWN then
+		return false, nil
+	end
+
+	local threatPos = state.pendingFleeThreat or findNearestPlayerPosition(hrp.Position, FLEE_TRIGGER_RANGE)
+	if threatPos then
+		state.pendingFleeThreat = threatPos
+		return true, "flee"
+	end
+
+	return false, nil
+end
+
 local function playFleeStartAnimation(state)
 	if not state then return end
 	loadTracks(state)
@@ -652,7 +687,7 @@ local function tryFleeFromNearbyPlayer(state, hrp, wanderRadius, bounds)
 	if not state or not hrp then return false end
 	if state.pet:GetAttribute("WildPet") ~= true then return false end
 
-	local threatPos = findNearestPlayerPosition(hrp.Position, FLEE_TRIGGER_RANGE)
+	local threatPos = state.pendingFleeThreat or findNearestPlayerPosition(hrp.Position, FLEE_TRIGGER_RANGE)
 	if not threatPos then
 		return false
 	end
@@ -662,6 +697,8 @@ local function tryFleeFromNearbyPlayer(state, hrp, wanderRadius, bounds)
 	end
 
 	state.lastFleeAt = os.clock()
+	state.pendingFleeThreat = nil
+	state.isFleeing = true
 	setMode(state, "Idle")
 	playFleeStartAnimation(state)
 
@@ -681,7 +718,9 @@ local function tryFleeFromNearbyPlayer(state, hrp, wanderRadius, bounds)
 		moveToPositionSmooth(state, fleeTarget, runSpeed)
 		task.wait(0.02)
 	end
-
+	
+	state.isFleeing = false
+	state.pendingFleeThreat = nil
 	return true
 end
 
@@ -756,6 +795,8 @@ local function startWanderingInternal(pet, spawnPos, options)
 	state.wanderRunning = true
 	state.mode = "Idle"
 	state.tracksLoaded = false
+	state.isFleeing = false
+	state.pendingFleeThreat = nil
 
 	petTasks[pet] = state
 
@@ -831,7 +872,12 @@ local function startWanderingInternal(pet, spawnPos, options)
 					end
 
 
-					local reached = moveToPositionSmooth(currentState, goal, moveSpeed)
+					local reached, reason = moveToPositionSmooth(currentState, goal, moveSpeed, function()
+						return shouldInterruptForFlee(currentState, hrp)
+					end)
+					if reason == "flee" then
+						break
+					end
 
 					if wp.Action == Enum.PathWaypointAction.Jump then
 						pcall(function()
@@ -849,7 +895,9 @@ local function startWanderingInternal(pet, spawnPos, options)
 				if bounds and bounds.floorPart then
 					target = clampPointToPartXZ(bounds.floorPart, target, FLOOR_PADDING)
 				end
-				moveToPositionSmooth(currentState, target, moveSpeed)
+				moveToPositionSmooth(currentState, target, moveSpeed, function()
+					return shouldInterruptForFlee(currentState, hrp)
+				end)
 			end
 
 			doIdlePause(currentState, spawnPos)
