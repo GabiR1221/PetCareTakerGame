@@ -144,6 +144,16 @@ end
 
 function PetStateManager:SetPetScale(petModel, newScale)
 	if not petModel or not petModel:IsA("Model") then return end
+	newScale = tonumber(newScale) or 1
+	newScale = math.clamp(newScale, 0.25, 6)
+
+	self.petState[petModel] = self.petState[petModel] or {}
+	local state = self.petState[petModel]
+	local oldScale = tonumber(state.scale) or 1
+	if math.abs(oldScale - newScale) < 0.0001 then
+		state.scale = newScale
+		return
+	end
 
 	local function setModelPrimaryIfMissing(model)
 		if not model or not model:IsA("Model") then return end
@@ -159,37 +169,51 @@ function PetStateManager:SetPetScale(petModel, newScale)
 	setModelPrimaryIfMissing(petModel)
 	local primary = petModel.PrimaryPart
 	if not primary then return end
+	local scaledOk = pcall(function()
+		petModel:ScaleTo(newScale)
+	end)
 
-	local state = self.petState[petModel] or {}
-	local oldScale = state.scale or 1
-	if oldScale == newScale then
-		state.scale = newScale
-		self.petState[petModel] = state
-		return
-	end
+	-- Fallback for rigs that cannot use ScaleTo (kept lightweight but includes PrimaryPart).
+	if not scaledOk then
+		local scaleFactor = newScale / (oldScale == 0 and 1 or oldScale)
+		local primaryCFrame = primary.CFrame
 
-	local scaleFactor = newScale / (oldScale == 0 and 1 or oldScale)
-	local primaryCFrame = primary.CFrame
+		for _, desc in ipairs(petModel:GetDescendants()) do
+			if desc:IsA("BasePart") then
+				if desc ~= primary then
+					local rel = primaryCFrame:ToObjectSpace(desc.CFrame)
+					local rx, ry, rz = rel:ToEulerAnglesXYZ()
+					local newRel = CFrame.new(rel.Position * scaleFactor) * CFrame.Angles(rx, ry, rz)
+					desc.CFrame = primaryCFrame * newRel
+				end
 
-	for _, desc in ipairs(petModel:GetDescendants()) do
-		if desc:IsA("BasePart") and desc ~= primary then
-			local rel = primaryCFrame:ToObjectSpace(desc.CFrame)
-			local rx, ry, rz = rel:ToEulerAnglesXYZ()
-			local newRel = CFrame.new(rel.Position * scaleFactor) * CFrame.Angles(rx, ry, rz)
-			desc.CFrame = primaryCFrame * newRel
-			desc.Size = desc.Size * scaleFactor
+				desc.Size = desc.Size * scaleFactor
 
-			for _, m in ipairs(desc:GetChildren()) do
-				if m:IsA("SpecialMesh") then
-					local old = m.Scale or Vector3.new(1,1,1)
-					m.Scale = old * scaleFactor
+				for _, m in ipairs(desc:GetChildren()) do
+					if m:IsA("SpecialMesh") then
+						local old = m.Scale or Vector3.new(1, 1, 1)
+						m.Scale = old * scaleFactor
+					end
 				end
 			end
 		end
 	end
 
-	self.petState[petModel] = self.petState[petModel] or {}
-	self.petState[petModel].scale = newScale
+	local humanoid = petModel:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		local baseHip = humanoid:GetAttribute("BaseHipHeight")
+		if type(baseHip) ~= "number" then
+			baseHip = (tonumber(humanoid.HipHeight) or 0) / (oldScale == 0 and 1 or oldScale)
+			humanoid:SetAttribute("BaseHipHeight", baseHip)
+		end
+
+		local targetHip = math.max(0, baseHip * newScale)
+		if math.abs((humanoid.HipHeight or 0) - targetHip) > 0.001 then
+			humanoid.HipHeight = targetHip
+		end
+	end
+
+	state.scale = newScale
 end
 
 function PetStateManager:UpdatePetAttribute(petModel, attribute, value)
