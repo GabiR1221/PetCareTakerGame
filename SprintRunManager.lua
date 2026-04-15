@@ -18,15 +18,13 @@ local DEFAULT_ZONE_MAX_OBSTACLES = 4
 local DEFAULT_OBSTACLE_STAMINA_DAMAGE = 8
 local DEFAULT_OBSTACLE_SPEED_MULTIPLIER = 0.55
 local OBSTACLE_SPEED_PENALTY_DURATION = 2
-local MIN_JUMP_DURATION = 0.15
-local JUMP_UPWARD_FORCE_DURATION = 0.05
-local JUMP_FORWARD_FORCE_DURATION = 0.14
-local JUMP_UPWARD_SPEED = 10
-local JUMP_FORWARD_SPEED_MULTIPLIER = 1.0
+local MIN_JUMP_DURATION = 1.17
+local JUMP_UPWARD_FORCE_DURATION = 0
+local JUMP_FORWARD_FORCE_DURATION = 0.9
+local JUMP_UPWARD_SPEED = 0
+local JUMP_FORWARD_SPEED_MULTIPLIER = 1.5
 
-local MIN_SLIDE_DURATION = 0.85
-local SLIDE_LANDING_GRACE = 0.12
-local JUMP_FALLBACK_TIMEOUT = 2.25
+local JUMP_FALLBACK_TIMEOUT = 1.5
 local JUMP_STAMINA_COST_PERCENT = 0.30
 
 local STUMBLE_DURATION_MIN = 0.5
@@ -183,16 +181,7 @@ function SprintRunManager:_startHeartbeat()
 				end
 
 			elseif state.jumping then
-				if state.jumpUpForceEndAt and now >= state.jumpUpForceEndAt then
-					state.jumpUpForceEndAt = nil
-					self:_setJumpForwardOnly(state)
-				end
-
-				if not state.slideStateSent and state.jumpEndAt and now >= state.jumpEndAt then
-					self:_beginSlidePhase(player, state)
-				end
-
-				if state.slideStateSent and state.slideEndAt and now >= state.slideEndAt then
+				if state.jumpEndAt and now >= state.jumpEndAt then
 					self:_endJumpState(player, state, true)
 				end
 			end
@@ -549,24 +538,6 @@ function SprintRunManager:_endJumpState(player, state, sendClientEvent)
 	end
 end
 
-function SprintRunManager:_beginSlidePhase(player, state)
-	if not state or state.slideStateSent then
-		return
-	end
-
-	state.slideStateSent = true
-	state.slideStartedAt = os.clock()
-	state.slideDuration = math.max(MIN_SLIDE_DURATION, state.jumpForwardDuration or JUMP_FORWARD_FORCE_DURATION)
-	state.slideEndAt = state.slideStartedAt + state.slideDuration
-	state.jumpEndAt = state.slideEndAt + SLIDE_LANDING_GRACE
-
-	self:_setJumpForwardOnly(state)
-
-	self.stateRemote:FireClient(player, "JumpState", true, {
-		phase = "Slide",
-		slideDuration = state.slideDuration,
-	})
-end
 
 function SprintRunManager:_startStumble(player, state, obstacleInstance)
 	if not state or not state.active then return end
@@ -620,7 +591,6 @@ function SprintRunManager:OnJumpAnimationEnded(player)
 	if not state.jumping then return end
 	if state.stumbling then return end
 
-	self:_beginSlidePhase(player, state)
 end
 
 function SprintRunManager:_isGrounded(hum, root)
@@ -811,7 +781,6 @@ function SprintRunManager:StartRunning(player, startLine)
 	state.lastStaminaUpdateAt = 0
 	state.speedPenaltyUntil = 0
 	state.speedPenaltyMultiplier = 1
-	state.jumpForwardDuration = math.max(MIN_SLIDE_DURATION, self:GetJumpForwardDurationForPlayer(player, JUMP_FORWARD_FORCE_DURATION))
 	state.jumpForwardSpeed = math.max(0, state.runSpeed * JUMP_FORWARD_SPEED_MULTIPLIER)
 	state.defaultFreefallEnabled = hum:GetStateEnabled(Enum.HumanoidStateType.Freefall)
 
@@ -849,13 +818,6 @@ function SprintRunManager:GetMaxStaminaForPlayer(player, baseStamina)
 	return applyGemShopReward(stamina, reward, upgradeValue)
 end
 
-function SprintRunManager:GetJumpForwardDurationForPlayer(player, baseDuration)
-	local duration = baseDuration or JUMP_FORWARD_FORCE_DURATION
-	local upgradeValue = getGemUpgradeValue(player, 5)
-	local reward = getGemRewardConfig(self.gemShopFolder, 5)
-	return applyGemShopReward(duration, reward, upgradeValue)
-end
-
 function SprintRunManager:RequestJump(player)
 	local state = self.playerState[player]
 	if not state or not state.active then return end
@@ -875,11 +837,11 @@ function SprintRunManager:RequestJump(player)
 	state.jumping = true
 	state.slideStateSent = false
 
-	local forwardDuration = math.max(MIN_SLIDE_DURATION, state.jumpForwardDuration or JUMP_FORWARD_FORCE_DURATION)
+	local forwardDuration = math.max(MIN_JUMP_DURATION, state.jumpForwardDuration or JUMP_FORWARD_FORCE_DURATION)
 	state.slideDuration = forwardDuration
 	state.slideEndAt = nil
-	state.jumpUpForceEndAt = now + JUMP_UPWARD_FORCE_DURATION
-	state.jumpEndAt = now + JUMP_FALLBACK_TIMEOUT
+	state.jumpUpForceEndAt = nil
+	state.jumpEndAt = now + forwardDuration
 	state.nextAllowedJumpAt = now + math.max(MIN_JUMP_DURATION, forwardDuration + 0.15)
 	state.jumpForwardSpeed = math.max(0, (state.runSpeed or RUN_SPEED) * JUMP_FORWARD_SPEED_MULTIPLIER)
 
