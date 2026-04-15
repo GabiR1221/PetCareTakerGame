@@ -88,6 +88,7 @@ function PetMoodVisualManager:_ensureAttachmentOnPart(part, attachmentName, yOff
 
 	local attachment = part:FindFirstChild(attachmentName)
 	if attachment and attachment:IsA("Attachment") then
+		attachment.Position = Vector3.new(0, yOffset or 0, 0)
 		return attachment
 	end
 
@@ -102,6 +103,12 @@ function PetMoodVisualManager:_ensurePartEffect(petModel, effectName, template, 
 	local visuals = self:_ensureVisualFolder(petModel)
 	local existing = visuals:FindFirstChild(effectName)
 	if existing then
+		if existing:IsA("BasePart") then
+			local primaryNow = self:_getDefaultPetAnchorPart(petModel)
+			if primaryNow and existing:FindFirstChild(effectName .. "Weld") then
+				existing.CFrame = primaryNow.CFrame * (offset or CFrame.new())
+			end
+		end
 		return existing
 	end
 
