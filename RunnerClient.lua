@@ -69,18 +69,47 @@ staminaLabel.Parent = staminaFrame
 local runnerActive = false
 local jumpingNow = false
 local stumblingNow = false
+local exhaustedNow = false
+local exhaustionPhase = nil
 local waitingForJumpAnimEnd = false
 
 local runTrack = nil
 local jumpStartTrack = nil
 local jumpSlideTrack = nil
 local stumbleTrack = nil
+local exhaustedSlideTrack = nil
+local exhaustedLoopTrack = nil
 local jumpStartStoppedConn = nil
 
 local staminaCurrent = 0
 local staminaMax = 50
 local hiddenUiState = {}
 local savedCameraSubject = nil
+
+local ContextActionService = game:GetService("ContextActionService")
+local MOVEMENT_LOCK_ACTION = "RunnerExhaustedMoveLock"
+
+local function movementLockAction()
+	return Enum.ContextActionResult.Sink
+end
+
+local function setMovementLocked(locked)
+	if locked then
+		ContextActionService:BindActionAtPriority(
+			MOVEMENT_LOCK_ACTION,
+			movementLockAction,
+			false,
+			Enum.ContextActionPriority.High.Value,
+			Enum.PlayerActions.CharacterForward,
+			Enum.PlayerActions.CharacterBackward,
+			Enum.PlayerActions.CharacterLeft,
+			Enum.PlayerActions.CharacterRight,
+			Enum.PlayerActions.CharacterJump
+		)
+	else
+		ContextActionService:UnbindAction(MOVEMENT_LOCK_ACTION)
+	end
+end
 
 local function animateButtonScale(button, scaleValue, time)
 	local scale = button:FindFirstChild("RunnerScale")
@@ -118,11 +147,13 @@ hookButtonAnimation(jumpButton)
 hookButtonAnimation(goBackButton)
 
 local function updateControlsLocked()
-	local locked = jumpingNow or stumblingNow
-	jumpButton.Active = not locked and runnerActive
-	goBackButton.Active = not locked and runnerActive
-	jumpButton.AutoButtonColor = not locked and runnerActive
-	goBackButton.AutoButtonColor = not locked and runnerActive
+	local jumpLocked = jumpingNow or stumblingNow or exhaustedNow
+	local goBackLocked = jumpingNow or stumblingNow or (exhaustedNow and exhaustionPhase ~= "Collapsed")
+	jumpButton.Active = (not jumpLocked) and runnerActive
+	goBackButton.Active = (not goBackLocked) and runnerActive
+	jumpButton.AutoButtonColor = (not jumpLocked) and runnerActive
+	goBackButton.AutoButtonColor = (not goBackLocked) and runnerActive
+	setMovementLocked(exhaustedNow)
 end
 
 local function stopTrack(track)
@@ -206,11 +237,15 @@ local function clearAllTracks()
 	stopTrack(jumpStartTrack)
 	stopTrack(jumpSlideTrack)
 	stopTrack(stumbleTrack)
+	stopTrack(exhaustedSlideTrack)
+	stopTrack(exhaustedLoopTrack)
 
 	runTrack = nil
 	jumpStartTrack = nil
 	jumpSlideTrack = nil
 	stumbleTrack = nil
+	exhaustedSlideTrack = nil
+	exhaustedLoopTrack = nil
 end
 
 local function restoreRunnerCamera()
@@ -238,12 +273,13 @@ end
 
 
 jumpButton.Activated:Connect(function()
-	if not runnerActive or jumpingNow or stumblingNow then return end
+	if not runnerActive or jumpingNow or stumblingNow or exhaustedNow then return end
 	actionRemote:FireServer("Jump")
 end)
 
 goBackButton.Activated:Connect(function()
 	if not runnerActive or jumpingNow or stumblingNow then return end
+	if exhaustedNow and exhaustionPhase ~= "Collapsed" then return end
 	actionRemote:FireServer("GoBack")
 end)
 
@@ -257,6 +293,8 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		if not runnerActive then
 			jumpingNow = false
 			stumblingNow = false
+			exhaustedNow = false
+			exhaustionPhase = nil
 			waitingForJumpAnimEnd = false
 			clearAllTracks()
 			staminaCurrent = 0
@@ -269,6 +307,8 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 
 		staminaCurrent = (payload and payload.currentStamina) or staminaMax
 		staminaMax = (payload and payload.maxStamina) or staminaMax
+		exhaustedNow = false
+		exhaustionPhase = nil
 		renderStamina(false)
 
 		clearAllTracks()
@@ -282,6 +322,8 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		stumbleTrack = loadTrack(payload and (payload.stumbleAnimationId or payload.jumpSlideAnimationId or payload.jumpAnimationId))
 		jumpStartTrack = loadTrack(payload and (payload.jumpStartAnimationId or payload.jumpAnimationId))
 		jumpSlideTrack = loadTrack(payload and (payload.jumpSlideAnimationId or payload.jumpAnimationId))
+		exhaustedSlideTrack = loadTrack(payload and payload.exhaustedSlideAnimationId)
+		exhaustedLoopTrack = loadTrack(payload and payload.exhaustedLoopAnimationId)
 
 		if jumpStartTrack then
 			jumpStartStoppedConn = jumpStartTrack.Stopped:Connect(function()
@@ -298,6 +340,9 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 	elseif action == "JumpState" then
 		local jumping = enabled == true
 		local phase = payload and payload.phase or "Start"
+		if exhaustedNow then
+			return
+		end
 
 		jumpingNow = jumping
 		stumblingNow = false
@@ -333,6 +378,9 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		end
 
 	elseif action == "StumbleState" then
+		if exhaustedNow then
+			return
+		end
 		local stumbling = enabled == true
 		stumblingNow = stumbling
 		waitingForJumpAnimEnd = false
@@ -360,6 +408,47 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		staminaCurrent = payload and payload.current or staminaCurrent
 		staminaMax = payload and payload.max or staminaMax
 		renderStamina(payload and payload.exhausted == true)
+		
+	elseif action == "ExhaustionState" then
+		local isExhausted = enabled == true
+		if not isExhausted then
+			exhaustedNow = false
+			exhaustionPhase = nil
+			if exhaustedSlideTrack then stopTrack(exhaustedSlideTrack) end
+			if exhaustedLoopTrack then stopTrack(exhaustedLoopTrack) end
+			if runnerActive and not jumpingNow and not stumblingNow and runTrack then
+				runTrack.Looped = true
+				runTrack:Play(0.08)
+			end
+			updateControlsLocked()
+			return
+		end
+
+		exhaustedNow = true
+		jumpingNow = false
+		stumblingNow = false
+		waitingForJumpAnimEnd = false
+		exhaustionPhase = payload and payload.phase or exhaustionPhase or "Slide"
+		updateControlsLocked()
+
+		if runTrack then stopTrack(runTrack) end
+		if jumpStartTrack then stopTrack(jumpStartTrack) end
+		if jumpSlideTrack then stopTrack(jumpSlideTrack) end
+		if stumbleTrack then stopTrack(stumbleTrack) end
+
+		if exhaustionPhase == "Collapsed" then
+			if exhaustedSlideTrack then stopTrack(exhaustedSlideTrack) end
+			if exhaustedLoopTrack then
+				exhaustedLoopTrack.Looped = true
+				exhaustedLoopTrack:Play(0.08)
+			end
+		else
+			if exhaustedLoopTrack then stopTrack(exhaustedLoopTrack) end
+			if exhaustedSlideTrack and not exhaustedSlideTrack.IsPlaying then
+				exhaustedSlideTrack.Looped = false
+				exhaustedSlideTrack:Play(0.06)
+			end
+		end
 	end
 end)
 
