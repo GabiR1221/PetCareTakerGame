@@ -1328,6 +1328,12 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 
 			self.PetRigManager:EnsurePetRig(pet)
 			self.PetAnimationManager:SetupAnimatorForPet(pet)
+			local savedScale = tonumber(petInfo.scale)
+			if not savedScale then
+				local savedLevel = math.max(1, tonumber(petInfo.level) or 1)
+				savedScale = 1 + (0.15 * (savedLevel - 1))
+			end
+			self.PetStateManager:SetPetScale(pet, savedScale)
 
 			local restoredToStand = false
 			if petInfo.location == "petstand" and petInfo.standId then
