@@ -150,7 +150,14 @@ function PetStateManager:SetPetScale(petModel, newScale)
 	self.petState[petModel] = self.petState[petModel] or {}
 	local state = self.petState[petModel]
 	local oldScale = tonumber(state.scale) or 1
-	if math.abs(oldScale - newScale) < 0.0001 then
+	local currentModelScale = nil
+	pcall(function()
+		currentModelScale = tonumber(petModel:GetScale())
+	end)
+	if currentModelScale == nil then
+		currentModelScale = oldScale
+	end
+	if math.abs(oldScale - newScale) < 0.0001 and math.abs(currentModelScale - newScale) < 0.0001 then
 		state.scale = newScale
 		return
 	end
