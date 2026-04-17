@@ -9,8 +9,35 @@ local configModule = require("../Settings")
 local tycoonModule = require("./TycoonModule")
 -- Variables
 local dataStore = DataStoreService:GetDataStore(configModule.DataStoreName)
+local WRITE_BUDGET_MINIMUM = 1
+local MIN_SECONDS_BETWEEN_KEY_SAVES = 15
+local lastSaveAtByKey = {}
 
 local module = {}
+
+local function waitForWriteBudget()
+	while DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.SetIncrementAsync) < WRITE_BUDGET_MINIMUM do
+		task.wait(0.25)
+	end
+end
+
+local function shouldThrottleKey(key)
+	local now = os.clock()
+	local last = lastSaveAtByKey[key]
+	if last and (now - last) < MIN_SECONDS_BETWEEN_KEY_SAVES then
+		return true
+	end
+	lastSaveAtByKey[key] = now
+	return false
+end
+
+
+local function findTycoonObject(tycoonModel: Instance, objectName: string)
+	if not tycoonModel or not objectName then return nil end
+	return (tycoonModel:FindFirstChild("Purchases") and tycoonModel.Purchases:FindFirstChild(objectName))
+		or (tycoonModel:FindFirstChild("PurchasedObjects") and tycoonModel.PurchasedObjects:FindFirstChild(objectName))
+		or (tycoonModel:FindFirstChild("Essentials") and tycoonModel.Essentials:FindFirstChild(objectName))
+end
 
 function module:SaveLeaderstats(userId)
 	if configModule.SaveLeaderstats ~= true then return end
@@ -26,17 +53,17 @@ function module:SaveLeaderstats(userId)
 
 	local playerAttrs = playerFolder:GetAttributes() or {}
 	local key = tostring(userId) .. tostring(configModule.LeaderstatsDataKey)
+	if shouldThrottleKey(key) then return end
 
 	local success, errorMessage = pcall(function()
-		dataStore:UpdateAsync(key, function(old)
-			old = old or {}
-			for k, v in pairs(playerAttrs) do
-				if not currencySkip[k] then
-					old[k] = v
-				end
+		waitForWriteBudget()
+		local payload = {}
+		for k, v in pairs(playerAttrs) do
+			if not currencySkip[k] then
+				payload[k] = v
 			end
-			return old
-		end)
+		end
+		dataStore:SetAsync(key, payload)
 	end)
 
 
@@ -79,12 +106,11 @@ function module:SaveTycoon(tycoon)
 	local payload = { purchasedArray, removedArray }
 
 	local key = ownerIdStr .. tostring(configModule.TycoonDataKey)
+	if shouldThrottleKey(key) then return end
 
 	local success, errorMessage = pcall(function()
-		dataStore:UpdateAsync(key, function(old)
-			-- Replace with our payload. You could also merge with `old` if you want a more tolerant behavior.
-			return payload
-		end)
+		waitForWriteBudget()
+		dataStore:SetAsync(key, payload)
 	end)
 
 	if not success then
@@ -173,7 +199,7 @@ function module:LoadTycoon(tycoon)
 	end
 
 	for _, objectName in ipairs(tycoonData[2]) do
-		local object = tycoon.Tycoon.PurchasedObjects:FindFirstChild(objectName)
+		local object = findTycoonObject(tycoon.Tycoon, objectName)
 		if not object then continue end
 		tycoon:HandleDependencies(object, tycoon.Dependencies.Removables, true)
 		object:Destroy()
@@ -182,7 +208,22 @@ function module:LoadTycoon(tycoon)
 	local purchasedButtons = {}
 	for _, button in ipairs(tycoon.Buttons) do
 		if button.Instance:HasTag("KeepOnRebirth") then
-			table.insert(tycoon.RebirthPersistentButtons, button)
+			local entry = {
+				ButtonName = button.Instance.Name,
+				PurchaseObjects = {},
+				RemoveObjects = {},
+			}
+			if button.PurchaseObjects then
+				for _, object in ipairs(button.PurchaseObjects) do
+					table.insert(entry.PurchaseObjects, object.Name)
+				end
+			end
+			if button.RemoveObjects then
+				for _, object in ipairs(button.RemoveObjects) do
+					table.insert(entry.RemoveObjects, object.Name)
+				end
+			end
+			table.insert(tycoon.RebirthPersistentButtons, entry)
 		end
 
 		local allObjectsPurchased = true
