@@ -15,7 +15,13 @@ local animationsModule = require("./ObjectAnimationsModule")
 local rebirthEvent = ReplicatedStorage:WaitForChild("TycoonRebirthEvent")
 local soundEvent = ReplicatedStorage:WaitForChild("TycoonSoundEvent")
 local soundsFolder = script.Parent.Parent.SoundsFolder
-local petDataStore = DataStoreService:GetDataStore("PetData55")-----------CHANGE THIS TO THE SAME PETDATA NAME AS IN PETSAVE
+local petDataStore = DataStoreService:GetDataStore("PetData62")-----------CHANGE THIS TO THE SAME PETDATA NAME AS IN PETSAVE
+
+local function waitForWriteBudget()
+	while DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.SetIncrementAsync) < 1 do
+		task.wait(0.25)
+	end
+end
 
 local objectModules = {}
 for _, module in ipairs(script.ObjectModules:GetChildren()) do
@@ -244,6 +250,7 @@ end
 local function clearPetDataStoreForPlayer(player)
 	if not player then return end
 	local ok, err = pcall(function()
+		waitForWriteBudget()
 		petDataStore:SetAsync(tostring(player.UserId), {})
 	end)
 	if not ok then
