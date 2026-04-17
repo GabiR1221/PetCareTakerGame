@@ -15,6 +15,8 @@ local playerData = Instance.new("Folder", ServerStorage)
 playerData.Name = "PlayerData"
 local dropsFolder = Instance.new("Folder", workspace)
 dropsFolder.Name = "Drops"
+local pendingTycoonSaves = {}
+local TYCOON_SAVE_DEBOUNCE_SECONDS = 4
 
 -- Events
 local rebirthEvent = Instance.new("RemoteEvent")
@@ -186,6 +188,45 @@ local function GetTycoonFromOwner(owner)
 	end
 end
 
+local function flushTycoonSaveForUserId(userId, reason)
+	local entry = pendingTycoonSaves[userId]
+	if not entry then return end
+	pendingTycoonSaves[userId] = nil
+
+	local tycoon = entry.tycoon
+	if not tycoon or not tycoon.Tycoon then return end
+	local ownerId = tycoon.Tycoon:GetAttribute("OwnerId")
+	if ownerId ~= userId then return end
+	dataModule:SaveTycoon(tycoon)
+end
+
+local function scheduleTycoonSave(tycoon, reason, immediate)
+	if not tycoon or not tycoon.Tycoon then return end
+	local ownerId = tycoon.Tycoon:GetAttribute("OwnerId")
+	if not ownerId or ownerId == 0 then return end
+
+	if immediate == true then
+		flushTycoonSaveForUserId(ownerId, reason)
+		return
+	end
+
+	local existing = pendingTycoonSaves[ownerId]
+	if existing then
+		existing.tycoon = tycoon
+		existing.reason = reason
+		return
+	end
+
+	pendingTycoonSaves[ownerId] = {
+		tycoon = tycoon,
+		reason = reason,
+	}
+	task.delay(TYCOON_SAVE_DEBOUNCE_SECONDS, function()
+		flushTycoonSaveForUserId(ownerId, "DebouncedDataChange")
+	end)
+end
+
+
 -- Function to set up leaderstats for joining players
 local function SetUpLeaderstats(player)
 	local playerFolder = Instance.new("Folder", playerData)
@@ -272,7 +313,7 @@ local function OnPlayerRemoving(player)
 	local tycoon = GetTycoonFromOwner(player)
 	if tycoon then
 		dataModule:SaveLeaderstats(player.UserId)
-		dataModule:SaveTycoon(tycoon)
+		scheduleTycoonSave(tycoon, "PlayerRemoving", true)
 		tycoon.Tycoon:SetAttribute("OwnerId", 0)
 		tycoon:ResetTycoon()
 	elseif configModule.LoadStatsOnJoin == true then
@@ -344,7 +385,7 @@ local function SaveAllData()
 		end
 
 		dataModule:SaveLeaderstats(player.UserId)
-		dataModule:SaveTycoon(tycoon)
+		scheduleTycoonSave(tycoon, "SaveAllData", true)
 	end
 end
 
@@ -391,6 +432,9 @@ MarketplaceService.PromptGamePassPurchaseFinished:Connect(OnGamePassPurchased)
 for _, tycoonFolder in ipairs(script.Parent.Tycoons:GetChildren()) do
 	local tycoon = tycoonModule.new(tycoonFolder)
 	table.insert(tycoons, tycoon)
+	tycoon:SetDataChangedCallback(function(changedTycoon, reason)
+		scheduleTycoonSave(changedTycoon, reason, false)
+	end)
 	
 	tycoon:Initialize()
 	
