@@ -1,22 +1,43 @@
 local PetSaveManager = {}
+
 local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+
+local SAVE_DEBOUNCE_SECONDS = 8
+local FORCE_SAVE_AFTER_SECONDS = 60
+local AUTOSAVE_INTERVAL_SECONDS = 120
+local MAX_SAVE_RETRIES = 3
+
+local function safeEncodeSignature(payload)
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+	if not ok then
+		return nil
+	end
+	return encoded
+end
 
 function PetSaveManager:Initialize(dataStoreName, stateTable, carryingTable)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
-	self.dataStore = DataStoreService:GetDataStore("PetData20")--------------------------CHANGE THIS TO CHANGE PETDATA
-	self.saveQueue = {} -- userId -> data to save
-	return self  -- ← ADD THIS LINE
+	self.dataStore = DataStoreService:GetDataStore(tostring(dataStoreName or "PetData55"))
+
+	self.pendingByUserId = {} -- userId(string) -> true while debounce timer exists
+	self.dirtyByUserId = {} -- userId(string) -> true if data changed since last successful save
+	self.lastSavedSignatureByUserId = {}
+	self.lastSaveAtByUserId = {}
+	self._autoSaveStarted = false
+	self:_startAutoSaveLoop()
+	return self
 end
 
--- Save all of a player's pets
-function PetSaveManager:SavePlayerPets(player, pets)
-	local userId = tostring(player.UserId)
+function PetSaveManager:_collectPetDataForPlayer(player)
 	local petData = {}
 
 	for pet, state in pairs(self.petState) do
-		if state.ownerUserId == player.UserId and not state.wild then
+		if state and state.ownerUserId == player.UserId and not state.wild then
 			local templateName = pet:GetAttribute("TemplateName") or pet.Name
 
 			local standRoot = state.petstandRoot
@@ -42,12 +63,10 @@ function PetSaveManager:SavePlayerPets(player, pets)
 				hunger = state.hunger == nil and 100 or state.hunger,
 				showered = state.showered or false,
 				dried = state.dried or false,
-				accessories = state.accessories or {A = false, B = false},
-				position = {x = 0, y = 0, z = 0},
+				accessories = state.accessories or { A = false, B = false },
+				position = { x = 0, y = 0, z = 0 },
 				power = state.power or 1,
 				rarityMultiplier = state.rarityMultiplier or 1,
-
-				-- new stand persistence fields
 				location = state.location or "free",
 				standId = standId,
 				standStoredMoney = storedMoney or 0,
@@ -57,18 +76,73 @@ function PetSaveManager:SavePlayerPets(player, pets)
 		end
 	end
 
-	local success, err = pcall(function()
-		self.dataStore:SetAsync(userId, petData)
+	table.sort(petData, function(a, b)
+		local aUid = tostring(a.petUid or "")
+		local bUid = tostring(b.petUid or "")
+		if aUid == bUid then
+			return tostring(a.modelName or "") < tostring(b.modelName or "")
+		end
+		return aUid < bUid
 	end)
 
-	if success then
-		print(("[PetSaveManager] Saved %d pets for %s"):format(#petData, player.Name))
-	else
-		warn(("[PetSaveManager] Failed to save for %s: %s"):format(player.Name, err))
-	end
+	return petData
 end
 
--- Load pets for a player
+function PetSaveManager:_savePayload(userId, petData)
+	for attempt = 1, MAX_SAVE_RETRIES do
+		local success, err = pcall(function()
+			self.dataStore:UpdateAsync(userId, function(_old)
+				return petData
+			end)
+		end)
+
+		if success then
+			return true
+		end
+
+		if attempt < MAX_SAVE_RETRIES then
+			task.wait(1.5 * attempt)
+		else
+			warn(("[PetSaveManager] Failed to save userId %s after %d attempts: %s")
+				:format(userId, MAX_SAVE_RETRIES, tostring(err)))
+		end
+	end
+
+	return false
+end
+
+function PetSaveManager:SavePlayerPets(player, options)
+	if not player or not player:IsA("Player") then return false end
+
+	local userId = tostring(player.UserId)
+	local forceSave = type(options) == "table" and options.force == true
+	local petData = self:_collectPetDataForPlayer(player)
+	local signature = safeEncodeSignature(petData)
+
+	if not forceSave then
+		local previousSignature = self.lastSavedSignatureByUserId[userId]
+		local wasDirty = self.dirtyByUserId[userId] == true
+		if not wasDirty and signature ~= nil and previousSignature ~= nil and signature == previousSignature then
+			return true
+		end
+	end
+
+	local saved = self:_savePayload(userId, petData)
+	if not saved then
+		self.dirtyByUserId[userId] = true
+		return false
+	end
+
+	self.lastSaveAtByUserId[userId] = os.clock()
+	self.dirtyByUserId[userId] = nil
+	if signature ~= nil then
+		self.lastSavedSignatureByUserId[userId] = signature
+	end
+
+	print(("[PetSaveManager] Saved %d pets for %s"):format(#petData, player.Name))
+	return true
+end
+
 function PetSaveManager:LoadPlayerPets(player)
 	local userId = tostring(player.UserId)
 	local success, petData = pcall(function()
@@ -77,23 +151,64 @@ function PetSaveManager:LoadPlayerPets(player)
 
 	if success and petData then
 		print(("[PetSaveManager] Loaded %d pets for %s"):format(#petData, player.Name))
+		local signature = safeEncodeSignature(petData)
+		if signature ~= nil then
+			self.lastSavedSignatureByUserId[userId] = signature
+		end
+		self.lastSaveAtByUserId[userId] = os.clock()
+		self.dirtyByUserId[userId] = nil
 		return petData
+	end
+
+	if not success then
+		warn(("[PetSaveManager] Load failed for %s (%s)"):format(player.Name, tostring(petData)))
 	else
 		print(("[PetSaveManager] No data found for %s"):format(player.Name))
-		return {}
 	end
+	return {}
 end
 
--- Schedule a save for a player (debounced)
-function PetSaveManager:ScheduleSave(player)
-	if self.saveQueue[player] then
+function PetSaveManager:ScheduleSave(player, options)
+	if not player or not player:IsA("Player") then return end
+
+	local userId = tostring(player.UserId)
+	self.dirtyByUserId[userId] = true
+
+	if self.pendingByUserId[userId] then
 		return
 	end
 
-	self.saveQueue[player] = true
-	task.delay(5, function()
-		self:SavePlayerPets(player)
-		self.saveQueue[player] = nil
+	self.pendingByUserId[userId] = true
+	task.delay(SAVE_DEBOUNCE_SECONDS, function()
+		self.pendingByUserId[userId] = nil
+		if not player.Parent then return end
+		self:SavePlayerPets(player, options)
+	end)
+end
+
+function PetSaveManager:_flushDirtyPlayers(force)
+	for _, player in ipairs(Players:GetPlayers()) do
+		local userId = tostring(player.UserId)
+		local secondsSinceSave = os.clock() - (self.lastSaveAtByUserId[userId] or 0)
+		if force or self.dirtyByUserId[userId] == true or secondsSinceSave >= FORCE_SAVE_AFTER_SECONDS then
+			self:SavePlayerPets(player, { force = force })
+		end
+	end
+end
+
+function PetSaveManager:_startAutoSaveLoop()
+	if self._autoSaveStarted == true then return end
+	self._autoSaveStarted = true
+
+	task.spawn(function()
+		while true do
+			task.wait(AUTOSAVE_INTERVAL_SECONDS)
+			self:_flushDirtyPlayers(false)
+		end
+	end)
+
+	game:BindToClose(function()
+		self:_flushDirtyPlayers(true)
 	end)
 end
 
