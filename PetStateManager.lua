@@ -1,6 +1,10 @@
 local PetStateManager = {}
 local LEVEL_THRESHOLDS = { 0, 50, 150, 350, 750, 1550 }
 local Players = game:GetService("Players")
+local DEFAULT_BASE_PET_SCALE = 1.0
+local SCALE_PER_LEVEL = 0.08 -- intentionally conservative so high-level pets don't become oversized
+local MIN_ALLOWED_SCALE = 0.5
+local MAX_ALLOWED_SCALE = 2.25
 
 local function resolveInventoryPetIdByUid(player, petUid)
 	if not player or type(petUid) ~= "string" or petUid == "" then return nil end
@@ -46,6 +50,15 @@ function PetStateManager:XPForNextLevel(level)
 	return math.huge
 end
 
+function PetStateManager:CalculateScaleForLevel(level, baseScale)
+	level = math.max(1, math.floor(tonumber(level) or 1))
+	baseScale = tonumber(baseScale) or DEFAULT_BASE_PET_SCALE
+	baseScale = math.clamp(baseScale, MIN_ALLOWED_SCALE, MAX_ALLOWED_SCALE)
+	local computed = baseScale * (1 + SCALE_PER_LEVEL * (level - 1))
+	return math.clamp(computed, MIN_ALLOWED_SCALE, MAX_ALLOWED_SCALE)
+end
+
+
 function PetStateManager:AddXP(petModel, amount)
 	if not petModel then return end
 	self.petState[petModel] = self.petState[petModel] or {}
@@ -69,8 +82,8 @@ function PetStateManager:AddXP(petModel, amount)
 	self:SendStateToOwner(petModel)
 
 	if newLevel > prevLevel then
-		local baseScale = 1.0
-		local newScale = baseScale * (1 + 0.15 * (newLevel - 1))
+		local baseScale = tonumber(state.baseScale) or tonumber(state.scale) or DEFAULT_BASE_PET_SCALE
+		local newScale = self:CalculateScaleForLevel(newLevel, baseScale)
 		self:SetPetScale(petModel, newScale)
 		print(("[PetStateManager] Pet %s leveled up %d -> %d (xp=%d). New scale=%.2f"):format(
 			tostring(petModel.Name), prevLevel, newLevel, state.xp, newScale))
@@ -145,7 +158,7 @@ end
 function PetStateManager:SetPetScale(petModel, newScale)
 	if not petModel or not petModel:IsA("Model") then return end
 	newScale = tonumber(newScale) or 1
-	newScale = math.clamp(newScale, 0.25, 6)
+	newScale = math.clamp(newScale, MIN_ALLOWED_SCALE, MAX_ALLOWED_SCALE)
 
 	self.petState[petModel] = self.petState[petModel] or {}
 	local state = self.petState[petModel]
@@ -157,6 +170,7 @@ function PetStateManager:SetPetScale(petModel, newScale)
 	if currentModelScale == nil then
 		currentModelScale = oldScale
 	end
+	local appliedCurrentScale = (type(currentModelScale) == "number" and currentModelScale > 0) and currentModelScale or oldScale
 	if math.abs(oldScale - newScale) < 0.0001 and math.abs(currentModelScale - newScale) < 0.0001 then
 		state.scale = newScale
 		return
@@ -182,7 +196,9 @@ function PetStateManager:SetPetScale(petModel, newScale)
 
 	-- Fallback for rigs that cannot use ScaleTo (kept lightweight but includes PrimaryPart).
 	if not scaledOk then
-		local scaleFactor = newScale / (oldScale == 0 and 1 or oldScale)
+		-- IMPORTANT: use the model's *actual* current scale as denominator.
+		-- Using stale saved state here can cause no-op resizing on rejoin.
+		local scaleFactor = newScale / (appliedCurrentScale == 0 and 1 or appliedCurrentScale)
 		local primaryCFrame = primary.CFrame
 
 		for _, desc in ipairs(petModel:GetDescendants()) do
