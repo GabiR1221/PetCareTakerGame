@@ -8,6 +8,14 @@ local SAVE_DEBOUNCE_SECONDS = 8
 local FORCE_SAVE_AFTER_SECONDS = 60
 local AUTOSAVE_INTERVAL_SECONDS = 120
 local MAX_SAVE_RETRIES = 3
+local MIN_SECONDS_BETWEEN_SAVES = 20
+local WRITE_BUDGET_MINIMUM = 1
+
+local function waitForWriteBudget()
+	while DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.SetIncrementAsync) < WRITE_BUDGET_MINIMUM do
+		task.wait(0.25)
+	end
+end
 
 local function safeEncodeSignature(payload)
 	local ok, encoded = pcall(function()
@@ -91,10 +99,9 @@ end
 
 function PetSaveManager:_savePayload(userId, petData)
 	for attempt = 1, MAX_SAVE_RETRIES do
+		waitForWriteBudget()
 		local success, err = pcall(function()
-			self.dataStore:UpdateAsync(userId, function(_old)
-				return petData
-			end)
+			self.dataStore:SetAsync(userId, petData)
 		end)
 
 		if success then
@@ -117,6 +124,17 @@ function PetSaveManager:SavePlayerPets(player, options)
 
 	local userId = tostring(player.UserId)
 	local forceSave = type(options) == "table" and options.force == true
+	local now = os.clock()
+
+	if not forceSave then
+		local lastSaveAt = self.lastSaveAtByUserId[userId]
+		if lastSaveAt and (now - lastSaveAt) < MIN_SECONDS_BETWEEN_SAVES then
+			self.dirtyByUserId[userId] = true
+			self:ScheduleSave(player, { force = false, bypassMinInterval = true })
+			return true
+		end
+	end
+
 	local petData = self:_collectPetDataForPlayer(player)
 	local signature = safeEncodeSignature(petData)
 
@@ -134,7 +152,7 @@ function PetSaveManager:SavePlayerPets(player, options)
 		return false
 	end
 
-	self.lastSaveAtByUserId[userId] = os.clock()
+	self.lastSaveAtByUserId[userId] = now
 	self.dirtyByUserId[userId] = nil
 	if signature ~= nil then
 		self.lastSavedSignatureByUserId[userId] = signature
@@ -173,6 +191,7 @@ function PetSaveManager:ScheduleSave(player, options)
 	if not player or not player:IsA("Player") then return end
 
 	local userId = tostring(player.UserId)
+	options = type(options) == "table" and options or {}
 	self.dirtyByUserId[userId] = true
 
 	if self.pendingByUserId[userId] then
@@ -180,7 +199,15 @@ function PetSaveManager:ScheduleSave(player, options)
 	end
 
 	self.pendingByUserId[userId] = true
-	task.delay(SAVE_DEBOUNCE_SECONDS, function()
+	local delaySeconds = SAVE_DEBOUNCE_SECONDS
+	local lastSaveAt = self.lastSaveAtByUserId[userId]
+	if options.force ~= true and options.bypassMinInterval ~= true and lastSaveAt then
+		local elapsed = os.clock() - lastSaveAt
+		if elapsed < MIN_SECONDS_BETWEEN_SAVES then
+			delaySeconds = math.max(delaySeconds, MIN_SECONDS_BETWEEN_SAVES - elapsed)
+		end
+	end
+	task.delay(delaySeconds, function()
 		self.pendingByUserId[userId] = nil
 		if not player.Parent then return end
 		self:SavePlayerPets(player, options)
