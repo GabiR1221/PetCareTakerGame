@@ -22,7 +22,7 @@ end
 function PetSaveManager:Initialize(dataStoreName, stateTable, carryingTable)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
-	self.dataStore = DataStoreService:GetDataStore(tostring(dataStoreName or "PetData55"))
+	self.dataStore = DataStoreService:GetDataStore(tostring(dataStoreName))
 
 	self.pendingByUserId = {} -- userId(string) -> true while debounce timer exists
 	self.dirtyByUserId = {} -- userId(string) -> true if data changed since last successful save
@@ -58,6 +58,7 @@ function PetSaveManager:_collectPetDataForPlayer(player)
 				xp = state.xp or 0,
 				level = state.level or 1,
 				scale = state.scale or 1,
+				baseScale = state.baseScale or state.scale or 1,
 				dirtiness = state.dirtiness or 0,
 				wetness = state.wetness or 0,
 				hunger = state.hunger == nil and 100 or state.hunger,
