@@ -15,7 +15,7 @@ local animationsModule = require("./ObjectAnimationsModule")
 local rebirthEvent = ReplicatedStorage:WaitForChild("TycoonRebirthEvent")
 local soundEvent = ReplicatedStorage:WaitForChild("TycoonSoundEvent")
 local soundsFolder = script.Parent.Parent.SoundsFolder
-local petDataStore = DataStoreService:GetDataStore("PetData10")-----------CHANGE THIS TO THE SAME PETDATA NAME AS IN PETSAVE
+local petDataStore = DataStoreService:GetDataStore("PetData55")-----------CHANGE THIS TO THE SAME PETDATA NAME AS IN PETSAVE
 
 local objectModules = {}
 for _, module in ipairs(script.ObjectModules:GetChildren()) do
@@ -275,6 +275,23 @@ end
 local Tycoon = {}
 Tycoon.__index = Tycoon
 
+function Tycoon:SetDataChangedCallback(callbackFn)
+	if type(callbackFn) == "function" then
+		self._onDataChanged = callbackFn
+	else
+		self._onDataChanged = nil
+	end
+end
+
+function Tycoon:NotifyDataChanged(reason)
+	if type(self._onDataChanged) ~= "function" then return end
+	local ok, err = pcall(self._onDataChanged, self, reason)
+	if not ok then
+		warn(("[Tycoon] Failed to notify data change for %s: %s"):format(tostring(self.Tycoon and self.Tycoon.Name), tostring(err)))
+	end
+end
+
+
 function Tycoon.new(tycoon: Instance)
 	local newTycoon = {}
 	setmetatable(newTycoon, Tycoon)
@@ -472,6 +489,7 @@ function Tycoon:Initialize()
 					rebirthEvent:FireClient(owner)
 				end
 				
+				self:NotifyDataChanged("ButtonPurchased")
 				PlaySoundAtSource("PurchaseSound", self.Tycoon, button.Instance.Head, true)
 				
 				animationsModule.PlayAnimation(owner, button.Instance, "ButtonVanish")
@@ -681,6 +699,7 @@ function Tycoon:ResetTycoon(isRebirth: boolean)
 	end
 	
 	self:Initialize()
+	self:NotifyDataChanged(isRebirth == true and "RebirthReset" or "TycoonReset")
 end
 
 function Tycoon:Rebirth()
