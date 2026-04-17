@@ -143,6 +143,10 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 	pet:SetAttribute("TemplateName", templateName)
 	local petUid = ensurePetUid(pet)
 	pet.Parent = workspace
+	local detectedBaseScale = 1.0
+	pcall(function()
+		detectedBaseScale = tonumber(pet:GetScale()) or 1.0
+	end)
 
 	local power = template:GetAttribute("Power") or 1
 	local rarityMult = template:GetAttribute("RarityMultiplier") or 1
@@ -155,7 +159,8 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		ownerUserId = player.UserId,
 		xp = 0,
 		level = 1,
-		scale = 1.0,
+		scale = detectedBaseScale,
+		baseScale = detectedBaseScale,
 		dirtiness = 0,
 		wetness = 0,
 		hunger = 100,
@@ -1309,12 +1314,31 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			local resolvedPetUid = ensurePetUid(pet)
 			pet.Parent = workspace
 
-			-- restore state
+			-- restore state (sanitize persisted values; never trust raw datastore values blindly)
 			self.petState[pet] = petInfo
 			self.petState[pet].ownerUserId = player.UserId
 			self.petState[pet].wild = false
 			self.petState[pet].petUid = resolvedPetUid
 			pet:SetAttribute("WildPet", false)
+
+			local savedXP = math.max(0, math.floor(tonumber(petInfo.xp) or 0))
+			local resolvedLevel = self.PetStateManager:GetLevelFromXP(savedXP)
+			local detectedBaseScale = tonumber(petInfo.baseScale)
+			if not detectedBaseScale then
+				-- Backward compatibility for older saves: level-1 scale usually equals base scale.
+				if resolvedLevel <= 1 and tonumber(petInfo.scale) then
+					detectedBaseScale = tonumber(petInfo.scale)
+				end
+			end
+			if not detectedBaseScale then
+				pcall(function()
+					detectedBaseScale = tonumber(pet:GetScale())
+				end)
+			end
+			detectedBaseScale = math.clamp(tonumber(detectedBaseScale) or 1.0, 0.5, 2.25)
+			self.petState[pet].xp = savedXP
+			self.petState[pet].level = resolvedLevel
+			self.petState[pet].baseScale = detectedBaseScale
 
 			if not self.petState[pet].power then
 				self.petState[pet].power = petInfo.power or 1
@@ -1328,12 +1352,10 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 
 			self.PetRigManager:EnsurePetRig(pet)
 			self.PetAnimationManager:SetupAnimatorForPet(pet)
-			local savedScale = tonumber(petInfo.scale)
-			if not savedScale then
-				local savedLevel = math.max(1, tonumber(petInfo.level) or 1)
-				savedScale = 1 + (0.15 * (savedLevel - 1))
-			end
-			self.PetStateManager:SetPetScale(pet, savedScale)
+			-- Recompute from level every load so legacy/corrupt saved scale values
+			-- cannot permanently inflate pet size across rejoins.
+			local targetScale = self.PetStateManager:CalculateScaleForLevel(resolvedLevel, detectedBaseScale)
+			self.PetStateManager:SetPetScale(pet, targetScale)
 
 			local restoredToStand = false
 			if petInfo.location == "petstand" and petInfo.standId then
@@ -1353,7 +1375,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 				self.petState[pet].location = "free"
 				self.PetMovement.StartWandering(pet, matPos, 20, player.UserId)
 				self:AddOwnedPetPickupPrompt(pet, player.UserId)
-			end
+			end	
 
 			print(("[WildPetManager] Spawned owned pet %s for %s"):format(pet.Name, player.Name))
 		else
