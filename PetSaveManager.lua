@@ -70,6 +70,7 @@ function PetSaveManager:_collectPetDataForPlayer(player)
 				dirtiness = state.dirtiness or 0,
 				wetness = state.wetness or 0,
 				hunger = state.hunger == nil and 100 or state.hunger,
+				happiness = state.happiness == nil and 100 or state.happiness,
 				showered = state.showered or false,
 				dried = state.dried or false,
 				accessories = state.accessories or { A = false, B = false },
