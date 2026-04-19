@@ -71,8 +71,12 @@ function PetFeedingManager:EnsurePetDefaults(petModel)
 	if state.hunger == nil then
 		state.hunger = MAX_STAT_VALUE
 	end
+	if state.happiness == nil then
+		state.happiness = MAX_STAT_VALUE
+	end
 
 	state.hunger = math.clamp(tonumber(state.hunger) or MAX_STAT_VALUE, 0, MAX_STAT_VALUE)
+	state.happiness = math.clamp(tonumber(state.happiness) or MAX_STAT_VALUE, 0, MAX_STAT_VALUE)
 	return state
 end
 
