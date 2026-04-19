@@ -170,18 +170,14 @@ function ToyHappinessManager:_resolveGroundedPosition(basePos, toyInstance, toyP
 	local target = self:_clampPointToZoneXZ(zonePart, basePos)
 	local halfHeight = self:_getToyHalfHeight(toyInstance, toyPrimary)
 
-	-- Optimization + stability: if we have a defined play zone/floor part, use its top face directly.
-	-- This avoids repeated raycasts and prevents placing toys on top of passing pets.
-	if zonePart and zonePart:IsA("BasePart") then
-		local zoneTop = zonePart.Position.Y + (zonePart.Size.Y * 0.5)
-		return Vector3.new(target.X, zoneTop + halfHeight, target.Z)
-	end
-
 	local rayOrigin = target + Vector3.new(0, 24, 0)
 	local rayDirection = Vector3.new(0, -120, 0)
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	local blacklist = { toyInstance }
+	if zonePart and zonePart:IsA("BasePart") then
+		table.insert(blacklist, zonePart)
+	end
 	for petModel, _ in pairs(self.petState) do
 		if petModel and petModel.Parent then
 			table.insert(blacklist, petModel)
@@ -195,7 +191,7 @@ function ToyHappinessManager:_resolveGroundedPosition(basePos, toyInstance, toyP
 		return Vector3.new(target.X, hit.Position.Y + halfHeight, target.Z)
 	end
 
-	return target
+	return Vector3.new(target.X, basePos.Y, target.Z)
 end
 
 function ToyHappinessManager:_collectToyTemplatesFromEssentials(essentials)
