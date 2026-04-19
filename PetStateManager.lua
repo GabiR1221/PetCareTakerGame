@@ -116,6 +116,7 @@ function PetStateManager:SendStateToOwner(petModel)
 		dirtiness = tonumber(st.dirtiness) or 0,
 		wetness = tonumber(st.wetness) or 0,
 		hunger = tonumber(st.hunger) or 100,
+		happiness = tonumber(st.happiness) or 100,
 		petName = tostring(petModel.Name),
 		petUid = tostring(st.petUid or petModel:GetAttribute("PetUID") or ""),
 		inventoryPetId = nil,
