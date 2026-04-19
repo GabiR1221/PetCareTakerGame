@@ -105,6 +105,20 @@ function WildPetManager:GetAdoptionMatForTycoon(tycoonModel)
 	return nil
 end
 
+function WildPetManager:GetOwnerWanderZonePart(ownerUserId)
+	if not ownerUserId then return nil end
+	local tycoonModel = self.TycoonUtils:FindTycoonByOwnerId(ownerUserId)
+	if not tycoonModel then return nil end
+
+	local zonePartName = tostring(tycoonModel:GetAttribute("PetWanderZonePartName") or "PetWanderZone")
+	local zonePart = self.TycoonUtils:FindPartByNameInModel(tycoonModel, zonePartName)
+	if zonePart and zonePart:IsA("BasePart") then
+		return zonePart
+	end
+
+	return nil
+end
+
 function WildPetManager:CanGrantPetToInventory(player)
 	if not player then return false end
 	local data = player:FindFirstChild("Data")
@@ -164,6 +178,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		dirtiness = 0,
 		wetness = 0,
 		hunger = 100,
+		happiness = 100,
 		showered = true,
 		dried = true,
 		accessories = {A = false, B = false},
@@ -177,7 +192,8 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 	self.PetRigManager:EnsurePetRig(pet)
 	self.PetAnimationManager:SetupAnimatorForPet(pet)
 	self:PlacePetOnGround(pet, adoptionMat.Position)
-	self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId)
+	local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+	self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId, wanderZone)
 	self:AddOwnedPetPickupPrompt(pet, player.UserId)
 
 	grantAdoptedPetToInventory(player, pet)
@@ -945,14 +961,16 @@ function WildPetManager:AutoAdoptCarriedWildPet(player, options)
 
 	if dropPosition then
 		self:PlacePetOnGround(pet, dropPosition)
-		self.PetMovement.StartWandering(pet, dropPosition, 20, player.UserId)
+		local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+		self.PetMovement.StartWandering(pet, dropPosition, 20, player.UserId, wanderZone)
 	else
 		-- safe fallback if adoption mat can't be resolved
 		local char = player.Character
 		local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
 		if root then
 			self:PlacePetOnGround(pet, root.Position + (root.CFrame.LookVector * 3))
-			self.PetMovement.StartWandering(pet, root.Position, 20, player.UserId)
+			local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+			self.PetMovement.StartWandering(pet, root.Position, 20, player.UserId, wanderZone)
 		else
 			self.PetMovement.StartWandering(pet)
 		end
@@ -1077,6 +1095,7 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		dirtiness = math.random(30, 80),
 		wetness = math.random(20, 60),
 		hunger = 100,
+		happiness = 100,
 		power = power,
 		rarityMultiplier = rarityMult,
 		petUid = petUid
@@ -1339,6 +1358,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			self.petState[pet].xp = savedXP
 			self.petState[pet].level = resolvedLevel
 			self.petState[pet].baseScale = detectedBaseScale
+			self.petState[pet].happiness = math.clamp(tonumber(self.petState[pet].happiness) or 100, 0, 100)
 
 			if not self.petState[pet].power then
 				self.petState[pet].power = petInfo.power or 1
@@ -1373,7 +1393,8 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			if not restoredToStand then
 				self:PlacePetOnGround(pet, matPos)
 				self.petState[pet].location = "free"
-				self.PetMovement.StartWandering(pet, matPos, 20, player.UserId)
+				local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+				self.PetMovement.StartWandering(pet, matPos, 20, player.UserId, wanderZone)
 				self:AddOwnedPetPickupPrompt(pet, player.UserId)
 			end	
 
@@ -1445,7 +1466,8 @@ function WildPetManager:CreateOwnedPetPickupPrompt(pet, position)
 
 	-- Start wandering in the tycoon area
 	local ownerUserId = self.petState[pet] and self.petState[pet].ownerUserId
-	self.PetMovement.StartWandering(pet, position, 20, ownerUserId)
+	local wanderZone = self:GetOwnerWanderZonePart(ownerUserId)
+	self.PetMovement.StartWandering(pet, position, 20, ownerUserId, wanderZone)
 	self.ownedPetPickupConns[pet] = conn
 end
 
