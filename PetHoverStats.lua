@@ -38,6 +38,10 @@ local hungerBarBg = menuFrame:WaitForChild("HungerBarBg")
 local hungerBarFill = hungerBarBg:WaitForChild("HungerBarFill")
 local hungerBarText = hungerBarBg:WaitForChild("HungerBarText")
 
+local happinessBarBg = menuFrame:FindFirstChild("HappinessBarBg")
+local happinessBarFill = happinessBarBg and happinessBarBg:FindFirstChild("HappinessBarFill")
+local happinessBarText = happinessBarBg and happinessBarBg:FindFirstChild("HappinessBarText")
+
 local levelLabel = menuFrame:WaitForChild("LevelLabel")
 local xpBarBg = menuFrame:WaitForChild("XpBarBg")
 local xpBarFill = xpBarBg:WaitForChild("XpBarFill")
@@ -59,6 +63,13 @@ local function updateMenuForPet(pet, payload)
 	local hunger = tonumber(payload.hunger) or 100
 	hungerBarFill.Size = UDim2.new(math.clamp(hunger / 100, 0, 1), 0, 1, 0)
 	hungerBarText.Text = ("%d / 100"):format(hunger)
+
+	if happinessBarFill and happinessBarText then
+		local happiness = tonumber(payload.happiness) or 100
+		happinessBarFill.Size = UDim2.new(math.clamp(happiness / 100, 0, 1), 0, 1, 0)
+		happinessBarText.Text = ("%d / 100"):format(happiness)
+	end
+
 
 	levelLabel.Text = ("Lv %d"):format(payload.level or 1)
 
