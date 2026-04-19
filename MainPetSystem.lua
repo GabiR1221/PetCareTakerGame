@@ -32,6 +32,7 @@ local PetFeedingManager = require(Modules:WaitForChild("PetFeedingManager"))
 local PetStandManager = require(Modules:WaitForChild("PetStandManager"))
 local PetMoodVisualManager = require(Modules:WaitForChild("PetMoodVisualManager"))
 local SprintRunManager = require(Modules:WaitForChild("SprintRunManager"))
+local ToyHappinessManager = require(Modules:WaitForChild("ToyHappinessManager"))
 -- Services
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -238,7 +239,7 @@ local function connectSellPrompt(sellPart, petSellRequestBridge)
 		if not player then return end
 		local carriedPet = carryingPetByUserId[player.UserId]
 		if not carriedPet or not carriedPet.Parent then return end
-		
+
 		local state = petState[carriedPet]
 		if not state or state.wild == true then return end
 		if tostring(state.ownerUserId) ~= tostring(player.UserId) then return end
@@ -341,80 +342,83 @@ function attachDropPickupPrompt(petModel, ownerUserId)
 end
 
 
-	
-	local function ensurePlayerPetCollisionGroups()
-			pcall(function() PhysicsService:RegisterCollisionGroup("Players") end)
-			pcall(function() PhysicsService:RegisterCollisionGroup("Pets") end)
-			pcall(function() PhysicsService:CollisionGroupSetCollidable("Players", "Pets", false) end)
-		end
-	
-	local function setCharacterCollisionGroup(character, groupName)
-			if not character then return end
-		for _, d in ipairs(character:GetDescendants()) do
-			if d:IsA("BasePart") then
-				pcall(function() d.CollisionGroup = groupName end)
-			end
-		end
-	end
-	
-	ensurePlayerPetCollisionGroups()
-	
-	
-	for _, existingPlayer in ipairs(Players:GetPlayers()) do
-		local char = existingPlayer.Character
-		if char then
-			setCharacterCollisionGroup(char, "Players")
+
+local function ensurePlayerPetCollisionGroups()
+	pcall(function() PhysicsService:RegisterCollisionGroup("Players") end)
+	pcall(function() PhysicsService:RegisterCollisionGroup("Pets") end)
+	pcall(function() PhysicsService:CollisionGroupSetCollidable("Players", "Pets", false) end)
+	pcall(function() PhysicsService:CollisionGroupSetCollidable("Pets", "Pets", false) end)
+end
+
+local function setCharacterCollisionGroup(character, groupName)
+	if not character then return end
+	for _, d in ipairs(character:GetDescendants()) do
+		if d:IsA("BasePart") then
+			pcall(function() d.CollisionGroup = groupName end)
 		end
 	end
-	
-	-- Create NPCs folder
-	local NPCS_FOLDER = workspace:FindFirstChild("NPCs") or Instance.new("Folder", workspace)
-	NPCS_FOLDER.Name = "NPCs"
+end
 
-	-- Initialize managers with dependencies
-	PetStateManager:Initialize(petState, petStateEvent, carryingPetByUserId)
-	PetAttachmentManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
-	PetAttachmentManager:SetCarryRemote(petCarryEvent)
-	PetAnimationManager:Initialize(petState)
-	NPCManager:Initialize(NPCS_FOLDER, petState, carryingPetByUserId, Players, Config)
-	ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
-	AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage)
-	PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
+ensurePlayerPetCollisionGroups()
 
-	local saveManager = PetSaveManager:Initialize("PetData", petState, carryingPetByUserId)
-	PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
-	WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
-	PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
-	PetMoodVisualManager:Initialize(petState)
-	SprintRunManager:Initialize(Players, WildPetManager)
-	
-	local petGamepassGrantBridge = ReplicatedStorage:FindFirstChild(PetGamepassGrantBridgeName)
-	if not petGamepassGrantBridge or not petGamepassGrantBridge:IsA("BindableEvent") then
-		petGamepassGrantBridge = Instance.new("BindableEvent")
-		petGamepassGrantBridge.Name = PetGamepassGrantBridgeName
-		petGamepassGrantBridge.Parent = ReplicatedStorage
+
+for _, existingPlayer in ipairs(Players:GetPlayers()) do
+	local char = existingPlayer.Character
+	if char then
+		setCharacterCollisionGroup(char, "Players")
 	end
+end
 
-	petGamepassGrantBridge.Event:Connect(function(player, gamepassName, petsToGrant)
-		if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
-		if type(petsToGrant) ~= "table" then return end
+-- Create NPCs folder
+local NPCS_FOLDER = workspace:FindFirstChild("NPCs") or Instance.new("Folder", workspace)
+NPCS_FOLDER.Name = "NPCs"
 
-		for _, petName in ipairs(petsToGrant) do
-			if type(petName) == "string" then
-				local ok, reason = WildPetManager:GrantOwnedPetFromTemplate(player, petName)
-				if not ok then
-					if reason == "TemplateMissing" then
-						warn(("[PetSystem] Failed to grant gamepass pet '%s' for %s (gamepass=%s, reason=%s). Add a Model named '%s' in ServerStorage.WildPetModels/ServerStorage.PetModels or ReplicatedStorage.Pets.")
-							:format(petName, player.Name, tostring(gamepassName), tostring(reason), petName))
-					else
-						warn(("[PetSystem] Failed to grant gamepass pet '%s' for %s (gamepass=%s, reason=%s)")
-							:format(petName, player.Name, tostring(gamepassName), tostring(reason)))
-					end
+-- Initialize managers with dependencies
+PetStateManager:Initialize(petState, petStateEvent, carryingPetByUserId)
+PetAttachmentManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
+PetAttachmentManager:SetCarryRemote(petCarryEvent)
+PetAnimationManager:Initialize(petState)
+NPCManager:Initialize(NPCS_FOLDER, petState, carryingPetByUserId, Players, Config)
+ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
+AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage)
+PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
+
+local saveManager = PetSaveManager:Initialize("PetData65", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
+WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
+PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
+PetMoodVisualManager:Initialize(petState)
+SprintRunManager:Initialize(Players, WildPetManager)
+ToyHappinessManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
+ToyHappinessManager:SetSaveManager(saveManager)
+
+local petGamepassGrantBridge = ReplicatedStorage:FindFirstChild(PetGamepassGrantBridgeName)
+if not petGamepassGrantBridge or not petGamepassGrantBridge:IsA("BindableEvent") then
+	petGamepassGrantBridge = Instance.new("BindableEvent")
+	petGamepassGrantBridge.Name = PetGamepassGrantBridgeName
+	petGamepassGrantBridge.Parent = ReplicatedStorage
+end
+
+petGamepassGrantBridge.Event:Connect(function(player, gamepassName, petsToGrant)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	if type(petsToGrant) ~= "table" then return end
+
+	for _, petName in ipairs(petsToGrant) do
+		if type(petName) == "string" then
+			local ok, reason = WildPetManager:GrantOwnedPetFromTemplate(player, petName)
+			if not ok then
+				if reason == "TemplateMissing" then
+					warn(("[PetSystem] Failed to grant gamepass pet '%s' for %s (gamepass=%s, reason=%s). Add a Model named '%s' in ServerStorage.WildPetModels/ServerStorage.PetModels or ReplicatedStorage.Pets.")
+						:format(petName, player.Name, tostring(gamepassName), tostring(reason), petName))
+				else
+					warn(("[PetSystem] Failed to grant gamepass pet '%s' for %s (gamepass=%s, reason=%s)")
+						:format(petName, player.Name, tostring(gamepassName), tostring(reason)))
 				end
 			end
 		end
-	end)
-	
+	end
+end)
+
 local petSellBridge = ReplicatedStorage:FindFirstChild(PetSellBridgeName)
 if not petSellBridge or not petSellBridge:IsA("BindableEvent") then
 	petSellBridge = Instance.new("BindableEvent")
@@ -473,7 +477,7 @@ end)
 
 
 
-	-- Connect remote events
+-- Connect remote events
 if accessoryEvent then
 	accessoryEvent.OnServerEvent:Connect(function(player, action, data)
 		AccessoryManager:HandleAccessoryEvent(player, action, data)
@@ -510,60 +514,61 @@ end
 
 
 
-	-- Scan for existing NPCs
-	for _, npc in ipairs(NPCS_FOLDER:GetChildren()) do
+-- Scan for existing NPCs
+for _, npc in ipairs(NPCS_FOLDER:GetChildren()) do
 	NPCManager:SetupNPC(npc)
 end
 
-	-- Monitor new NPCs
-	NPCS_FOLDER.ChildAdded:Connect(function(npc)
-		task.wait(0.05)
-		NPCManager:SetupNPC(npc)
+-- Monitor new NPCs
+NPCS_FOLDER.ChildAdded:Connect(function(npc)
+	task.wait(0.05)
+	NPCManager:SetupNPC(npc)
+end)
+
+AccessoryManager:ScanAndConnectAll()
+
+-- Periodic scan for interactables
+task.spawn(function()
+	while true do
+		pcall(function()
+			ShowerDryerManager:ScanAndConnectAll()
+			AccessoryManager:ScanAndConnectAll()
+			PetGroundManager:ScanAndConnectAll()
+			PetStandManager:ScanAndConnectAll()
+			WildPetManager:ScanAndConnectAdoptionMats()
+			ToyHappinessManager:ScanAndConnectAll()
+		end)
+		task.wait(6)
+	end
+end)
+
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(character)
+		setCharacterCollisionGroup(character, "Players")
+		character.DescendantAdded:Connect(function(desc)
+			if desc:IsA("BasePart") then
+				pcall(function() desc.CollisionGroup = "Players" end)
+			end
+		end)
 	end)
 
-	AccessoryManager:ScanAndConnectAll()
-
-	-- Periodic scan for interactables
-	task.spawn(function()
-		while true do
-			pcall(function()
-				ShowerDryerManager:ScanAndConnectAll()
-				AccessoryManager:ScanAndConnectAll()
-				PetGroundManager:ScanAndConnectAll()
-				PetStandManager:ScanAndConnectAll()
-				WildPetManager:ScanAndConnectAdoptionMats()
-			end)
-			task.wait(6)
-		end
-	end)
-
-	Players.PlayerAdded:Connect(function(player)
-			player.CharacterAdded:Connect(function(character)
-					setCharacterCollisionGroup(character, "Players")
-					character.DescendantAdded:Connect(function(desc)
-							if desc:IsA("BasePart") then
-								pcall(function() desc.CollisionGroup = "Players" end)
-							end
-					end)
-			end)
-	
 	task.wait(3)
 	if not saveManager then
-	warn("[PetSystem] saveManager nil, cannot load pets")
-	return
-end
+		warn("[PetSystem] saveManager nil, cannot load pets")
+		return
+	end
 	local petData = saveManager:LoadPlayerPets(player)
 	if petData and #petData > 0 then
-	WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
-end
-	end)
+		WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
+	end
+end)
 
-	Players.PlayerRemoving:Connect(function(player)
-		if saveManager then
-			saveManager:SavePlayerPets(player)
-			else
-			warn("[PetSystem] saveManager is nil, cannot save pets for", player.Name)
-		end
-	end)
+Players.PlayerRemoving:Connect(function(player)
+	if saveManager then
+		saveManager:SavePlayerPets(player)
+	else
+		warn("[PetSystem] saveManager is nil, cannot save pets for", player.Name)
+	end
+end)
 
-	print("[PetSystem] Initialized successfully.")
+print("[PetSystem] Initialized successfully.")
