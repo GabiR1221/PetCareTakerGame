@@ -1,6 +1,7 @@
 local ShowerDryerManager = {}
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 function ShowerDryerManager:Initialize(stateTable, carryingTable, playersService, petMovement)
 	self.petState = stateTable or {}
@@ -84,22 +85,32 @@ function ShowerDryerManager:_bindPetToShowerWeld(session)
 end
 
 
-function ShowerDryerManager:_moveToolToPosition(toolInstance, worldPos)
+function ShowerDryerManager:_moveToolToPosition(toolInstance, worldPos, surfaceNormal)
 	local handle = self:_toToolHandle(toolInstance)
 	if not handle then return nil end
 
 	handle.Anchored = true
 	handle.CanCollide = false
+	local normal = surfaceNormal
+	if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
+		normal = Vector3.new(0, 1, 0)
+	end
+
+	local up = normal.Unit
+	local right = Vector3.new(0, 1, 0):Cross(up)
+	if right.Magnitude < 1e-4 then
+		right = Vector3.new(1, 0, 0):Cross(up)
+	end
+	right = right.Unit
+	local targetHandleCFrame = CFrame.fromMatrix(worldPos, right, up)
 
 	if toolInstance:IsA("Model") then
 		local pivot = toolInstance:GetPivot()
 		local relative = pivot:ToObjectSpace(handle.CFrame)
-		local _, y, z = pivot:ToOrientation()
-
-		local targetPivot = CFrame.new(worldPos) * CFrame.fromOrientation(0, y, z) * relative:Inverse()
+		local targetPivot = targetHandleCFrame * relative:Inverse()
 		toolInstance:PivotTo(targetPivot)
 	else
-		toolInstance.CFrame = CFrame.new(worldPos)
+		toolInstance.CFrame = targetHandleCFrame
 	end
 
 	return handle
@@ -149,10 +160,18 @@ function ShowerDryerManager:_getNearestDirtPart(session, handle)
 	if #(session.dirtParts or {}) == 0 then return nil end
 
 	local nearestPart = nil
-	local nearestDistance = 3.75
+	local nearestDistance = 1.15
 	for _, dirtPart in ipairs(session.dirtParts or {}) do
 		if dirtPart and dirtPart.Parent then
-			local distance = (dirtPart.Position - handle.Position).Magnitude
+			local distance = math.huge
+			local ok, closestPoint = pcall(function()
+				return dirtPart:GetClosestPointOnSurface(handle.Position)
+			end)
+			if ok and typeof(closestPoint) == "Vector3" then
+				distance = (closestPoint - handle.Position).Magnitude
+			else
+				distance = (dirtPart.Position - handle.Position).Magnitude
+			end
 			if distance <= nearestDistance then
 				nearestDistance = distance
 				nearestPart = dirtPart
@@ -362,6 +381,181 @@ function ShowerDryerManager:_snapPositionToPetSurface(session, worldPos)
 	return worldPos, Vector3.new(0, 1, 0)
 end
 
+function ShowerDryerManager:_startPlayerToolPose(session)
+	if not session or not session.player then return end
+	local character = session.player.Character
+	if not character then return end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	local endEffector = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+	local chainRoot = character:FindFirstChild("RightUpperArm") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+	if not endEffector or not chainRoot or not endEffector:IsA("BasePart") or not chainRoot:IsA("BasePart") then
+		return
+	end
+
+	local targetPart = Instance.new("Part")
+	targetPart.Name = "ShowerToolIKTarget"
+	targetPart.Size = Vector3.new(0.2, 0.2, 0.2)
+	targetPart.Transparency = 1
+	targetPart.CanCollide = false
+	targetPart.CanQuery = false
+	targetPart.CanTouch = false
+	targetPart.Anchored = true
+	targetPart.Parent = workspace
+
+	local targetAttachment = Instance.new("Attachment")
+	targetAttachment.Name = "ShowerToolIKTargetAttachment"
+	targetAttachment.Parent = targetPart
+
+	local ikControl = Instance.new("IKControl")
+	ikControl.Name = "ShowerToolIK"
+	ikControl.Type = Enum.IKControlType.Position
+	ikControl.ChainRoot = chainRoot
+	ikControl.EndEffector = endEffector
+	ikControl.Target = targetAttachment
+	ikControl.Priority = 100
+	ikControl.Weight = 0.9
+	ikControl.SmoothTime = 0.08
+	ikControl.Enabled = true
+	ikControl.Parent = humanoid
+
+	session.armPose = {
+		targetPart = targetPart,
+		targetAttachment = targetAttachment,
+		ikControl = ikControl,
+		character = character,
+		humanoid = humanoid,
+	}
+end
+
+
+function ShowerDryerManager:_updatePlayerToolPose(session, toolWorldPos, toolNormal)
+	if not session or not session.armPose or not toolWorldPos then return end
+	local armPose = session.armPose
+	if not armPose.targetPart or not armPose.targetPart.Parent then return end
+	local normal = toolNormal
+	if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
+		normal = Vector3.new(0, 1, 0)
+	end
+
+	local pullBack = 0.0
+	local targetPos = toolWorldPos - (normal.Unit * pullBack)
+	armPose.targetPart.CFrame = CFrame.new(targetPos)
+end
+
+function ShowerDryerManager:_startPlayerShowerStance(session)
+	if not session or not session.player then return end
+	local character = session.player.Character
+	if not character then return end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not root or not root:IsA("BasePart") then return end
+
+	local showerPart = session.showerPart
+	if not showerPart or not showerPart:IsA("BasePart") then return end
+
+	local standPart = Instance.new("Part")
+	standPart.Name = "ShowerPlayerStand"
+	standPart.Size = Vector3.new(1, 1, 1)
+	standPart.Transparency = 1
+	standPart.CanCollide = false
+	standPart.CanQuery = false
+	standPart.CanTouch = false
+	standPart.Anchored = true
+	standPart.Parent = workspace
+
+	local standOffset = Vector3.new(0, 0, 5.25)
+	local standPos = showerPart.CFrame:PointToWorldSpace(standOffset)
+	local lookAtPos = showerPart.Position + Vector3.new(0, 1.35, 0)
+	local flatLook = Vector3.new(lookAtPos.X - standPos.X, 0, lookAtPos.Z - standPos.Z)
+	if flatLook.Magnitude < 1e-4 then
+		local fallback = showerPart.CFrame.LookVector
+		flatLook = Vector3.new(fallback.X, 0, fallback.Z)
+	end
+	standPart.CFrame = CFrame.lookAt(standPos, standPos + flatLook.Unit)
+
+	local previousJumpPower = humanoid.JumpPower
+	local previousJumpHeight = humanoid.JumpHeight
+	local previousWalkSpeed = humanoid.WalkSpeed
+	local previousAutoRotate = humanoid.AutoRotate
+	local previousAnchored = root.Anchored
+
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	root.CFrame = standPart.CFrame
+	root.Anchored = true
+
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.JumpHeight = 0
+	humanoid.AutoRotate = false
+
+	local lockConn = RunService.Heartbeat:Connect(function()
+		if not root.Parent or not standPart.Parent then return end
+		root.CFrame = standPart.CFrame
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end)
+
+	session.playerStance = {
+		standPart = standPart,
+		humanoid = humanoid,
+		root = root,
+		walkSpeed = previousWalkSpeed,
+		jumpPower = previousJumpPower,
+		jumpHeight = previousJumpHeight,
+		autoRotate = previousAutoRotate,
+		wasAnchored = previousAnchored,
+		lockConn = lockConn,
+	}
+end
+
+function ShowerDryerManager:_stopPlayerShowerStance(session)
+	if not session or not session.playerStance then return end
+	local stance = session.playerStance
+	if stance.lockConn then
+		pcall(function()
+			stance.lockConn:Disconnect()
+		end)
+	end
+	if stance.humanoid and stance.humanoid.Parent then
+		pcall(function()
+			stance.humanoid.WalkSpeed = stance.walkSpeed or 16
+			stance.humanoid.JumpPower = stance.jumpPower or 50
+			stance.humanoid.JumpHeight = stance.jumpHeight or 7.2
+			stance.humanoid.AutoRotate = (stance.autoRotate ~= false)
+		end)
+	end
+	if stance.root and stance.root.Parent then
+		pcall(function()
+			stance.root.Anchored = (stance.wasAnchored == true)
+		end)
+	end
+	if stance.standPart and stance.standPart.Parent then
+		pcall(function()
+			stance.standPart:Destroy()
+		end)
+	end
+	session.playerStance = nil
+end
+
+function ShowerDryerManager:_stopPlayerToolPose(session)
+	if not session or not session.armPose then return end
+	local armPose = session.armPose
+	if armPose.ikControl and armPose.ikControl.Parent then
+		pcall(function()
+			armPose.ikControl.Enabled = false
+			armPose.ikControl:Destroy()
+		end)
+	end
+	if armPose.targetPart and armPose.targetPart.Parent then
+		pcall(function()
+			armPose.targetPart:Destroy()
+		end)
+	end
+	session.armPose = nil
+end
 
 function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if not player then return end
@@ -393,16 +587,46 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		surfaceNormal = Vector3.new(0, 1, 0)
 	end
 
-	local toolOffset = self:_getToolHalfThickness(activeTool) + 0.03
-	local finalPos = surfacePos + surfaceNormal.Unit * toolOffset
+	local requestedPetHit = payload.hitPet == true
+	local snapDistance = (surfacePos - clampedPos).Magnitude
+	local useSnappedSurface = requestedPetHit and (snapDistance <= 3.4)
+	local targetSurfacePos = useSnappedSurface and surfacePos or clampedPos
+	local payloadSurfaceNormal = payload.surfaceNormal
+	local targetSurfaceNormal = useSnappedSurface and surfaceNormal or (session.lastToolNormal or surfaceNormal)
+	if typeof(payloadSurfaceNormal) == "Vector3" and payloadSurfaceNormal.Magnitude > 1e-4 then
+		targetSurfaceNormal = payloadSurfaceNormal.Unit
+	end
+	if typeof(targetSurfaceNormal) ~= "Vector3" or targetSurfaceNormal.Magnitude < 1e-4 then
+		targetSurfaceNormal = Vector3.new(0, 1, 0)
+	end
 
-	local activePart = self:_moveToolToPosition(activeTool, finalPos)
+	local toolOffset = math.clamp(self:_getToolHalfThickness(activeTool) * 0.58, 0.12, 0.34)
+	local unsmoothedFinalPos = targetSurfacePos + targetSurfaceNormal.Unit * toolOffset
+	local smoothingAlpha = useSnappedSurface and 0.62 or 0.4
+	local finalPos = unsmoothedFinalPos
+	if session.lastToolWorldPos then
+		finalPos = session.lastToolWorldPos:Lerp(unsmoothedFinalPos, smoothingAlpha)
+	end
+	session.lastToolWorldPos = finalPos
+
+	local smoothedNormal = targetSurfaceNormal
+	if session.lastToolNormal then
+		local mixed = session.lastToolNormal:Lerp(targetSurfaceNormal, 0.32)
+		if mixed.Magnitude > 1e-4 then
+			smoothedNormal = mixed.Unit
+		end
+	end
+	session.lastToolNormal = smoothedNormal
+
+	local activePart = self:_moveToolToPosition(activeTool, finalPos, smoothedNormal)
 	if not activePart then return end
+
+	self:_updatePlayerToolPose(session, finalPos, smoothedNormal)
 
 	local petPrimary = session.pet.PrimaryPart
 	if not petPrimary then return end
 
-	local distance = (surfacePos - petPrimary.Position).Magnitude
+	local distance = (targetSurfacePos - petPrimary.Position).Magnitude
 	if distance > 6 then return end
 
 	local now = tick()
@@ -793,11 +1017,15 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 		connections = {},
 		lastProgressTick = 0,
 		lastRotateTick = 0,
+		lastToolWorldPos = nil,
+		lastToolNormal = nil,
 		originalShowerCFrame = showerPart.CFrame,
 	}
 
 	self.activeShowerSessions[player.UserId] = session
+	self:_startPlayerShowerStance(session)
 	self:_bindPetToShowerWeld(session)
+	self:_startPlayerToolPose(session)
 
 	local spongePart = self:_toToolHandle(spongeTool)
 	local showerHeadPart = self:_toToolHandle(showerHeadTool)
@@ -994,8 +1222,11 @@ function ShowerDryerManager:_cleanupShowerSession(player, sendEndEvent)
 	for _, conn in ipairs(session.connections or {}) do
 		pcall(function() conn:Disconnect() end)
 	end
-	
+
 	self:_clearDirtSessionAttributes(session)
+	self:_stopPlayerToolPose(session)
+	self:_stopPlayerShowerStance(session)
+	
 	if session.showerPetWeld and session.showerPetWeld.Parent then
 		pcall(function()
 			session.showerPetWeld:Destroy()
