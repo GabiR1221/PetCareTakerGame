@@ -197,7 +197,21 @@ local function startShowerView(targetCameraPart)
 	clearCameraFollow()
 	cameraConn = RunService.RenderStepped:Connect(function()
 		if cameraPart and cameraPart.Parent then
-			camera.CFrame = cameraPart.CFrame
+			local baseCFrame = cameraPart.CFrame
+			local viewport = camera.ViewportSize
+			local nx = 0
+			local ny = 0
+			if viewport.X > 0 and viewport.Y > 0 then
+				nx = ((mouse.X / viewport.X) - 0.5) * 2
+				ny = ((mouse.Y / viewport.Y) - 0.5) * 2
+			end
+			nx = math.clamp(nx, -1, 1)
+			ny = math.clamp(ny, -1, 1)
+
+			local yaw = math.rad(nx * 4.5)
+			local pitch = math.rad(-ny * 2.8)
+			local localOffset = Vector3.new(nx * 0.15, -ny * 0.08, 0)
+			camera.CFrame = baseCFrame * CFrame.new(localOffset) * CFrame.Angles(pitch, yaw, 0)
 		end
 	end)
 end
@@ -216,7 +230,11 @@ local function getMovePoint()
 		params.FilterDescendantsInstances = {currentPet}
 		local hitPet = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
 		if hitPet then
-			return hitPet.Position + (hitPet.Normal * 0.02)
+			return {
+				worldPos = hitPet.Position + (hitPet.Normal * 0.02),
+				hitPet = true,
+				surfaceNormal = hitPet.Normal,
+			}
 		end
 	end
 
@@ -228,13 +246,19 @@ local function getMovePoint()
 		if math.abs(denom) > 1e-4 then
 			local distance = originToWall:Dot(normal) / denom
 			if distance > 0 then
-				return ray.Origin + (ray.Direction * distance)
+				return {
+					worldPos = ray.Origin + (ray.Direction * distance),
+					hitPet = false,
+				}
 			end
 		end
 	end
 
 	if mouse and mouse.Hit then
-		return mouse.Hit.Position
+		return {
+			worldPos = mouse.Hit.Position,
+			hitPet = false,
+		}
 	end
 
 	return nil
@@ -254,8 +278,10 @@ local function startCursorTracking()
 		if isOverPanel then return end
 
 		local now = tick()
-		local worldPos = getMovePoint()
-		if not worldPos then return end
+		local movePoint = getMovePoint()
+		if not movePoint then return end
+		local worldPos = movePoint.worldPos
+		if typeof(worldPos) ~= "Vector3" then return end
 
 		local hasMovedEnough = (not lastToolMovePoint) or ((worldPos - lastToolMovePoint).Magnitude >= 0.04)
 		if not hasMovedEnough and (now - lastToolMoveFireAt) < 0.06 then
@@ -266,7 +292,11 @@ local function startCursorTracking()
 		lastToolMovePoint = worldPos
 
 		if worldPos then
-			showerRemote:FireServer("ToolMove", { worldPos = worldPos })
+			showerRemote:FireServer("ToolMove", {
+				worldPos = worldPos,
+				hitPet = movePoint.hitPet == true,
+				surfaceNormal = movePoint.surfaceNormal,
+			})
 		end
 	end)
 end
