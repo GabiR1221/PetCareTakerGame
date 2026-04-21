@@ -63,6 +63,26 @@ local function ensurePrompt(toyPrimary)
 	return prompt
 end
 
+local function setToyVisualEnabled(toyInstance, enabled)
+	if not toyInstance then return end
+	if toyInstance:IsA("BasePart") then
+		toyInstance.Transparency = enabled and 0 or 1
+		toyInstance.CanCollide = false
+		toyInstance.CanTouch = enabled
+		toyInstance.CanQuery = enabled
+		return
+	end
+
+	for _, desc in ipairs(toyInstance:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			desc.Transparency = enabled and 0 or 1
+			desc.CanCollide = false
+			desc.CanTouch = enabled
+			desc.CanQuery = enabled
+		end
+	end
+end
+
 function ToyHappinessManager:Initialize(stateTable, carryingTable, playersService, petMovement)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
@@ -79,10 +99,13 @@ function ToyHappinessManager:Initialize(stateTable, carryingTable, playersServic
 	self.lastTriggeredAt = {}
 	self.lastJumpAtByToy = {}
 	self.happinessDecayStarted = false
+	self.autoToyPlayStarted = false
 
 	self:_startHappinessDecayLoop()
+	self:_startAutoToyPlayLoop()
 	return self
 end
+
 
 function ToyHappinessManager:SetSaveManager(saveManager)
 	self.PetSaveManager = saveManager
@@ -147,6 +170,64 @@ function ToyHappinessManager:_isPlayerOwnerOfTycoon(player, tycoonModel)
 	end
 
 	return false
+end
+
+function ToyHappinessManager:_getOwnerPlayerFromTycoon(tycoonModel)
+	if not tycoonModel then return nil end
+	local ownerAttr = tycoonModel:GetAttribute("OwnerId") or tycoonModel:GetAttribute("Owner") or tycoonModel:GetAttribute("OwnerUserId")
+	if ownerAttr then
+		local ownerId = tonumber(ownerAttr)
+		if ownerId then
+			return self.Players:GetPlayerByUserId(ownerId)
+		end
+	end
+
+	for _, nm in ipairs({ "OwnerId", "Owner", "OwnerUserId" }) do
+		local child = tycoonModel:FindFirstChild(nm)
+		if child then
+			if child:IsA("ObjectValue") and child.Value and child.Value:IsA("Player") then
+				return child.Value
+			end
+			local raw = child.Value
+			local ownerId = tonumber(raw)
+			if ownerId then
+				local player = self.Players:GetPlayerByUserId(ownerId)
+				if player then return player end
+			end
+		end
+	end
+
+	return nil
+end
+
+function ToyHappinessManager:_isToyTemplateEquippedForOwner(template, ownerPlayer)
+	if not template or not ownerPlayer then return false end
+	local equippedName = tostring(ownerPlayer:GetAttribute("EquippedToyName") or "")
+	if equippedName == "" then return false end
+	if string.lower(template.Name) == string.lower(equippedName) then
+		return true
+	end
+
+	local toyType = template:GetAttribute("ToyType")
+	if toyType ~= nil and tostring(toyType) ~= "" and string.lower(tostring(toyType)) == string.lower(equippedName) then
+		return true
+	end
+
+	return false
+end
+
+function ToyHappinessManager:_setToyEnabled(toyInstance, enabled)
+	local toyPrimary = getToyPrimaryPart(toyInstance)
+	if toyPrimary then
+		local prompt = ensurePrompt(toyPrimary)
+		if prompt then
+			prompt.Enabled = enabled
+		end
+		if not enabled then
+			self:_cleanupFinishedSession(toyPrimary)
+		end
+	end
+	setToyVisualEnabled(toyInstance, enabled)
 end
 
 function ToyHappinessManager:_isToyTemplateCandidate(inst)
@@ -711,6 +792,58 @@ function ToyHappinessManager:_startHappinessDecayLoop()
 	end)
 end
 
+function ToyHappinessManager:_ownerHasLowHappinessPets(player, threshold)
+	if not player then return false end
+	local target = tonumber(threshold) or 80
+	for petModel, st in pairs(self.petState) do
+		if petModel and petModel.Parent and st and st.wild ~= true and tonumber(st.ownerUserId) == tonumber(player.UserId) then
+			if (tonumber(st.happiness) or 100) < target then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+function ToyHappinessManager:_startAutoToyPlayLoop()
+	if self.autoToyPlayStarted then return end
+	self.autoToyPlayStarted = true
+
+	task.spawn(function()
+		while true do
+			task.wait(3)
+
+			for _, rootName in ipairs({"Tycoon", "Tycoons"}) do
+				local root = workspace:FindFirstChild(rootName)
+				if not root then continue end
+
+				for _, tycoonModel in ipairs(root:GetDescendants()) do
+					if not (tycoonModel:IsA("Model") or tycoonModel:IsA("Folder")) then continue end
+					local essentials = self.TycoonUtils:FindEssentialsInModel(tycoonModel)
+					if not essentials then continue end
+
+					local ownerPlayer = self:_getOwnerPlayerFromTycoon(tycoonModel)
+					if not ownerPlayer then continue end
+
+					for _, toy in ipairs(self:_collectToyTemplatesFromEssentials(essentials)) do
+						if toy:GetAttribute("AutoPlayWhenLowHappiness") ~= true then continue end
+						if not self:_isToyTemplateEquippedForOwner(toy, ownerPlayer) then continue end
+
+						local lowThreshold = tonumber(toy:GetAttribute("AutoPlayHappinessThreshold") or 80) or 80
+						if not self:_ownerHasLowHappinessPets(ownerPlayer, lowThreshold) then continue end
+
+						local toyPrimary = getToyPrimaryPart(toy)
+						if not toyPrimary then continue end
+						if self.activeSessionsByToy[toyPrimary] then continue end
+						if not self:_canTriggerToyJump(toyPrimary, toy) then continue end
+
+						self:_runHappinessSession(ownerPlayer, toy, toyPrimary)
+					end
+				end
+			end
+		end
+	end)
+end
 
 function ToyHappinessManager:ScanAndConnectAll()
 	local roots = {}
@@ -724,10 +857,29 @@ function ToyHappinessManager:ScanAndConnectAll()
 			if tycoonModel:IsA("Model") or tycoonModel:IsA("Folder") then
 				local essentials = self.TycoonUtils:FindEssentialsInModel(tycoonModel)
 				if essentials then
+					local ownerPlayer = self:_getOwnerPlayerFromTycoon(tycoonModel)
 					local templates = self:_collectToyTemplatesFromEssentials(essentials)
 					for _, template in ipairs(templates) do
 						local primary = getToyPrimaryPart(template)
 						if primary then
+							local isEquippedToy = self:_isToyTemplateEquippedForOwner(template, ownerPlayer)
+							self:_setToyEnabled(template, isEquippedToy)
+							if not isEquippedToy then
+								local dynamic = self:_getDynamicToyList(template)
+								for i = #dynamic, 1, -1 do
+									local toy = dynamic[i]
+									if toy and toy.Parent then
+										local p = getToyPrimaryPart(toy)
+										if p then
+											self:_cleanupFinishedSession(p)
+										end
+										toy:Destroy()
+									end
+									table.remove(dynamic, i)
+								end
+								continue
+							end
+
 							primary.Anchored = true
 							primary.CanCollide = false
 							template:SetAttribute("ToyType", self:_resolveToyType(template))
@@ -741,11 +893,8 @@ function ToyHappinessManager:ScanAndConnectAll()
 								template:SetAttribute("ToyGroundInitialized", true)
 							end
 							self:ConnectToyPrompt(template)
-							if ownerId then
-								local ownerPlayer = self.Players:GetPlayerByUserId(tonumber(ownerId) or -1)
-								if ownerPlayer then
-									self:_syncToyCountForTycoon(ownerPlayer, template)
-								end
+							if ownerPlayer then
+								self:_syncToyCountForTycoon(ownerPlayer, template)
 							end
 						end
 					end
