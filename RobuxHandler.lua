@@ -180,6 +180,62 @@ function RandomID(Folder)
 	return Chance
 end
 
+local function createInventoryToy(player, toyName)
+	local data = player and player:FindFirstChild("Data")
+	local inventoryFolder = data and data:FindFirstChild("Toys")
+	if data and not inventoryFolder then
+		inventoryFolder = Instance.new("Folder")
+		inventoryFolder.Name = "Toys"
+		inventoryFolder.Parent = data
+	end
+	if not inventoryFolder then return end
+
+	local newItem = Instance.new("Folder")
+	newItem.Name = tostring(RandomID(inventoryFolder))
+	newItem.Parent = inventoryFolder
+
+	local itemNameValue = Instance.new("StringValue")
+	itemNameValue.Name = "ItemName"
+	itemNameValue.Value = tostring(toyName)
+	itemNameValue.Parent = newItem
+
+	local itemTypeValue = Instance.new("StringValue")
+	itemTypeValue.Name = "ItemType"
+	itemTypeValue.Value = "Toy"
+	itemTypeValue.Parent = newItem
+
+	local equippedValue = Instance.new("BoolValue")
+	equippedValue.Name = "Equipped"
+	equippedValue.Value = false
+	equippedValue.Parent = newItem
+
+	local playerData = data and data:FindFirstChild("PlayerData")
+	local jsonValue = playerData and playerData:FindFirstChild("ToyInventoryJson")
+	if jsonValue and jsonValue:IsA("StringValue") then
+		local httpService = game:GetService("HttpService")
+		task.defer(function()
+			local payload = {}
+			for _, toyFolder in ipairs(inventoryFolder:GetChildren()) do
+				local itemName = toyFolder:FindFirstChild("ItemName")
+				if itemName and itemName.Value ~= "" then
+					local equipped = toyFolder:FindFirstChild("Equipped")
+					table.insert(payload, {
+						id = tostring(toyFolder.Name),
+						itemName = tostring(itemName.Value),
+						itemType = "Toy",
+						equipped = equipped and equipped.Value == true or false,
+					})
+				end
+			end
+			local ok, encoded = pcall(function()
+				return httpService:JSONEncode(payload)
+			end)
+			if ok then
+				jsonValue.Value = encoded
+			end
+		end)
+	end
+end
 
 MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 	local Player = Players:GetPlayerByUserId(ReceiptInfo.PlayerId)
@@ -210,13 +266,10 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 		if not EggInfo:FindFirstChild("ProductId") then continue end
 
 		if tonumber(EggInfo.ProductId.Value) == ReceiptInfo.ProductId then
-			local PetChosen = GetRobuxEgg(Player, EggInfo.Name)	-- this selects a random pet from the egg
+			local PetChosen = GetRobuxEgg(Player, EggInfo.Name)	-- this selects a random item from the egg
 
-			--// Create Pet
-			local NewPet = game.ReplicatedStorage.Assets.PetTemplate:Clone()
-			NewPet.Name = RandomID(Player.Data.Pets)
-			NewPet.PetName.Value = PetChosen
-			NewPet.Parent = Player.Data.Pets
+			--// Create Toy Inventory Item
+			createInventoryToy(Player, PetChosen)
 
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
