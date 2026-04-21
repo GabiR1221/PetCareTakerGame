@@ -7,6 +7,83 @@ function RandomID(Folder)
 	return Chance
 end
 
+local function getInventoryFolder(player)
+	local data = player and player:FindFirstChild("Data")
+	if not data then return nil end
+	local toysFolder = data:FindFirstChild("Toys")
+	if not toysFolder then
+		toysFolder = Instance.new("Folder")
+		toysFolder.Name = "Toys"
+		toysFolder.Parent = data
+	end
+	return toysFolder
+end
+
+local function getInventoryStorageLimit(player)
+	if Multipliers and Multipliers.GetMaxPetsStorage then
+		return tonumber(Multipliers.GetMaxPetsStorage(player)) or 0
+	end
+	return 0
+end
+
+local function shouldAutoDelete(player, itemName)
+	local autoDeleteFolder = player and player:FindFirstChild("Data") and player.Data:FindFirstChild("AutoDelete")
+	if not autoDeleteFolder then return false end
+	local entry = autoDeleteFolder:FindFirstChild(tostring(itemName))
+	return entry and entry:IsA("BoolValue") and entry.Value == true
+end
+
+local function createInventoryToy(player, toyName)
+	local inventoryFolder = getInventoryFolder(player)
+	if not inventoryFolder then return end
+
+	local newItem = Instance.new("Folder")
+	newItem.Name = tostring(RandomID(inventoryFolder))
+	newItem.Parent = inventoryFolder
+
+	local itemName = Instance.new("StringValue")
+	itemName.Name = "ItemName"
+	itemName.Value = tostring(toyName)
+	itemName.Parent = newItem
+
+	local itemType = Instance.new("StringValue")
+	itemType.Name = "ItemType"
+	itemType.Value = "Toy"
+	itemType.Parent = newItem
+
+	local equipped = Instance.new("BoolValue")
+	equipped.Name = "Equipped"
+	equipped.Value = false
+	equipped.Parent = newItem
+
+	local playerData = player and player:FindFirstChild("Data") and player.Data:FindFirstChild("PlayerData")
+	local jsonValue = playerData and playerData:FindFirstChild("ToyInventoryJson")
+	if jsonValue and jsonValue:IsA("StringValue") then
+		local httpService = game:GetService("HttpService")
+		task.defer(function()
+			local payload = {}
+			for _, toyFolder in ipairs(inventoryFolder:GetChildren()) do
+				local itemName = toyFolder:FindFirstChild("ItemName")
+				if itemName and itemName.Value ~= "" then
+					local equippedValue = toyFolder:FindFirstChild("Equipped")
+					table.insert(payload, {
+						id = tostring(toyFolder.Name),
+						itemName = tostring(itemName.Value),
+						itemType = "Toy",
+						equipped = equippedValue and equippedValue.Value == true or false,
+					})
+				end
+			end
+			local ok, encoded = pcall(function()
+				return httpService:JSONEncode(payload)
+			end)
+			if ok then
+				jsonValue.Value = encoded
+			end
+		end)
+	end
+end
+
 function ChooseRandomPet(Egg, LuckMultiplier)
 	local EggInfo = ReplicatedStorage.Eggs[Egg]
 	local Pets, TotalWeight = {}, 0
@@ -41,7 +118,9 @@ end
 
 Remotes.Egg.OnServerInvoke = function(Player, Egg, Amount)
 	if Player.NonSaveValues.IsOpeningEgg.Value then return end -- cooldown
-	if #Player.Data.Pets:GetChildren() + Amount > Multipliers.GetMaxPetsStorage(Player) then return end -- max storage
+	local inventoryFolder = getInventoryFolder(Player)
+	if not inventoryFolder then return end
+	if #inventoryFolder:GetChildren() + Amount > getInventoryStorageLimit(Player) then return end -- max storage
 
 	local EggInfo = ReplicatedStorage.Eggs:FindFirstChild(Egg)
 
@@ -67,16 +146,13 @@ Remotes.Egg.OnServerInvoke = function(Player, Egg, Amount)
 		local LuckMultiplier = Multipliers.GetLuckMultiplier(Player)
 
 		for i = 1, Amount do
-			local PetName = ChooseRandomPet(Egg, LuckMultiplier) 
+			local itemName = ChooseRandomPet(Egg, LuckMultiplier)
 
-			if not Player.Data.AutoDelete[PetName].Value then -- auto delete
-				local NewPet = game.ReplicatedStorage.Assets.PetTemplate:Clone()
-				NewPet.Name = RandomID(Player.Data.Pets)
-				NewPet.PetName.Value = PetName
-				NewPet.Parent = Player.Data.Pets
+			if not shouldAutoDelete(Player, itemName) then -- auto delete
+				createInventoryToy(Player, itemName)
 			end
 
-			Results[i] = PetName
+			Results[i] = itemName
 		end
 
 		return Results
