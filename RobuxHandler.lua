@@ -158,9 +158,18 @@ local function GetPet(SelectedEgg)
 	end
 end
 
+local function resolveRewardItemType(itemName)
+	local accessoriesFolder = ReplicatedStorage:FindFirstChild("Accessories")
+	if accessoriesFolder and accessoriesFolder:FindFirstChild(itemName) then
+		return "Accessory"
+	end
+	return "Toy"
+end
+
 local function GetRobuxEgg(Player, Egg)
 	local EggInfo = ReplicatedStorage.Eggs[Egg]
-	local ChosenPet = GetPet(EggInfo.Pets)
+	local dropsFolder = EggInfo and (EggInfo:FindFirstChild("Pets") or EggInfo:FindFirstChild("Items"))
+	local ChosenPet = dropsFolder and GetPet(dropsFolder) or nil
 	if ChosenPet ~= nil then
 		Player.NonSaveValues.IsOpeningEgg.Value = true
 		coroutine.wrap(function()
@@ -168,7 +177,7 @@ local function GetRobuxEgg(Player, Egg)
 			Player.NonSaveValues.IsOpeningEgg.Value = false
 		end)()
 		ReplicatedStorage.Remotes.Egg:InvokeClient(Player, Egg, ChosenPet, 0)
-		return ChosenPet
+		return ChosenPet, resolveRewardItemType(ChosenPet)
 	end
 end
 
@@ -180,12 +189,14 @@ function RandomID(Folder)
 	return Chance
 end
 
-local function createInventoryToy(player, toyName)
+local function createInventoryToy(player, toyName, itemTypeRaw)
 	local data = player and player:FindFirstChild("Data")
-	local inventoryFolder = data and data:FindFirstChild("Toys")
+	local itemType = tostring(itemTypeRaw or resolveRewardItemType(toyName))
+	local folderName = itemType == "Accessory" and "Accessories" or "Toys"
+	local inventoryFolder = data and data:FindFirstChild(folderName)
 	if data and not inventoryFolder then
 		inventoryFolder = Instance.new("Folder")
-		inventoryFolder.Name = "Toys"
+		inventoryFolder.Name = folderName
 		inventoryFolder.Parent = data
 	end
 	if not inventoryFolder then return end
@@ -201,40 +212,13 @@ local function createInventoryToy(player, toyName)
 
 	local itemTypeValue = Instance.new("StringValue")
 	itemTypeValue.Name = "ItemType"
-	itemTypeValue.Value = "Toy"
+	itemTypeValue.Value = itemType
 	itemTypeValue.Parent = newItem
 
 	local equippedValue = Instance.new("BoolValue")
 	equippedValue.Name = "Equipped"
 	equippedValue.Value = false
 	equippedValue.Parent = newItem
-
-	local playerData = data and data:FindFirstChild("PlayerData")
-	local jsonValue = playerData and playerData:FindFirstChild("ToyInventoryJson")
-	if jsonValue and jsonValue:IsA("StringValue") then
-		local httpService = game:GetService("HttpService")
-		task.defer(function()
-			local payload = {}
-			for _, toyFolder in ipairs(inventoryFolder:GetChildren()) do
-				local itemName = toyFolder:FindFirstChild("ItemName")
-				if itemName and itemName.Value ~= "" then
-					local equipped = toyFolder:FindFirstChild("Equipped")
-					table.insert(payload, {
-						id = tostring(toyFolder.Name),
-						itemName = tostring(itemName.Value),
-						itemType = "Toy",
-						equipped = equipped and equipped.Value == true or false,
-					})
-				end
-			end
-			local ok, encoded = pcall(function()
-				return httpService:JSONEncode(payload)
-			end)
-			if ok then
-				jsonValue.Value = encoded
-			end
-		end)
-	end
 end
 
 MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
@@ -266,10 +250,13 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 		if not EggInfo:FindFirstChild("ProductId") then continue end
 
 		if tonumber(EggInfo.ProductId.Value) == ReceiptInfo.ProductId then
-			local PetChosen = GetRobuxEgg(Player, EggInfo.Name)	-- this selects a random item from the egg
+			local PetChosen, itemType = GetRobuxEgg(Player, EggInfo.Name)	-- this selects a random item from the egg
+			if not PetChosen then
+				return Enum.ProductPurchaseDecision.NotProcessedYet
+			end
 
 			--// Create Toy Inventory Item
-			createInventoryToy(Player, PetChosen)
+			createInventoryToy(Player, PetChosen, itemType)
 
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
