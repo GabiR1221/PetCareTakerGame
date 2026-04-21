@@ -21,6 +21,11 @@ end
 local IsClosing = false -- so it doesnt ruin the animation
 
 local function getDisplayTemplate(itemName)
+	local accessories = ReplicatedStorage:FindFirstChild("Accessories")
+	if accessories and accessories:FindFirstChild(itemName) then
+		return accessories[itemName]
+	end
+
 	local toys = ReplicatedStorage:FindFirstChild("Toys")
 	if toys and toys:FindFirstChild(itemName) then
 		return toys[itemName]
