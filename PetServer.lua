@@ -106,6 +106,19 @@ local function getToysFolder(player)
 	return toysFolder
 end
 
+local function getAccessoriesFolder(player)
+	if not player then return nil end
+	local data = player:FindFirstChild("Data")
+	if not data then return nil end
+	local accessoriesFolder = data:FindFirstChild("Accessories")
+	if not accessoriesFolder then
+		accessoriesFolder = Instance.new("Folder")
+		accessoriesFolder.Name = "Accessories"
+		accessoriesFolder.Parent = data
+	end
+	return accessoriesFolder
+end
+
 local function ensureToyEquippedValue(toyFolder)
 	if not toyFolder then return nil end
 	local equipped = toyFolder:FindFirstChild("Equipped")
@@ -149,21 +162,28 @@ end
 
 local function serializeToyInventory(player)
 	local toysFolder = getToysFolder(player)
-	if not toysFolder then return "[]" end
+	local accessoriesFolder = getAccessoriesFolder(player)
+	if not toysFolder and not accessoriesFolder then return "[]" end
 
 	local payload = {}
-	for _, toyFolder in ipairs(toysFolder:GetChildren()) do
-		local toyName = getToyNameFromFolder(toyFolder)
-		if toyName and toyName ~= "" then
-			local equipped = ensureToyEquippedValue(toyFolder)
-			table.insert(payload, {
-				id = tostring(toyFolder.Name),
-				itemName = tostring(toyName),
-				itemType = "Toy",
-				equipped = equipped and equipped.Value == true or false,
-			})
+	local function appendFolder(folder, itemType)
+		if not folder then return end
+		for _, itemFolder in ipairs(folder:GetChildren()) do
+			local toyName = getToyNameFromFolder(itemFolder)
+			if toyName and toyName ~= "" then
+				local equipped = ensureToyEquippedValue(itemFolder)
+				table.insert(payload, {
+					id = tostring(itemFolder.Name),
+					itemName = tostring(toyName),
+					itemType = itemType,
+					equipped = equipped and equipped.Value == true or false,
+				})
+			end
 		end
 	end
+
+	appendFolder(toysFolder, "Toy")
+	appendFolder(accessoriesFolder, "Accessory")
 
 	local ok, encoded = pcall(function()
 		return HttpService:JSONEncode(payload)
@@ -176,16 +196,27 @@ local function serializeToyInventory(player)
 	return encoded
 end
 
-local function saveToyInventoryJson(player)
-	local jsonValue = getToyInventoryJsonValue(player)
-	if not jsonValue then return end
-	jsonValue.Value = serializeToyInventory(player)
+local function resolveInventoryTargetFolder(player, itemName, rawItemType)
+	local itemType = tostring(rawItemType or "")
+	if itemType == "Accessory" then
+		return getAccessoriesFolder(player), "Accessory"
+	end
+	if itemType == "Toy" then
+		return getToysFolder(player), "Toy"
+	end
+
+	local accessoriesFolder = game:GetService("ReplicatedStorage"):FindFirstChild("Accessories")
+	if accessoriesFolder and itemName and accessoriesFolder:FindFirstChild(tostring(itemName)) then
+		return getAccessoriesFolder(player), "Accessory"
+	end
+	return getToysFolder(player), "Toy"
 end
 
 local function hydrateToyInventoryFromJson(player)
 	local toysFolder = getToysFolder(player)
+	local accessoriesFolder = getAccessoriesFolder(player)
 	local jsonValue = getToyInventoryJsonValue(player)
-	if not toysFolder or not jsonValue then return end
+	if not toysFolder or not accessoriesFolder or not jsonValue then return end
 	if type(jsonValue.Value) ~= "string" or jsonValue.Value == "" then return end
 
 	local ok, decoded = pcall(function()
@@ -196,35 +227,53 @@ local function hydrateToyInventoryFromJson(player)
 		return
 	end
 
-	if #toysFolder:GetChildren() > 0 then
+	if #toysFolder:GetChildren() > 0 or #accessoriesFolder:GetChildren() > 0 then
 		return -- existing folder data already loaded by datastore; don't overwrite
 	end
 
 	for _, entry in ipairs(decoded) do
 		if type(entry) == "table" and type(entry.itemName) == "string" and entry.itemName ~= "" then
+			local targetFolder, itemType = resolveInventoryTargetFolder(player, entry.itemName, entry.itemType)
+			if not targetFolder then
+				continue
+			end
 			local toyFolder = Instance.new("Folder")
 			toyFolder.Name = tostring(entry.id or tostring(math.random(10000, 99999)))
-			toyFolder.Parent = toysFolder
+			toyFolder.Parent = targetFolder
 
 			local itemName = Instance.new("StringValue")
 			itemName.Name = "ItemName"
 			itemName.Value = entry.itemName
 			itemName.Parent = toyFolder
 
-			local itemType = Instance.new("StringValue")
-			itemType.Name = "ItemType"
-			itemType.Value = "Toy"
-			itemType.Parent = toyFolder
+			local itemTypeValue = Instance.new("StringValue")
+			itemTypeValue.Name = "ItemType"
+			itemTypeValue.Value = itemType
+			itemTypeValue.Parent = toyFolder
 
 			local equipped = ensureToyEquippedValue(toyFolder)
-			equipped.Value = entry.equipped == true
+			equipped.Value = (itemType == "Toy") and entry.equipped == true or false
 		end
 	end
+end
+
+local function saveToyInventoryJson(player)
+	local jsonValue = getToyInventoryJsonValue(player)
+	if not jsonValue then return end
+	jsonValue.Value = serializeToyInventory(player)
 end
 
 local function setEquippedToy(player, toyId)
 	local toysFolder = getToysFolder(player)
 	if not toysFolder then return end
+
+	local targetToyFolder = toysFolder:FindFirstChild(tostring(toyId))
+	if targetToyFolder then
+		local itemType = targetToyFolder:FindFirstChild("ItemType")
+		if itemType and tostring(itemType.Value) ~= "Toy" then
+			return
+		end
+	end
 
 	local equippedToyName = ""
 	for _, toyFolder in ipairs(toysFolder:GetChildren()) do
@@ -272,7 +321,7 @@ local function resolvePlayerTycoon(player)
 	local serverPlayerData = ServerStorage:FindFirstChild("PlayerData")
 	local playerFolder = serverPlayerData and serverPlayerData:FindFirstChild(tostring(player.UserId))
 	local tycoonValue = playerFolder and playerFolder:FindFirstChild("Tycoon")
-	if tycoonValue and tycoonValue:IsA("ObjectValue") and tycoonValue.Value and tycoonValue.Value:IsA("Model") then
+	if tycoonValue and tycoonValue:IsA("ObjectValue") and tycoonValue.Value and (tycoonValue.Value:IsA("Model") or tycoonValue.Value:IsA("Folder")) then
 		return tycoonValue.Value
 	end
 
@@ -280,7 +329,7 @@ local function resolvePlayerTycoon(player)
 		local root = workspace:FindFirstChild(containerName)
 		if root then
 			for _, model in ipairs(root:GetDescendants()) do
-				if not model:IsA("Model") then continue end
+				if not (model:IsA("Model") or model:IsA("Folder")) then continue end
 				if not model:FindFirstChild("Essentials") then continue end
 				local ownerAttr = model:GetAttribute("OwnerId") or model:GetAttribute("Owner") or model:GetAttribute("OwnerUserId")
 				if ownerAttr and tostring(ownerAttr) == tostring(player.UserId) then
@@ -354,13 +403,17 @@ local function syncEquippedToyInTycoon(player)
 	clone:SetAttribute("ToyType", equippedToyName)
 	setToyAnchoredNoCollide(clone)
 
-	local spawnPart = essentials:FindFirstChild("ToySpawn") or essentials:FindFirstChild("PetWanderZone")
+	local spawnPart = essentials:FindFirstChild("ToySpawn", true) or essentials:FindFirstChild("PetWanderZone", true)
 	if spawnPart and spawnPart:IsA("BasePart") then
 		if clone:IsA("Model") then
 			clone:PivotTo(spawnPart.CFrame + Vector3.new(0, 1.5, 0))
 		elseif clone:IsA("BasePart") then
 			clone.CFrame = spawnPart.CFrame + Vector3.new(0, 1.5, 0)
 		end
+	elseif clone:IsA("Model") then
+		clone:PivotTo(essentials:GetPivot() + Vector3.new(0, 1.5, 0))
+	elseif clone:IsA("BasePart") then
+		clone.CFrame = essentials:GetPivot() + Vector3.new(0, 1.5, 0)
 	end
 
 	clone.Parent = essentials
@@ -743,6 +796,15 @@ Players.PlayerAdded:Connect(function(Player)
 			task.defer(saveToyInventoryJson, Player)
 		end)
 		toysFolder.ChildRemoved:Connect(function()
+			task.defer(saveToyInventoryJson, Player)
+		end)
+	end
+	local accessoriesFolder = getAccessoriesFolder(Player)
+	if accessoriesFolder then
+		accessoriesFolder.ChildAdded:Connect(function()
+			task.defer(saveToyInventoryJson, Player)
+		end)
+		accessoriesFolder.ChildRemoved:Connect(function()
 			task.defer(saveToyInventoryJson, Player)
 		end)
 	end
