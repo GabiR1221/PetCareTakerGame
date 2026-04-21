@@ -5,6 +5,7 @@ return {
 		"NonSaveValues",
 		"Gamepasses",
 		"Pets",
+		"Toys",
 		"AutoDelete",
 	},
 	
@@ -26,6 +27,8 @@ return {
 			{Name = "GemUpgrade2", Value = 0, ID = 8, Type = "IntValue"},
 			{Name = "GemUpgrade3", Value = 0, ID = 11, Type = "IntValue"},
 			{Name = "GemUpgrade4", Value = 0, ID = 12, Type = "IntValue"},
+			{Name = "GemUpgrade5", Value = 0, ID = 13, Type = "IntValue"},
+			{Name = "ToyInventoryJson", Value = "", ID = 14, Type = "StringValue"},
 		},
 		
 		["Gamepasses"] = {
