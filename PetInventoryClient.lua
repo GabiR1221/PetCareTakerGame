@@ -15,6 +15,7 @@ local CanDeletePets = false
 local CachedPetStateByKey = {}
 local SellSlotByPetId = {}
 local OpenSellFramePetId = nil
+local SideFramePetBarsVisible = true
 
 local function setSideFrameOpen(isOpen)
 	if not SideFrame then return end
@@ -30,6 +31,7 @@ local function setSideFrameOpen(isOpen)
 		end
 	end
 end
+
 
 setSideFrameOpen(false)
 
@@ -98,6 +100,100 @@ local CurrentlySelected = 0
 
 local getSelectedPetKeys
 local updateSideFrameState
+local findSideFrameObject
+local getPrimaryPartForDisplay
+local getDisplaySize
+
+local function clearSideFrameDisplayModel()
+	if not SideFrame or not SideFrame:FindFirstChild("Display") then return end
+	for _, child in ipairs(SideFrame.Display:GetChildren()) do
+		if child:IsA("Model") or child:IsA("BasePart") then
+			child:Destroy()
+		end
+	end
+end
+
+local function setPetBarsVisible(visible)
+	if SideFramePetBarsVisible == visible then return end
+	SideFramePetBarsVisible = visible
+	for _, name in ipairs({
+		"hungerbarfill", "wetbarfill", "dirtbarfill", "happinessbarfill", "xpbarfill",
+		"HungerBarFill", "WetBarFill", "DirtBarFill", "HappinessBarFill", "XPBarFill",
+		"hungerbar", "wetbar", "dirtbar", "happinessbar", "xpbar",
+		"HungerBar", "WetBar", "DirtBar", "HappinessBar", "XPBar",
+		"Multiplier",
+		}) do
+		local obj = findSideFrameObject(name)
+		if obj and obj:IsA("GuiObject") then
+			obj.Visible = visible
+		end
+	end
+end
+
+local function setSideFrameInfoLabel(text)
+	local info = findSideFrameObject("InfoLabelExtra")
+	if info and info:IsA("TextLabel") then
+		info.Text = tostring(text or "")
+		info.Visible = info.Text ~= ""
+	end
+end
+
+local function getItemInfoText(itemFolder, template)
+	local folderInfoValue = itemFolder and (itemFolder:FindFirstChild("Info") or itemFolder:FindFirstChild("Description"))
+	if folderInfoValue and folderInfoValue:IsA("StringValue") and folderInfoValue.Value ~= "" then
+		return folderInfoValue.Value
+	end
+	local folderAttrInfo = itemFolder and (itemFolder:GetAttribute("InfoLabelExtra") or itemFolder:GetAttribute("Info") or itemFolder:GetAttribute("Description"))
+	if type(folderAttrInfo) == "string" and folderAttrInfo ~= "" then
+		return folderAttrInfo
+	end
+	local templateInfo = template and (template:GetAttribute("InfoLabelExtra") or template:GetAttribute("Info") or template:GetAttribute("Description"))
+	if type(templateInfo) == "string" and templateInfo ~= "" then
+		return templateInfo
+	end
+	return ""
+end
+
+local function showInventoryItemSideFrame(itemName, template, infoText)
+	setSideFrameOpen(true)
+	setPetBarsVisible(false)
+	clearSideFrameDisplayModel()
+
+	if SideFrame:FindFirstChild("Title") then
+		SideFrame.Title.Visible = true
+	end
+	if SideFrame:FindFirstChild("Multiplier") and SideFrame.Multiplier:FindFirstChild("Amount") then
+		SideFrame.Multiplier.Amount.Text = ""
+	end
+	setSideFrameInfoLabel(infoText)
+
+	local titleLabel = findSideFrameObject("Title")
+	if titleLabel and titleLabel:IsA("TextLabel") then
+		titleLabel.Text = tostring(itemName or "Item")
+	end
+
+	if not template or not SideFrame:FindFirstChild("Display") then
+		return
+	end
+
+	local model = template:Clone()
+	model.Name = "PetModel"
+	model.Parent = SideFrame.Display
+	local mainPart = getPrimaryPartForDisplay(model)
+	if not mainPart then
+		model:Destroy()
+		return
+	end
+	local pos = mainPart.Position
+	local camera = Instance.new("Camera")
+	SideFrame.Display.CurrentCamera = camera
+	if model:IsA("Model") then
+		model:PivotTo(model:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
+	else
+		model.CFrame = model.CFrame * CFrame.Angles(0, math.rad(180), 0)
+	end
+	camera.CFrame = CFrame.new(Vector3.new(pos.X + getDisplaySize(model).X * 1.5, pos.Y, pos.Z + 1), pos)
+end
 
 local function findDescendantByNameInsensitive(root, targetName)
 	if not root or not targetName then return nil end
@@ -110,7 +206,7 @@ local function findDescendantByNameInsensitive(root, targetName)
 	return nil
 end
 
-local function findSideFrameObject(name)
+findSideFrameObject = function(name)
 	return SideFrame:FindFirstChild(name) or findDescendantByNameInsensitive(SideFrame, name)
 end
 
@@ -296,6 +392,8 @@ end
 
 function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pets
 	CurrentlySelected = tonumber(PetInstance.Name)
+	setPetBarsVisible(true)
+	setSideFrameInfoLabel("")
 	setSideFrameOpen(true)
 	
 	if SideFrame:FindFirstChild("Title") then
@@ -583,10 +681,11 @@ local function resolveToyFrameRoot()
 end
 
 local ToySlotById = {}
+local ToyFolderConnections = {}
 
 local function getToyStorageFolder()
 	if not Data then return nil end
-	return Data:FindFirstChild("Toys") or Data:FindFirstChild("Pets")
+	return Data:FindFirstChild("Toys")
 end
 
 local function getToyNameFromFolder(toyFolder)
@@ -612,6 +711,10 @@ local function getToyTemplate(toyName)
 	if toysFolder and toysFolder:FindFirstChild(toyName) then
 		return toysFolder[toyName]
 	end
+	local accessoriesFolder = ReplicatedStorage:FindFirstChild("Accessories")
+	if accessoriesFolder and accessoriesFolder:FindFirstChild(toyName) then
+		return accessoriesFolder[toyName]
+	end
 	local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
 	if petsFolder and petsFolder:FindFirstChild(toyName) then
 		return petsFolder[toyName]
@@ -626,7 +729,15 @@ local function getToysObjectHolder()
 	return toysMainFrame:FindFirstChild("ObjectHolder")
 end
 
-local function getPrimaryPartForDisplay(instance)
+local function getAccessoriesObjectHolder()
+	local petsFrame = resolveToyFrameRoot()
+	local accessoriesMainFrame = petsFrame and petsFrame:FindFirstChild("AccessoriesMainFrame")
+	if not accessoriesMainFrame then return nil end
+	return accessoriesMainFrame:FindFirstChild("ObjectHolder")
+end
+
+
+getPrimaryPartForDisplay = function(instance)
 	if not instance then return nil end
 	if instance:IsA("BasePart") then
 		return instance
@@ -637,7 +748,7 @@ local function getPrimaryPartForDisplay(instance)
 	return nil
 end
 
-local function getDisplaySize(instance)
+getDisplaySize = function(instance)
 	if not instance then return Vector3.new(2, 2, 2) end
 	if instance:IsA("Model") then
 		return instance:GetExtentsSize()
@@ -652,6 +763,8 @@ local function createToySlot(toyFolder)
 	local objectHolder = getToysObjectHolder()
 	if not objectHolder or not toyFolder then return end
 	if objectHolder:FindFirstChild(toyFolder.Name) then return end
+	local itemType = toyFolder:FindFirstChild("ItemType")
+	if itemType and tostring(itemType.Value) ~= "Toy" then return end
 
 	local toyName = getToyNameFromFolder(toyFolder)
 	if not toyName then return end
@@ -700,16 +813,18 @@ local function createToySlot(toyFolder)
 	local equippedValue = toyFolder:FindFirstChild("Equipped")
 	if equippedValue and newSlot:FindFirstChild("Equipped") then
 		newSlot.Equipped.Visible = equippedValue.Value == true
-		equippedValue.Changed:Connect(function()
+		ToyFolderConnections[toyFolder] = ToyFolderConnections[toyFolder] or {}
+		table.insert(ToyFolderConnections[toyFolder], equippedValue.Changed:Connect(function()
 			if newSlot and newSlot.Parent and newSlot:FindFirstChild("Equipped") then
 				newSlot.Equipped.Visible = equippedValue.Value == true
 			end
-		end)
+		end))
 	end
 
 	if newSlot:FindFirstChild("Button") and newSlot.Button:IsA("GuiButton") then
 		newSlot.Button.MouseButton1Click:Connect(function()
 			Remotes.Pet:FireServer("EquipToy", tostring(toyFolder.Name))
+			showInventoryItemSideFrame(toyName, toyTemplate, getItemInfoText(toyFolder, toyTemplate))
 			Utilities.Audio.PlayAudio("Click")
 		end)
 	end
@@ -717,11 +832,122 @@ end
 
 local function removeToySlot(toyFolder)
 	if not toyFolder then return end
+	if ToyFolderConnections[toyFolder] then
+		for _, conn in ipairs(ToyFolderConnections[toyFolder]) do
+			if conn and conn.Disconnect then
+				conn:Disconnect()
+			end
+		end
+		ToyFolderConnections[toyFolder] = nil
+	end
 	local holder = getToysObjectHolder()
 	if holder and holder:FindFirstChild(toyFolder.Name) then
 		holder[toyFolder.Name]:Destroy()
 	end
 	ToySlotById[toyFolder.Name] = nil
+end
+
+local AccessorySlotById = {}
+local AccessoryFolderConnections = {}
+
+local function getAccessoryStorageFolder()
+	if not Data then return nil end
+	return Data:FindFirstChild("Accessories")
+end
+
+local function getAccessoryTemplate(itemName)
+	if not itemName then return nil end
+	local accessoriesFolder = ReplicatedStorage:FindFirstChild("Accessories")
+	if accessoriesFolder and accessoriesFolder:FindFirstChild(itemName) then
+		return accessoriesFolder[itemName]
+	end
+	return nil
+end
+
+local function createAccessorySlot(accessoryFolder)
+	local objectHolder = getAccessoriesObjectHolder()
+	if not objectHolder or not accessoryFolder then return end
+	if objectHolder:FindFirstChild(accessoryFolder.Name) then return end
+	local itemType = accessoryFolder:FindFirstChild("ItemType")
+	if itemType and tostring(itemType.Value) ~= "Accessory" then return end
+
+	local itemNameValue = accessoryFolder:FindFirstChild("ItemName")
+	local itemName = itemNameValue and tostring(itemNameValue.Value) or ""
+	if itemName == "" then return end
+
+	local template = getAccessoryTemplate(itemName)
+	if not template then
+		warn(("[AccessoryInventory] Missing accessory template for '%s'"):format(itemName))
+		return
+	end
+
+	local slotTemplate = script:FindFirstChild("PetTemplate")
+	if not slotTemplate then return end
+
+	local newSlot = slotTemplate:Clone()
+	newSlot.Name = accessoryFolder.Name
+	newSlot.Parent = objectHolder
+	AccessorySlotById[accessoryFolder.Name] = newSlot
+
+	local titleLabel = newSlot:FindFirstChild("Name") or newSlot:FindFirstChild("Title")
+	if titleLabel and titleLabel:IsA("TextLabel") then
+		titleLabel.Text = itemName
+	end
+
+	local model = template:Clone()
+	model.Parent = newSlot.Display
+	local mainPart = getPrimaryPartForDisplay(model)
+	if not mainPart then
+		newSlot:Destroy()
+		AccessorySlotById[accessoryFolder.Name] = nil
+		return
+	end
+
+	local pos = mainPart.Position
+	local camera = Instance.new("Camera")
+	newSlot.Display.CurrentCamera = camera
+	if model:IsA("Model") then
+		model:PivotTo(model:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
+	else
+		model.CFrame = model.CFrame * CFrame.Angles(0, math.rad(180), 0)
+	end
+	camera.CFrame = CFrame.new(Vector3.new(pos.X + getDisplaySize(model).X * 1.5, pos.Y, pos.Z + 1), pos)
+
+	local equippedValue = accessoryFolder:FindFirstChild("Equipped")
+	if equippedValue and newSlot:FindFirstChild("Equipped") then
+		newSlot.Equipped.Visible = equippedValue.Value == true
+		AccessoryFolderConnections[accessoryFolder] = AccessoryFolderConnections[accessoryFolder] or {}
+		table.insert(AccessoryFolderConnections[accessoryFolder], equippedValue.Changed:Connect(function()
+			if newSlot and newSlot.Parent and newSlot:FindFirstChild("Equipped") then
+				newSlot.Equipped.Visible = equippedValue.Value == true
+			end
+		end))
+	elseif newSlot:FindFirstChild("Equipped") then
+		newSlot.Equipped.Visible = false
+	end
+	if newSlot:FindFirstChild("Button") and newSlot.Button:IsA("GuiButton") then
+		newSlot.Button.MouseButton1Click:Connect(function()
+			showInventoryItemSideFrame(itemName, template, getItemInfoText(accessoryFolder, template))
+			Utilities.Audio.PlayAudio("Click")
+		end)
+	end
+end
+
+local function removeAccessorySlot(accessoryFolder)
+	if not accessoryFolder then return end
+	if AccessoryFolderConnections[accessoryFolder] then
+		for _, conn in ipairs(AccessoryFolderConnections[accessoryFolder]) do
+			if conn and conn.Disconnect then
+				conn:Disconnect()
+			end
+		end
+		AccessoryFolderConnections[accessoryFolder] = nil
+	end
+	local holder = getAccessoriesObjectHolder()
+	if holder and holder:FindFirstChild(accessoryFolder.Name) then
+		holder[accessoryFolder.Name]:Destroy()
+	end
+	AccessorySlotById[accessoryFolder.Name] = nil
 end
 
 local function wirePetsToysMenu()
@@ -730,15 +956,27 @@ local function wirePetsToysMenu()
 
 	local mainFrame = petsFrame:FindFirstChild("MainFrame")
 	local toysFrame = petsFrame:FindFirstChild("ToysMainFrame")
+	local accessoriesFrame = petsFrame:FindFirstChild("AccessoriesMainFrame")
 	local menusHolder = petsFrame:FindFirstChild("OtherMenusHolder")
 	if not mainFrame or not toysFrame or not menusHolder then return end
 
 	local petsButton = menusHolder:FindFirstChild("PetsButton")
 	local toysButton = menusHolder:FindFirstChild("ToysButton")
+	local accessoriesButton = menusHolder:FindFirstChild("AccessoriesButton")
 
 	local function showFrame(frameName)
+		if frameName ~= "Pets" then
+			CurrentlySelected = 0
+			showInventoryItemSideFrame(frameName == "Toys" and "Toys" or "Accessories", nil, "Select an item to see more details.")
+		else
+			setPetBarsVisible(true)
+			setSideFrameInfoLabel("")
+		end
 		mainFrame.Visible = frameName == "Pets"
 		toysFrame.Visible = frameName == "Toys"
+		if accessoriesFrame then
+			accessoriesFrame.Visible = frameName == "Accessories"
+		end
 	end
 
 	showFrame("Pets") -- default view
@@ -758,10 +996,18 @@ local function wirePetsToysMenu()
 			Utilities.Audio.PlayAudio("Click")
 		end)
 	end
+
+	if accessoriesButton and accessoriesButton:IsA("GuiButton") and not accessoriesButton:GetAttribute("_Wired") then
+		accessoriesButton:SetAttribute("_Wired", true)
+		accessoriesButton.MouseButton1Click:Connect(function()
+			showFrame("Accessories")
+			Utilities.Audio.PlayAudio("Click")
+		end)
+	end
 end
 
-local toysFolder = getToyStorageFolder()
-if toysFolder then
+local function bindToysFolder(toysFolder)
+	if not toysFolder then return end
 	for _, toyFolder in ipairs(toysFolder:GetChildren()) do
 		coroutine.wrap(function()
 			createToySlot(toyFolder)
@@ -774,6 +1020,45 @@ if toysFolder then
 
 	toysFolder.ChildRemoved:Connect(function(child)
 		removeToySlot(child)
+	end)
+end
+
+local function bindAccessoriesFolder(accessoriesFolder)
+	if not accessoriesFolder then return end
+	for _, accessoryFolder in ipairs(accessoriesFolder:GetChildren()) do
+		coroutine.wrap(function()
+			createAccessorySlot(accessoryFolder)
+		end)()
+	end
+
+	accessoriesFolder.ChildAdded:Connect(function(child)
+		createAccessorySlot(child)
+	end)
+
+	accessoriesFolder.ChildRemoved:Connect(function(child)
+		removeAccessorySlot(child)
+	end)
+end
+
+local toysFolder = getToyStorageFolder()
+if toysFolder then
+	bindToysFolder(toysFolder)
+elseif Data then
+	Data.ChildAdded:Connect(function(child)
+		if child and child.Name == "Toys" and child:IsA("Folder") then
+			bindToysFolder(child)
+		end
+	end)
+end
+
+local accessoriesFolder = getAccessoryStorageFolder()
+if accessoriesFolder then
+	bindAccessoriesFolder(accessoriesFolder)
+elseif Data then
+	Data.ChildAdded:Connect(function(child)
+		if child and child.Name == "Accessories" and child:IsA("Folder") then
+			bindAccessoriesFolder(child)
+		end
 	end)
 end
 
