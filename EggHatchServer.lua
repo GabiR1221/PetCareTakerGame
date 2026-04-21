@@ -7,16 +7,33 @@ function RandomID(Folder)
 	return Chance
 end
 
-local function getInventoryFolder(player)
+local function getInventoryFolder(player, itemType)
 	local data = player and player:FindFirstChild("Data")
 	if not data then return nil end
-	local toysFolder = data:FindFirstChild("Toys")
-	if not toysFolder then
-		toysFolder = Instance.new("Folder")
-		toysFolder.Name = "Toys"
-		toysFolder.Parent = data
+	local folderName = (tostring(itemType) == "Accessory") and "Accessories" or "Toys"
+	local inventoryFolder = data:FindFirstChild(folderName)
+	if not inventoryFolder then
+		inventoryFolder = Instance.new("Folder")
+		inventoryFolder.Name = folderName
+		inventoryFolder.Parent = data
 	end
-	return toysFolder
+	return inventoryFolder
+end
+
+local function getTotalInventoryCount(player)
+	local data = player and player:FindFirstChild("Data")
+	if not data then return 0 end
+	local toys = data:FindFirstChild("Toys")
+	local accessories = data:FindFirstChild("Accessories")
+	return (toys and #toys:GetChildren() or 0) + (accessories and #accessories:GetChildren() or 0)
+end
+
+local function resolveItemType(itemName)
+	local accessoriesFolder = ReplicatedStorage:FindFirstChild("Accessories")
+	if accessoriesFolder and accessoriesFolder:FindFirstChild(itemName) then
+		return "Accessory"
+	end
+	return "Toy"
 end
 
 local function getInventoryStorageLimit(player)
@@ -33,8 +50,16 @@ local function shouldAutoDelete(player, itemName)
 	return entry and entry:IsA("BoolValue") and entry.Value == true
 end
 
-local function createInventoryToy(player, toyName)
-	local inventoryFolder = getInventoryFolder(player)
+local function createInventoryItem(player, itemNameRaw, itemTypeRaw)
+	local itemNameText = tostring(itemNameRaw or "")
+	if itemNameText == "" then return end
+
+	local itemType = tostring(itemTypeRaw or "")
+	if itemType == "" then
+		itemType = resolveItemType(itemNameText)
+	end
+
+	local inventoryFolder = getInventoryFolder(player, itemType)
 	if not inventoryFolder then return end
 
 	local newItem = Instance.new("Folder")
@@ -43,53 +68,35 @@ local function createInventoryToy(player, toyName)
 
 	local itemName = Instance.new("StringValue")
 	itemName.Name = "ItemName"
-	itemName.Value = tostring(toyName)
+	itemName.Value = itemNameText
 	itemName.Parent = newItem
 
-	local itemType = Instance.new("StringValue")
-	itemType.Name = "ItemType"
-	itemType.Value = "Toy"
-	itemType.Parent = newItem
+	local itemTypeValue = Instance.new("StringValue")
+	itemTypeValue.Name = "ItemType"
+	itemTypeValue.Value = tostring(itemTypeRaw or resolveItemType(itemNameText))
+	itemTypeValue.Parent = newItem
 
 	local equipped = Instance.new("BoolValue")
 	equipped.Name = "Equipped"
 	equipped.Value = false
 	equipped.Parent = newItem
-
-	local playerData = player and player:FindFirstChild("Data") and player.Data:FindFirstChild("PlayerData")
-	local jsonValue = playerData and playerData:FindFirstChild("ToyInventoryJson")
-	if jsonValue and jsonValue:IsA("StringValue") then
-		local httpService = game:GetService("HttpService")
-		task.defer(function()
-			local payload = {}
-			for _, toyFolder in ipairs(inventoryFolder:GetChildren()) do
-				local itemName = toyFolder:FindFirstChild("ItemName")
-				if itemName and itemName.Value ~= "" then
-					local equippedValue = toyFolder:FindFirstChild("Equipped")
-					table.insert(payload, {
-						id = tostring(toyFolder.Name),
-						itemName = tostring(itemName.Value),
-						itemType = "Toy",
-						equipped = equippedValue and equippedValue.Value == true or false,
-					})
-				end
-			end
-			local ok, encoded = pcall(function()
-				return httpService:JSONEncode(payload)
-			end)
-			if ok then
-				jsonValue.Value = encoded
-			end
-		end)
-	end
 end
 
 function ChooseRandomPet(Egg, LuckMultiplier)
 	local EggInfo = ReplicatedStorage.Eggs[Egg]
 	local Pets, TotalWeight = {}, 0
 
-	for _, Pet in EggInfo.Pets:GetChildren() do
-		table.insert(Pets, {Pet.Name, Pet.Value})
+	local dropsFolder = EggInfo and (EggInfo:FindFirstChild("Pets") or EggInfo:FindFirstChild("Items"))
+	if not dropsFolder then
+		return nil, nil
+	end
+
+	for _, Pet in dropsFolder:GetChildren() do
+		local itemType = Pet:GetAttribute("ItemType")
+		if not itemType and Pet:FindFirstChild("ItemType") then
+			itemType = Pet.ItemType.Value
+		end
+		table.insert(Pets, {Pet.Name, Pet.Value, tostring(itemType or resolveItemType(Pet.Name))})
 	end
 
 	table.sort(Pets, function(a,b)
@@ -111,16 +118,14 @@ function ChooseRandomPet(Egg, LuckMultiplier)
 		Counter += v[2]
 
 		if Counter >= Chance then
-			return v[1]
+			return v[1], v[3]
 		end
 	end
 end
 
 Remotes.Egg.OnServerInvoke = function(Player, Egg, Amount)
 	if Player.NonSaveValues.IsOpeningEgg.Value then return end -- cooldown
-	local inventoryFolder = getInventoryFolder(Player)
-	if not inventoryFolder then return end
-	if #inventoryFolder:GetChildren() + Amount > getInventoryStorageLimit(Player) then return end -- max storage
+	if getTotalInventoryCount(Player) + Amount > getInventoryStorageLimit(Player) then return end -- max storage
 
 	local EggInfo = ReplicatedStorage.Eggs:FindFirstChild(Egg)
 
@@ -146,10 +151,10 @@ Remotes.Egg.OnServerInvoke = function(Player, Egg, Amount)
 		local LuckMultiplier = Multipliers.GetLuckMultiplier(Player)
 
 		for i = 1, Amount do
-			local itemName = ChooseRandomPet(Egg, LuckMultiplier)
+			local itemName, itemType = ChooseRandomPet(Egg, LuckMultiplier)
 
-			if not shouldAutoDelete(Player, itemName) then -- auto delete
-				createInventoryToy(Player, itemName)
+			if itemName and not shouldAutoDelete(Player, itemName) then -- auto delete
+				createInventoryItem(Player, itemName, itemType)
 			end
 
 			Results[i] = itemName
