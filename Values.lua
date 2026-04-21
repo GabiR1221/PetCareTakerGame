@@ -6,6 +6,7 @@ return {
 		"Gamepasses",
 		"Pets",
 		"Toys",
+		"Accessories",
 		"AutoDelete",
 	},
 	
