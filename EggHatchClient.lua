@@ -20,6 +20,74 @@ end
 
 local IsClosing = false -- so it doesnt ruin the animation
 
+local function getDisplayTemplate(itemName)
+	local toys = ReplicatedStorage:FindFirstChild("Toys")
+	if toys and toys:FindFirstChild(itemName) then
+		return toys[itemName]
+	end
+
+	local pets = ReplicatedStorage:FindFirstChild("Pets")
+	if pets and pets:FindFirstChild(itemName) then
+		return pets[itemName]
+	end
+
+	return nil
+end
+
+local function getTemplateRarity(itemName)
+	local template = getDisplayTemplate(itemName)
+	local settings = template and template:FindFirstChild("Settings")
+	local rarity = settings and settings:FindFirstChild("Rarity")
+	return rarity and tostring(rarity.Value) or "Common"
+end
+
+local function getPrimaryPart(instance)
+	if not instance then return nil end
+	if instance:IsA("BasePart") then
+		return instance
+	end
+	if instance:IsA("Model") then
+		return instance:FindFirstChild("MainPart") or instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+local function getExtentsSize(instance)
+	if not instance then return Vector3.new(2, 2, 2) end
+	if instance:IsA("Model") then
+		return instance:GetExtentsSize()
+	end
+	if instance:IsA("BasePart") then
+		return instance.Size
+	end
+	return Vector3.new(2, 2, 2)
+end
+
+local function rotateForViewport(instance, yawDegrees)
+	local primary = getPrimaryPart(instance)
+	if not primary then return end
+	if instance:IsA("Model") then
+		instance:PivotTo(instance:GetPivot() * CFrame.Angles(0, math.rad(yawDegrees), 0))
+	else
+		instance.CFrame = instance.CFrame * CFrame.Angles(0, math.rad(yawDegrees), 0)
+	end
+end
+
+local function pivotToCamera(instance, camera, xValue, yValue, zValue, yawDegrees, rollDegrees)
+	if not instance or not camera then return end
+	local offset = CFrame.new(xValue, yValue, zValue)
+	local rotation = CFrame.Angles(math.rad(0), math.rad(yawDegrees or 0), math.rad(rollDegrees or 0))
+	if instance:IsA("Model") then
+		instance:PivotTo(camera:GetRenderCFrame() * offset * rotation)
+	else
+		local primary = getPrimaryPart(instance)
+		if primary then
+			primary.CFrame = camera:GetRenderCFrame() * offset * rotation
+		end
+	end
+end
+
+
 function FindEgg()
 	if not Player.Character:FindFirstChild("HumanoidRootPart") or not Player.Character:FindFirstChild("Humanoid") or Player.Character.Humanoid.Health == 0 then return end
 
@@ -84,7 +152,7 @@ function UpdatePreviewFrame()
 		PreviewFrame.Buttons.Triple.Visible = not IsRobuxEgg
 		PreviewFrame.Buttons.Auto.Visible = not IsRobuxEgg
 
-		--// This part gets the pet chances
+		--// This part gets the item chances
 		local Pets, TotalWeight = {}, 0
 
 		for _, Pet in EggInfo.Pets:GetChildren() do
@@ -112,18 +180,31 @@ function UpdatePreviewFrame()
 
 			if PetInfo == nil then continue end
 
-			PetSlot.Rarity.Text = ReplicatedStorage.Pets[PetInfo[1]].Settings.Rarity.Value
+			PetSlot.Rarity.Text = getTemplateRarity(PetInfo[1])
 			PetSlot.Percentage.Text = Utilities.Short.en(100/TotalWeight * PetInfo[2]).."%"
 			PetSlot.PetName.Value = PetInfo[1]
 
-			local PetModel = ReplicatedStorage.Pets[PetInfo[1]]:Clone()
+			local displayTemplate = getDisplayTemplate(PetInfo[1])
+			if not displayTemplate then
+				PetSlot.Visible = false
+				continue
+			end
+
+			local PetModel = displayTemplate:Clone()
 			PetModel.Parent = PetSlot.Pet
 
-			local Pos = PetModel.MainPart.Position
+			local mainPart = getPrimaryPart(PetModel)
+			if not mainPart then
+				PetSlot.Visible = false
+				PetModel:Destroy()
+				continue
+			end
+
+			local Pos = mainPart.Position
 			local Camera = Instance.new("Camera")
 			PetSlot.Pet.CurrentCamera = Camera
-			PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
-			Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
+			rotateForViewport(PetModel, 180)
+			Camera.CFrame = CFrame.new(Vector3.new(Pos.X + getExtentsSize(PetModel).X * 1.5, Pos.Y, Pos.Z + 1), Pos)
 		end
 	end
 end
@@ -177,11 +258,6 @@ function HatchEgg(Egg: string, Result: string, Offset:number)
 
 	local Eggdelay = 0.075
 	for i = 1,(OpeningTime * 1.5) + 1 do
-		local Tween = TweenService:Create(Rot, TweenInfo.new(Eggdelay, Enum.EasingStyle.Back), {Value = 6})
-		Tween:Play()
-		-- add an audio for rotating here
-		Tween.Completed:Wait()
-
 		local Tween = TweenService:Create(Rot, TweenInfo.new(Eggdelay, Enum.EasingStyle.Back), {Value = -6})
 		-- add an audio for rotating here
 		Tween:Play()
@@ -194,31 +270,54 @@ function HatchEgg(Egg: string, Result: string, Offset:number)
 	CameraConnection2:Disconnect()	
 	Clone:Destroy()	
 
-	-- Now we're going to show the pet
+	-- Now we're going to show the hatched item
 
-	local PetModel = game.ReplicatedStorage.Pets[Result]:Clone()
-	PetModel:ScaleTo(0.6)
+	local hatchedTemplate = getDisplayTemplate(Result)
+	if not hatchedTemplate then
+		warn(("[EggHatchClient] Missing toy/pet template for '%s'"):format(tostring(Result)))
+		NewViewport:Destroy()
+		Player.CameraMinZoomDistance = 0.5
+		UI[GameSettings.ButtonSide.Value].Buttons.Visible = true
+		Frames.Visible = true
+		return
+	end
+
+	local PetModel = hatchedTemplate:Clone()
+	if PetModel:IsA("Model") then
+		PetModel:ScaleTo(0.6)
+	end
 	PetModel.Parent = workspace
+	local petMainPart = getPrimaryPart(PetModel)
+	if not petMainPart then
+		warn(("[EggHatchClient] Hatched toy '%s' has no BasePart/MainPart"):format(tostring(Result)))
+		PetModel:Destroy()
+		NewViewport:Destroy()
+		Player.CameraMinZoomDistance = 0.5
+		UI[GameSettings.ButtonSide.Value].Buttons.Visible = true
+		Frames.Visible = true
+		return
+	end
 
-	NewViewport.Deleted.Visible = Data.AutoDelete[Result].Value
+	local autoDeleteValue = Data.AutoDelete:FindFirstChild(Result)
+	NewViewport.Deleted.Visible = autoDeleteValue and autoDeleteValue.Value or false
 	NewViewport.PetName.Text = Result
 	NewViewport.PetName.Visible = true
-	NewViewport.PetRarity.Text = game.ReplicatedStorage.Pets[Result].Settings.Rarity.Value
+	NewViewport.PetRarity.Text = getTemplateRarity(Result)
 	NewViewport.PetRarity.Visible = true
 
 	local PL = Instance.new("PointLight")
 	PL.Shadows = false PL.Range = 4 PL.Brightness *= 2
-	PL.Parent = PetModel.MainPart
+	PL.Parent = petMainPart
 
 	X.Value = Offset Y.Value = 0 Z.Value = -4 Rot.Value = 175
 	local CameraConnection1 = RunService.Heartbeat:Connect(function()
 		local X, Y, Z = X.Value, Y.Value, Z.Value
-		PetModel:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z) * CFrame.Angles(0, math.rad(Rot.Value), 0))
+		pivotToCamera(PetModel, Camera, X, Y, Z, Rot.Value, 0)
 	end)
 
 	local CameraConnection2 = Camera:GetPropertyChangedSignal("CFrame"):Connect(function()
 		local X, Y, Z = X.Value, Y.Value, Z.Value
-		PetModel:PivotTo(Camera:GetRenderCFrame()*CFrame.new(X,Y,Z) * CFrame.Angles(0, math.rad(Rot.Value), 0))
+		pivotToCamera(PetModel, Camera, X, Y, Z, Rot.Value, 0)
 	end)
 
 	task.wait(OpeningTime*0.25)
