@@ -2,11 +2,21 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+local ServerStorage = game:GetService("ServerStorage")
 
 --// Variables
 local GameSettings = ReplicatedStorage["Game Settings"]
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local Modules = ReplicatedStorage.Modules
+local TycoonUtils
+do
+	local ok, result = pcall(function()
+		return require(script.Parent:WaitForChild("PetSystem"):WaitForChild("Modules"):WaitForChild("TycoonUtils"))
+	end)
+	if ok then
+		TycoonUtils = result
+	end
+end
 
 local Multipliers = require(Modules.Multipliers)
 local PetMultipliers = require(Modules.PetMultipliers)
@@ -83,6 +93,297 @@ local function canSellPetFromSource(player, options)
 	return canDeleteFromSellRing(player)
 end
 
+local function getToysFolder(player)
+	if not player then return nil end
+	local data = player:FindFirstChild("Data")
+	if not data then return nil end
+	local toysFolder = data:FindFirstChild("Toys")
+	if not toysFolder then
+		toysFolder = Instance.new("Folder")
+		toysFolder.Name = "Toys"
+		toysFolder.Parent = data
+	end
+	return toysFolder
+end
+
+local function ensureToyEquippedValue(toyFolder)
+	if not toyFolder then return nil end
+	local equipped = toyFolder:FindFirstChild("Equipped")
+	if not equipped then
+		equipped = Instance.new("BoolValue")
+		equipped.Name = "Equipped"
+		equipped.Value = false
+		equipped.Parent = toyFolder
+	end
+	return equipped
+end
+
+local function getToyNameFromFolder(toyFolder)
+	if not toyFolder then return nil end
+	local itemName = toyFolder:FindFirstChild("ItemName")
+	if itemName and type(itemName.Value) == "string" and itemName.Value ~= "" then
+		return itemName.Value
+	end
+	local petName = toyFolder:FindFirstChild("PetName")
+	if petName and type(petName.Value) == "string" and petName.Value ~= "" then
+		return petName.Value
+	end
+	return nil
+end
+
+local function getToyInventoryJsonValue(player)
+	local data = player and player:FindFirstChild("Data")
+	local playerData = data and data:FindFirstChild("PlayerData")
+	if not playerData then return nil end
+
+	local jsonValue = playerData:FindFirstChild("ToyInventoryJson")
+	if not jsonValue then
+		jsonValue = Instance.new("StringValue")
+		jsonValue.Name = "ToyInventoryJson"
+		jsonValue.Value = ""
+		jsonValue.Parent = playerData
+	end
+
+	return jsonValue
+end
+
+local function serializeToyInventory(player)
+	local toysFolder = getToysFolder(player)
+	if not toysFolder then return "[]" end
+
+	local payload = {}
+	for _, toyFolder in ipairs(toysFolder:GetChildren()) do
+		local toyName = getToyNameFromFolder(toyFolder)
+		if toyName and toyName ~= "" then
+			local equipped = ensureToyEquippedValue(toyFolder)
+			table.insert(payload, {
+				id = tostring(toyFolder.Name),
+				itemName = tostring(toyName),
+				itemType = "Toy",
+				equipped = equipped and equipped.Value == true or false,
+			})
+		end
+	end
+
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+	if not ok then
+		warn("[PetServer] Failed to encode ToyInventoryJson:", tostring(encoded))
+		return "[]"
+	end
+
+	return encoded
+end
+
+local function saveToyInventoryJson(player)
+	local jsonValue = getToyInventoryJsonValue(player)
+	if not jsonValue then return end
+	jsonValue.Value = serializeToyInventory(player)
+end
+
+local function hydrateToyInventoryFromJson(player)
+	local toysFolder = getToysFolder(player)
+	local jsonValue = getToyInventoryJsonValue(player)
+	if not toysFolder or not jsonValue then return end
+	if type(jsonValue.Value) ~= "string" or jsonValue.Value == "" then return end
+
+	local ok, decoded = pcall(function()
+		return HttpService:JSONDecode(jsonValue.Value)
+	end)
+	if not ok or type(decoded) ~= "table" then
+		warn("[PetServer] Invalid ToyInventoryJson for", player.Name)
+		return
+	end
+
+	if #toysFolder:GetChildren() > 0 then
+		return -- existing folder data already loaded by datastore; don't overwrite
+	end
+
+	for _, entry in ipairs(decoded) do
+		if type(entry) == "table" and type(entry.itemName) == "string" and entry.itemName ~= "" then
+			local toyFolder = Instance.new("Folder")
+			toyFolder.Name = tostring(entry.id or tostring(math.random(10000, 99999)))
+			toyFolder.Parent = toysFolder
+
+			local itemName = Instance.new("StringValue")
+			itemName.Name = "ItemName"
+			itemName.Value = entry.itemName
+			itemName.Parent = toyFolder
+
+			local itemType = Instance.new("StringValue")
+			itemType.Name = "ItemType"
+			itemType.Value = "Toy"
+			itemType.Parent = toyFolder
+
+			local equipped = ensureToyEquippedValue(toyFolder)
+			equipped.Value = entry.equipped == true
+		end
+	end
+end
+
+local function setEquippedToy(player, toyId)
+	local toysFolder = getToysFolder(player)
+	if not toysFolder then return end
+
+	local equippedToyName = ""
+	for _, toyFolder in ipairs(toysFolder:GetChildren()) do
+		local equipped = ensureToyEquippedValue(toyFolder)
+		local shouldEquip = tostring(toyFolder.Name) == tostring(toyId)
+		equipped.Value = shouldEquip
+		if shouldEquip then
+			equippedToyName = tostring(getToyNameFromFolder(toyFolder) or "")
+		end
+	end
+
+	player:SetAttribute("EquippedToyName", equippedToyName)
+	saveToyInventoryJson(player)
+end
+
+local function restoreEquippedToyAttribute(player)
+	local toysFolder = getToysFolder(player)
+	if not toysFolder then return end
+
+	local equippedToyName = ""
+	for _, toyFolder in ipairs(toysFolder:GetChildren()) do
+		local equipped = ensureToyEquippedValue(toyFolder)
+		if equipped.Value == true and equippedToyName == "" then
+			equippedToyName = tostring(getToyNameFromFolder(toyFolder) or "")
+		else
+			equipped.Value = false
+		end
+	end
+
+	player:SetAttribute("EquippedToyName", equippedToyName)
+	saveToyInventoryJson(player)
+end
+
+local function resolvePlayerTycoon(player)
+	if not player then return nil end
+	if TycoonUtils and TycoonUtils.FindTycoonByOwnerId then
+		local ok, tycoonFromUtils = pcall(function()
+			return TycoonUtils:FindTycoonByOwnerId(player.UserId)
+		end)
+		if ok and tycoonFromUtils and tycoonFromUtils:IsA("Model") then
+			return tycoonFromUtils
+		end
+	end
+
+	local serverPlayerData = ServerStorage:FindFirstChild("PlayerData")
+	local playerFolder = serverPlayerData and serverPlayerData:FindFirstChild(tostring(player.UserId))
+	local tycoonValue = playerFolder and playerFolder:FindFirstChild("Tycoon")
+	if tycoonValue and tycoonValue:IsA("ObjectValue") and tycoonValue.Value and tycoonValue.Value:IsA("Model") then
+		return tycoonValue.Value
+	end
+
+	for _, containerName in ipairs({"Tycoons", "Tycoon"}) do
+		local root = workspace:FindFirstChild(containerName)
+		if root then
+			for _, model in ipairs(root:GetDescendants()) do
+				if not model:IsA("Model") then continue end
+				if not model:FindFirstChild("Essentials") then continue end
+				local ownerAttr = model:GetAttribute("OwnerId") or model:GetAttribute("Owner") or model:GetAttribute("OwnerUserId")
+				if ownerAttr and tostring(ownerAttr) == tostring(player.UserId) then
+					return model
+				end
+				for _, key in ipairs({"OwnerId", "Owner", "OwnerUserId"}) do
+					local v = model:FindFirstChild(key)
+					if v then
+						if v:IsA("ObjectValue") and v.Value == player then
+							return model
+						end
+						if tostring(v.Value) == tostring(player.UserId) then
+							return model
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function setToyAnchoredNoCollide(inst)
+	if not inst then return end
+	if inst:IsA("BasePart") then
+		inst.Anchored = true
+		inst.CanCollide = false
+		return
+	end
+	for _, desc in ipairs(inst:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			desc.Anchored = true
+			desc.CanCollide = false
+		end
+	end
+end
+
+local function syncEquippedToyInTycoon(player)
+	local tycoon = resolvePlayerTycoon(player)
+	if not tycoon then return end
+	local essentials = tycoon:FindFirstChild("Essentials")
+	if not essentials then return end
+
+	local runtime = essentials:FindFirstChild("EquippedToyRuntime")
+	if runtime then
+		runtime:Destroy()
+	end
+
+	local equippedToyName = tostring(player:GetAttribute("EquippedToyName") or "")
+	if equippedToyName == "" then return end
+
+	local toyTemplates = ReplicatedStorage:FindFirstChild("Toys")
+	local toyTemplate = toyTemplates and toyTemplates:FindFirstChild(equippedToyName)
+	if not toyTemplate and toyTemplates then
+		for _, candidate in ipairs(toyTemplates:GetChildren()) do
+			if string.lower(candidate.Name) == string.lower(equippedToyName) then
+				toyTemplate = candidate
+				break
+			end
+		end
+	end
+	if not toyTemplate then
+		warn(("[PetServer] Could not spawn equipped toy '%s' for %s; missing ReplicatedStorage.Toys template")
+			:format(equippedToyName, player.Name))
+		return
+	end
+
+	local clone = toyTemplate:Clone()
+	clone.Name = "EquippedToyRuntime"
+	clone:SetAttribute("IsPetToy", true)
+	clone:SetAttribute("ToyType", equippedToyName)
+	setToyAnchoredNoCollide(clone)
+
+	local spawnPart = essentials:FindFirstChild("ToySpawn") or essentials:FindFirstChild("PetWanderZone")
+	if spawnPart and spawnPart:IsA("BasePart") then
+		if clone:IsA("Model") then
+			clone:PivotTo(spawnPart.CFrame + Vector3.new(0, 1.5, 0))
+		elseif clone:IsA("BasePart") then
+			clone.CFrame = spawnPart.CFrame + Vector3.new(0, 1.5, 0)
+		end
+	end
+
+	clone.Parent = essentials
+end
+
+local function scheduleToyRuntimeSync(player)
+	task.spawn(function()
+		for _ = 1, 30 do
+			if not player or not player.Parent then return end
+			syncEquippedToyInTycoon(player)
+			local tycoon = resolvePlayerTycoon(player)
+			local essentials = tycoon and tycoon:FindFirstChild("Essentials")
+			local hasEquipped = tostring(player:GetAttribute("EquippedToyName") or "") ~= ""
+			if not hasEquipped then
+				return
+			end
+			if essentials and essentials:FindFirstChild("EquippedToyRuntime") then
+				return
+			end
+			task.wait(1)
+		end
+	end)
+end
 
 local function resolvePetTemplate(petFolder)
 	if not petFolder then return nil end
@@ -377,6 +678,12 @@ end
 
 
 Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
+	if Action == "EquipToy" then
+		setEquippedToy(Player, tostring(Parameter or ""))
+		scheduleToyRuntimeSync(Player)
+		return
+	end
+
 	if type(Parameter) ~= "table" then -- so if this condition is true, then Parameter should be the id of the pet
 		local Pet = Player.Data.Pets[Parameter]
 		if not Pet then return end
@@ -425,7 +732,19 @@ Players.PlayerAdded:Connect(function(Player)
 
 	repeat wait() until Player:FindFirstChild("Loaded") and Player.Loaded.Value or Player.Parent == nil
 	if Player.Parent == nil then return end
-	
+
 	ensureAllPlayerPetUids(Player)
+	hydrateToyInventoryFromJson(Player)
+	restoreEquippedToyAttribute(Player)
+	scheduleToyRuntimeSync(Player)
+	local toysFolder = getToysFolder(Player)
+	if toysFolder then
+		toysFolder.ChildAdded:Connect(function()
+			task.defer(saveToyInventoryJson, Player)
+		end)
+		toysFolder.ChildRemoved:Connect(function()
+			task.defer(saveToyInventoryJson, Player)
+		end)
+	end
 	disableAllEquipsForPlayer(Player)
 end)
