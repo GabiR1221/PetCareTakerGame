@@ -464,7 +464,7 @@ updateSideFrameState = function(payload)
 	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
 
 	setBar(SideFrame, "hungerbarfill", payload.hunger, 100)
-	setBar(SideFrame, "wetbarfill", payload.wetness, 100)
+	setBar(SideFrame, "wetbarfill", 0, 100)
 	setBar(SideFrame, "dirtbarfill", payload.dirtiness, 100)
 	setBar(SideFrame, "happinessbarfill", payload.happiness, 100)
 
@@ -499,7 +499,7 @@ local function updateSideFrameState(payload)
 	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
 
 	setBar(SideFrame, "hungerbarfill", payload.hunger, 100)
-	setBar(SideFrame, "wetbarfill", payload.wetness, 100)
+	setBar(SideFrame, "wetbarfill", 0, 100)
 	setBar(SideFrame, "dirtbarfill", payload.dirtiness, 100)
 	setBar(SideFrame, "happinessbarfill", payload.happiness, 100)
 
