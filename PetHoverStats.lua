@@ -28,10 +28,13 @@ local dirtBarBg = menuFrame:WaitForChild("DirtBarBg")
 local dirtBarFill = dirtBarBg:WaitForChild("DirtBarFill")
 local dirtBarText = dirtBarBg:WaitForChild("DirtBarText")
 
-local wetLabel = menuFrame:WaitForChild("WetLabel")
-local wetBarBg = menuFrame:WaitForChild("WetBarBg")
-local wetBarFill = wetBarBg:WaitForChild("WetBarFill")
-local wetBarText = wetBarBg:WaitForChild("WetBarText")
+local wetLabel = menuFrame:FindFirstChild("WetLabel")
+local wetBarBg = menuFrame:FindFirstChild("WetBarBg")
+local wetBarFill = wetBarBg and wetBarBg:FindFirstChild("WetBarFill")
+local wetBarText = wetBarBg and wetBarBg:FindFirstChild("WetBarText")
+
+if wetLabel then wetLabel.Visible = false end
+if wetBarBg then wetBarBg.Visible = false end
 
 local hungerLabel = menuFrame:WaitForChild("HungerLabel")
 local hungerBarBg = menuFrame:WaitForChild("HungerBarBg")
@@ -56,9 +59,10 @@ local function updateMenuForPet(pet, payload)
 	dirtBarFill.Size = UDim2.new(math.clamp(dirt / 100, 0, 1), 0, 1, 0)
 	dirtBarText.Text = ("%d / 100"):format(dirt)
 
-	local wet = tonumber(payload.wetness) or 0
-	wetBarFill.Size = UDim2.new(math.clamp(wet / 100, 0, 1), 0, 1, 0)
-	wetBarText.Text = ("%d / 100"):format(wet)
+	if wetBarFill and wetBarText then
+		wetBarFill.Size = UDim2.new(0, 0, 1, 0)
+		wetBarText.Text = "0 / 100"
+	end
 
 	local hunger = tonumber(payload.hunger) or 100
 	hungerBarFill.Size = UDim2.new(math.clamp(hunger / 100, 0, 1), 0, 1, 0)
