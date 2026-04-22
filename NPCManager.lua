@@ -41,7 +41,7 @@ function NPCManager:InitializeNPCWithPet(npcModel)
 		state.scale = 1.0
 		state.npc = npcModel
 		state.location = "npc"
-		
+
 		-- Read power and rarity from the pet model (they may already have attributes)
 		local power = npcPet:GetAttribute("Power") or 1
 		local rarityMult = npcPet:GetAttribute("RarityMultiplier") or 1
@@ -49,7 +49,7 @@ function NPCManager:InitializeNPCWithPet(npcModel)
 		state.power = power
 		state.rarityMultiplier = rarityMult
 
-		-- Initialize dirtiness/wetness based on NPC requests
+		-- Initialize hygiene stats based on NPC requests
 		local wantsShower = npcModel:GetAttribute("RequestShower") == true
 		if wantsShower then
 			state.dirtiness = math.random(60, 100)
@@ -59,14 +59,8 @@ function NPCManager:InitializeNPCWithPet(npcModel)
 
 		state.hunger = 100
 
-		local wantsDry = npcModel:GetAttribute("RequestDry") == true
-		if wantsDry then
-			state.wetness = 100
-			state.dried = false
-		else
-			state.wetness = math.random(0, 20)
-			state.dried = false
-		end
+		state.wetness = 0
+		state.dried = true
 
 		-- Set up pet rig
 		self.PetRigManager:EnsurePetRig(npcPet)
@@ -162,7 +156,6 @@ function NPCManager:GivePetToNPC(petModel, npcModel)
 
 	-- Read NPC requests
 	local reqShower = npcModel:GetAttribute("RequestShower") == true
-	local reqDry = npcModel:GetAttribute("RequestDry") == true
 	local reqAccessoryA = npcModel:GetAttribute("RequestAccessoryA") == true
 	local reqAccessoryB = npcModel:GetAttribute("RequestAccessoryB") == true
 	local reqLevelMin = npcModel:GetAttribute("RequestLevelMin")
@@ -170,7 +163,6 @@ function NPCManager:GivePetToNPC(petModel, npcModel)
 
 	local petState = self.petState[petModel] or {}
 	local petShowered = petState.showered == true
-	local petDried = petState.dried == true
 	local petAcc = petState.accessories or {}
 	local petAccA = petAcc.A == true
 	local petAccB = petAcc.B == true
@@ -182,10 +174,6 @@ function NPCManager:GivePetToNPC(petModel, npcModel)
 	if reqShower and not petShowered then
 		satisfied = false
 		table.insert(missing, "Shower")
-	end
-	if reqDry and not petDried then
-		satisfied = false
-		table.insert(missing, "Dry")
 	end
 	if reqAccessoryA and not petAccA then
 		satisfied = false
@@ -209,7 +197,6 @@ function NPCManager:GivePetToNPC(petModel, npcModel)
 		if npcModel and npcModel.SetAttribute then
 			pcall(function()
 				if reqShower then npcModel:SetAttribute("NeedsShower", not petShowered) end
-				if reqDry then npcModel:SetAttribute("NeedsDry", not petDried) end
 				if reqAccessoryA then npcModel:SetAttribute("NeedsAccessoryA", not petAccA) end
 				if reqAccessoryB then npcModel:SetAttribute("NeedsAccessoryB", not petAccB) end
 				if reqLevelMin then
@@ -260,7 +247,6 @@ function NPCManager:GivePetToNPC(petModel, npcModel)
 		pcall(function()
 			npcModel:SetAttribute("Leaving", true)
 			npcModel:SetAttribute("NeedsShower", false)
-			npcModel:SetAttribute("NeedsDry", false)
 			npcModel:SetAttribute("NeedsAccessoryA", false)
 			npcModel:SetAttribute("NeedsAccessoryB", false)
 		end)
@@ -320,12 +306,10 @@ function NPCManager:SetupNPC(npcModel)
 
 					if npcModel.GetAttribute then
 						local rs = npcModel:GetAttribute("RequestShower")
-						local rd = npcModel:GetAttribute("RequestDry")
 						local ra = npcModel:GetAttribute("RequestAccessoryA")
 						local rb = npcModel:GetAttribute("RequestAccessoryB")
 
 						if rs and not (state.showered == true) then table.insert(needs, "Shower") end
-						if rd and not (state.dried == true) then table.insert(needs, "Dry") end
 
 						local acc = state.accessories or {}
 						if ra and not (acc.A == true) then table.insert(needs, "Accessory A") end
