@@ -114,7 +114,7 @@ function PetStateManager:SendStateToOwner(petModel)
 		level = level,
 		scale = st.scale or 1,
 		dirtiness = tonumber(st.dirtiness) or 0,
-		wetness = tonumber(st.wetness) or 0,
+		wetness = 0,
 		hunger = tonumber(st.hunger) or 100,
 		happiness = tonumber(st.happiness) or 100,
 		petName = tostring(petModel.Name),
@@ -124,6 +124,7 @@ function PetStateManager:SendStateToOwner(petModel)
 		xpInLevel = xpInLevel,
 		xpForNext = xpForNext
 	}
+	
 	if payload.petUid ~= "" then
 		st.petUid = payload.petUid
 	end
