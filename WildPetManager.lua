@@ -1093,14 +1093,15 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		level = 1,
 		scale = 1.0,
 		dirtiness = math.random(30, 80),
-		wetness = math.random(20, 60),
+		wetness = 0,
+		dried = true,
 		hunger = 100,
 		happiness = 100,
 		power = power,
 		rarityMultiplier = rarityMult,
 		petUid = petUid
 	}
-
+	
 	pet:SetAttribute("WildPet", true)
 	self.wildPets[pet] = spawnArea
 
