@@ -388,10 +388,25 @@ function ShowerDryerManager:_startPlayerToolPose(session)
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then return end
 
-	local endEffector = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-	local chainRoot = character:FindFirstChild("RightUpperArm") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
-	if not endEffector or not chainRoot or not endEffector:IsA("BasePart") or not chainRoot:IsA("BasePart") then
-		return
+	local endEffector = character:FindFirstChild("RightHand") or character:FindFirstChild("RightLowerArm") or character:FindFirstChild("Right Arm")
+	local chainRoot = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso") or character:FindFirstChild("HumanoidRootPart")
+	local snapLimb = character:FindFirstChild("RightUpperArm") or character:FindFirstChild("Right Arm")
+	local rightShoulderMotor = nil
+	for _, d in ipairs(character:GetDescendants()) do
+		if d:IsA("Motor6D") and (d.Name == "RightShoulder" or d.Name == "Right Shoulder") then
+			rightShoulderMotor = d
+			break
+		end
+	end
+	if not rightShoulderMotor then
+		for _, d in ipairs(character:GetDescendants()) do
+			if d:IsA("Motor6D")
+				and string.find(d.Name, "Right")
+				and string.find(d.Name, "Shoulder") then
+				rightShoulderMotor = d
+				break
+			end
+		end
 	end
 
 	local targetPart = Instance.new("Part")
@@ -408,22 +423,54 @@ function ShowerDryerManager:_startPlayerToolPose(session)
 	targetAttachment.Name = "ShowerToolIKTargetAttachment"
 	targetAttachment.Parent = targetPart
 
-	local ikControl = Instance.new("IKControl")
-	ikControl.Name = "ShowerToolIK"
-	ikControl.Type = Enum.IKControlType.Position
-	ikControl.ChainRoot = chainRoot
-	ikControl.EndEffector = endEffector
-	ikControl.Target = targetAttachment
-	ikControl.Priority = 100
-	ikControl.Weight = 0.9
-	ikControl.SmoothTime = 0.08
-	ikControl.Enabled = true
-	ikControl.Parent = humanoid
+	local ikControl = nil
+	local snapWeld = nil
+	local snapMode = false
+	local previousShoulderEnabled = nil
+	local previousSnapCanCollide = nil
+
+	if rightShoulderMotor and snapLimb and snapLimb:IsA("BasePart") then
+		previousShoulderEnabled = rightShoulderMotor.Enabled
+		rightShoulderMotor.Enabled = false
+		previousSnapCanCollide = snapLimb.CanCollide
+		snapLimb.CanCollide = false
+		snapLimb.CFrame = targetPart.CFrame
+
+		snapWeld = Instance.new("WeldConstraint")
+		snapWeld.Name = "ShowerArmSnapWeld"
+		snapWeld.Part0 = targetPart
+		snapWeld.Part1 = snapLimb
+		snapWeld.Parent = targetPart
+		snapMode = true
+	elseif endEffector and chainRoot and endEffector:IsA("BasePart") and chainRoot:IsA("BasePart") then
+		ikControl = Instance.new("IKControl")
+		ikControl.Name = "ShowerToolIK"
+		ikControl.Type = Enum.IKControlType.Position
+		ikControl.ChainRoot = chainRoot
+		ikControl.EndEffector = endEffector
+		ikControl.Target = targetAttachment
+		ikControl.Priority = 100
+		ikControl.Weight = 0.9
+		ikControl.SmoothTime = 0.08
+		ikControl.Enabled = true
+		ikControl.Parent = humanoid
+	else
+		pcall(function()
+			targetPart:Destroy()
+		end)
+		return
+	end
 
 	session.armPose = {
 		targetPart = targetPart,
 		targetAttachment = targetAttachment,
 		ikControl = ikControl,
+		snapWeld = snapWeld,
+		snapMode = snapMode,
+		rightShoulderMotor = rightShoulderMotor,
+		previousShoulderEnabled = previousShoulderEnabled,
+		snapLimb = snapLimb,
+		previousSnapCanCollide = previousSnapCanCollide,
 		character = character,
 		humanoid = humanoid,
 	}
@@ -439,9 +486,9 @@ function ShowerDryerManager:_updatePlayerToolPose(session, toolWorldPos, toolNor
 		normal = Vector3.new(0, 1, 0)
 	end
 
-	local pullBack = 0.0
+	local pullBack = 0.26
 	local targetPos = toolWorldPos - (normal.Unit * pullBack)
-	armPose.targetPart.CFrame = CFrame.new(targetPos)
+	armPose.targetPart.CFrame = CFrame.lookAt(targetPos, targetPos + normal.Unit)
 end
 
 function ShowerDryerManager:_startPlayerShowerStance(session)
@@ -473,13 +520,26 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 		local fallback = showerPart.CFrame.LookVector
 		flatLook = Vector3.new(fallback.X, 0, fallback.Z)
 	end
-	standPart.CFrame = CFrame.lookAt(standPos, standPos + flatLook.Unit)
+	local lookDir = flatLook.Unit
+	local worldUp = Vector3.new(0, 1, 0)
+	local rightDir = worldUp:Cross(lookDir)
+	if rightDir.Magnitude < 1e-4 then
+		rightDir = Vector3.new(1, 0, 0)
+	end
+	rightDir = rightDir.Unit
+	lookDir = rightDir:Cross(worldUp).Unit
+	standPart.CFrame = CFrame.fromMatrix(standPos, rightDir, worldUp, -lookDir)
 
 	local previousJumpPower = humanoid.JumpPower
 	local previousJumpHeight = humanoid.JumpHeight
 	local previousWalkSpeed = humanoid.WalkSpeed
 	local previousAutoRotate = humanoid.AutoRotate
+	local previousSit = humanoid.Sit
+	local previousPlatformStand = humanoid.PlatformStand
 	local previousAnchored = root.Anchored
+	local animateScript = character:FindFirstChild("Animate")
+	local previousAnimateEnabled = (animateScript and animateScript:IsA("LocalScript")) and animateScript.Enabled or nil
+	local resetMotors = {}
 
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
@@ -490,12 +550,37 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 	humanoid.JumpPower = 0
 	humanoid.JumpHeight = 0
 	humanoid.AutoRotate = false
+	humanoid.Sit = false
+	humanoid.PlatformStand = false
+	pcall(function()
+		humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
+	end)
+	if animateScript and animateScript:IsA("LocalScript") then
+		animateScript.Enabled = false
+	end
+	for _, d in ipairs(character:GetDescendants()) do
+		if d:IsA("Motor6D") then
+			pcall(function()
+				d.Transform = CFrame.new()
+			end)
+			resetMotors[d] = true
+		end
+	end
 
 	local lockConn = RunService.Heartbeat:Connect(function()
 		if not root.Parent or not standPart.Parent then return end
 		root.CFrame = standPart.CFrame
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
+		humanoid.Sit = false
+		humanoid.PlatformStand = false
+		for motor in pairs(resetMotors) do
+			if motor and motor.Parent then
+				pcall(function()
+					motor.Transform = CFrame.new()
+				end)
+			end
+		end
 	end)
 
 	session.playerStance = {
@@ -506,10 +591,16 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 		jumpPower = previousJumpPower,
 		jumpHeight = previousJumpHeight,
 		autoRotate = previousAutoRotate,
+		wasSit = previousSit,
+		wasPlatformStand = previousPlatformStand,
 		wasAnchored = previousAnchored,
+		animateScript = animateScript,
+		animateEnabled = previousAnimateEnabled,
+		resetMotors = resetMotors,
 		lockConn = lockConn,
 	}
 end
+
 
 function ShowerDryerManager:_stopPlayerShowerStance(session)
 	if not session or not session.playerStance then return end
@@ -525,16 +616,42 @@ function ShowerDryerManager:_stopPlayerShowerStance(session)
 			stance.humanoid.JumpPower = stance.jumpPower or 50
 			stance.humanoid.JumpHeight = stance.jumpHeight or 7.2
 			stance.humanoid.AutoRotate = (stance.autoRotate ~= false)
+			stance.humanoid.Sit = (stance.wasSit == true)
+			stance.humanoid.PlatformStand = (stance.wasPlatformStand == true)
 		end)
 	end
 	if stance.root and stance.root.Parent then
 		pcall(function()
 			stance.root.Anchored = (stance.wasAnchored == true)
+			stance.root.AssemblyLinearVelocity = Vector3.zero
+			stance.root.AssemblyAngularVelocity = Vector3.zero
+			local look = stance.root.CFrame.LookVector
+			local flatLook = Vector3.new(look.X, 0, look.Z)
+			if flatLook.Magnitude > 1e-4 then
+				stance.root.CFrame = CFrame.lookAt(stance.root.Position, stance.root.Position + flatLook.Unit)
+			end
+		end)
+	end
+	if stance.animateScript and stance.animateScript.Parent and stance.animateEnabled ~= nil then
+		pcall(function()
+			stance.animateScript.Enabled = stance.animateEnabled
 		end)
 	end
 	if stance.standPart and stance.standPart.Parent then
 		pcall(function()
 			stance.standPart:Destroy()
+		end)
+	end
+	if stance.humanoid and stance.humanoid.Parent then
+		pcall(function()
+			stance.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end)
+		task.defer(function()
+			if stance.humanoid and stance.humanoid.Parent then
+				pcall(function()
+					stance.humanoid:ChangeState(Enum.HumanoidStateType.Running)
+				end)
+			end
 		end)
 	end
 	session.playerStance = nil
@@ -547,6 +664,21 @@ function ShowerDryerManager:_stopPlayerToolPose(session)
 		pcall(function()
 			armPose.ikControl.Enabled = false
 			armPose.ikControl:Destroy()
+		end)
+	end
+	if armPose.snapWeld and armPose.snapWeld.Parent then
+		pcall(function()
+			armPose.snapWeld:Destroy()
+		end)
+	end
+	if armPose.rightShoulderMotor and armPose.rightShoulderMotor.Parent then
+		pcall(function()
+			armPose.rightShoulderMotor.Enabled = (armPose.previousShoulderEnabled ~= false)
+		end)
+	end
+	if armPose.snapLimb and armPose.snapLimb.Parent and armPose.previousSnapCanCollide ~= nil then
+		pcall(function()
+			armPose.snapLimb.CanCollide = armPose.previousSnapCanCollide
 		end)
 	end
 	if armPose.targetPart and armPose.targetPart.Parent then
@@ -971,7 +1103,7 @@ function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart)
 		self.petState[session.pet] = self.petState[session.pet] or {}
 		local stageOneFloorDirtiness = tonumber(session.stageOneFloorDirtiness) or 46
 		self.petState[session.pet].dirtiness = math.floor(stageOneFloorDirtiness * (1 - session.progress))
-		self.petState[session.pet].wetness = math.floor(100 * session.progress)
+		self.petState[session.pet].wetness = 0
 		self.PetStateManager:SendStateToOwner(session.pet)
 
 		if self.showerRemote then
@@ -1053,167 +1185,6 @@ function ShowerDryerManager:_setPromptEnabled(prompt, isEnabled)
 end
 
 
-function ShowerDryerManager:ConnectDryPrompt(dryPart)
-	if not dryPart or not dryPart:IsA("BasePart") then return end
-	if self.dryConnected[dryPart] then return end
-
-	local prompt = dryPart:FindFirstChildWhichIsA("ProximityPrompt")
-	if not prompt then
-		prompt = Instance.new("ProximityPrompt")
-		prompt.ActionText = "Dry Pet"
-		prompt.HoldDuration = 0
-		prompt.ObjectText = "DryStation"
-		prompt.MaxActivationDistance = 6
-		prompt.RequiresLineOfSight = false
-		prompt.Parent = dryPart
-	end
-
-	local conn = prompt.Triggered:Connect(function(player)
-		print(("[PetManager] Dry prompt triggered by %s (UserId=%s) on part %s"):format(
-			tostring(player.Name), tostring(player.UserId), tostring(dryPart:GetFullName())))
-
-		-- Find tycoon model
-		local tycoonModel = nil
-		local current = dryPart.Parent
-		while current do
-			if current:IsA("Folder") then
-				local essDirect = current:FindFirstChild("Essentials")
-				if essDirect then
-					local desk = self.TycoonUtils:FindDeskInEssentials(essDirect)
-					if desk then
-						tycoonModel = current
-						print(("[PetManager] Dry: ancestor climb found model %s"):format(tostring(tycoonModel:GetFullName())))
-						break
-					end
-				end
-			end
-			current = current.Parent
-		end
-
-		if not tycoonModel then
-			local resolvedModel, resolvedDesk = self.TycoonUtils:ResolveModelWithDeskFromInstance(dryPart)
-			if resolvedModel then
-				tycoonModel = resolvedModel
-				print(("[PetManager] Dry: resolved via resolveModelWithDeskFromInstance -> %s"):format(tostring(tycoonModel:GetFullName())))
-			end
-		end
-
-		if tycoonModel == workspace then tycoonModel = nil end
-
-		if not tycoonModel then
-			local byOwner, _ = self.TycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
-			if byOwner then
-				tycoonModel = byOwner
-				print(("[PetManager] Dry: resolved via findTycoonByOwnerIdWithDesk -> %s"):format(tostring(tycoonModel:GetFullName())))
-			end
-		end
-
-		-- Validate owner
-		local ownerMatch = false
-		if tycoonModel then
-			local ownerAttr = tycoonModel:GetAttribute("OwnerId") or tycoonModel:GetAttribute("Owner") or tycoonModel:GetAttribute("OwnerUserId")
-			if ownerAttr and tostring(ownerAttr) == tostring(player.UserId) then
-				ownerMatch = true
-			else
-				local candidateNames = {"OwnerId", "Owner", "OwnerUserId"}
-				for _, nm in ipairs(candidateNames) do
-					local child = tycoonModel:FindFirstChild(nm)
-					if child and child.Value and tostring(child.Value) == tostring(player.UserId) then
-						ownerMatch = true
-						break
-					end
-				end
-			end
-		end
-
-		if not ownerMatch then
-			print(("[PetManager] Dry: owner check failed for player %s on part %s"):format(tostring(player.Name), tostring(dryPart:GetFullName())))
-			return
-		end
-
-		-- Ensure player is carrying a pet
-		local pet = self.carryingPetByUserId[player.UserId]
-		if not pet then return end
-
-		self.PetAttachmentManager:SetModelPrimaryIfMissing(pet)
-		if not pet.PrimaryPart then return end
-
-		-- Check wetness threshold
-		self.petState[pet] = self.petState[pet] or {}
-		local wet = tonumber(self.petState[pet].wetness) or 0
-		if wet < 10 then
-			if prompt and prompt:IsA("ProximityPrompt") then
-				local oldObj = prompt.ObjectText
-				pcall(function() prompt.ObjectText = "Not Wet" end)
-				task.delay(1.5, function()
-					if prompt and prompt.Parent then pcall(function() prompt.ObjectText = oldObj end) end
-				end)
-			end
-			return
-		end
-
-		-- Detach from player and attach to dry station
-		self.PetAttachmentManager:ClearDirectModelWelds(pet)
-		self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
-		self.PetAttachmentManager:DetachPetFromPlayer(pet)
-
-		local ok = self.PetAttachmentManager:AttachPetToPart(pet, dryPart)
-		if not ok then return end
-
-		-- Mark as on dry station
-		self.petState[pet] = self.petState[pet] or {}
-		self.petState[pet].location = "dry"
-		self.petState[pet].dryStation = dryPart
-		self.PetStateManager:SendStateToOwner(pet)
-
-		-- Hold for DRY_HOLD_TIME
-		local DRY_HOLD_TIME = 3
-		task.delay(DRY_HOLD_TIME, function()
-			if not pet or not pet.PrimaryPart or not dryPart then return end
-			self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
-			self.PetMovement.StopWandering(pet)
-
-			-- Award dry XP
-			self.PetStateManager:AddXP(pet, 12) -- DRY_XP
-
-			-- Set wetness to 0 and mark dried flag
-			self.petState[pet] = self.petState[pet] or {}
-			self.petState[pet].wetness = 0
-			self.petState[pet].dried = true
-
-			-- Try to reattach to owner
-			local state = self.petState[pet] or {}
-			local ownerId = state.ownerUserId
-			local reattached = false
-			if ownerId then
-				local owner = self.Players:GetPlayerByUserId(ownerId)
-				if owner and owner.Character and owner.Character.PrimaryPart and not self.carryingPetByUserId[ownerId] then
-					local ok2, err = pcall(function() 
-						self.PetAttachmentManager:AttachPetToPlayer(pet, owner, { resetFlags = false }) 
-					end)
-					if ok2 then
-						self.petState[pet].location = "player"
-						self.petState[pet].dryStation = dryPart
-						reattached = true
-						self.PetStateManager:SendStateToOwner(pet)
-					end
-				end
-			end
-
-			if not reattached then
-				pet:SetPrimaryPartCFrame(dryPart.CFrame * CFrame.new(0, dryPart.Size.Y/2 + 1, 0))
-				pet.Parent = workspace
-				self.petState[pet] = self.petState[pet] or {}
-				self.petState[pet].location = "free"
-				self.petState[pet].dryStation = dryPart
-				self.PetStateManager:SendStateToOwner(pet)
-			end
-		end)
-	end)
-
-	self.dryConnected[dryPart] = conn
-end
-
 function ShowerDryerManager:_cleanupShowerSession(player, sendEndEvent)
 	if not player then return end
 	local session = self.activeShowerSessions[player.UserId]
@@ -1269,11 +1240,12 @@ function ShowerDryerManager:_finishShowerForPet(player, pet, showerPart)
 	-- Award XP
 	self.PetStateManager:AddXP(pet, 20) -- SHOWER_XP
 
-	-- Reset dirtiness and set wetness
+	-- Reset dirtiness; drying mechanic has been removed.
 	self.petState[pet] = self.petState[pet] or {}
 	self.petState[pet].dirtiness = 0
-	self.petState[pet].wetness = 100
+	self.petState[pet].wetness = 0
 	self.petState[pet].showered = true
+	self.petState[pet].dried = true
 
 	-- Try to reattach to owner
 	local state = self.petState[pet] or {}
@@ -1311,7 +1283,7 @@ function ShowerDryerManager:_finishShowerForPet(player, pet, showerPart)
 end
 
 function ShowerDryerManager:ScanAndConnectAll()
-	-- Scan for showers and dryers
+	-- Scan for showers
 	local possibleRoots = {}
 	local tycoonRoot = workspace:FindFirstChild("Tycoon")
 	if tycoonRoot then table.insert(possibleRoots, tycoonRoot) end
@@ -1323,8 +1295,6 @@ function ShowerDryerManager:ScanAndConnectAll()
 			if tycoon:IsA("BasePart") then
 				if tycoon.Name == "Shower" then
 					self:ConnectShowerPrompt(tycoon)
-				elseif tycoon.Name == "DryPart" then
-					self:ConnectDryPrompt(tycoon)
 				end
 			end
 		end
@@ -1338,10 +1308,6 @@ function ShowerDryerManager:ScanAndConnectAll()
 				local shower = ess:FindFirstChild("Shower")
 				if shower and shower:IsA("BasePart") then
 					self:ConnectShowerPrompt(shower)
-				end
-				local dryp = ess:FindFirstChild("DryPart")
-				if dryp and dryp:IsA("BasePart") then
-					self:ConnectDryPrompt(dryp)
 				end
 			end
 		end
