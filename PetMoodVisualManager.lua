@@ -235,15 +235,13 @@ end
 
 function PetMoodVisualManager:_getMoodFromState(state)
 	local dirtiness = math.clamp(tonumber(state.dirtiness) or 0, 0, 100)
-	local wetness = math.clamp(tonumber(state.wetness) or 0, 0, 100)
 	local hunger = math.clamp(tonumber(state.hunger) or 100, 0, 100)
 
 	local cleanliness = 100 - dirtiness
-	local dryness = 100 - wetness
 	local fullness = hunger
 
 	local isDirty = dirtiness >= 80
-	local isHappy = cleanliness >= 80 and dryness >= 80 and fullness >= 80
+	local isHappy = cleanliness >= 80 and fullness >= 80
 
 	if isDirty then
 		return {
@@ -261,7 +259,7 @@ function PetMoodVisualManager:_getMoodFromState(state)
 		}
 	end
 
-	if cleanliness < 40 or dryness < 40 or fullness < 40 then
+	if cleanliness < 40 or fullness < 40 then
 		return {
 			face = "Sad",
 			dirtySmoke = false,
