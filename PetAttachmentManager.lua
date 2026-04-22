@@ -286,10 +286,10 @@ function PetAttachmentManager:AttachPetToPlayer(petModel, player, opts)
 
 	if resetFlags then
 		self.petState[petModel].showered = false
-		self.petState[petModel].dried = false
+		self.petState[petModel].dried = true
 	else
 		self.petState[petModel].showered = self.petState[petModel].showered == true
-		self.petState[petModel].dried = self.petState[petModel].dried == true
+		self.petState[petModel].dried = true
 	end
 
 	return true
