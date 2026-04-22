@@ -2,64 +2,79 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
+
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 local accessoryEvent = ReplicatedStorage:WaitForChild("PetAccessoryEvent")
 
--- Simple ScreenGui template (create on first use)
-local function createAccessoryGui()
-	local screen = Instance.new("ScreenGui")
-	screen.Name = "AccessoryServiceGui"
-	screen.ResetOnSpawn = false
-	screen.Parent = PlayerGui
+--[[
+	UI contract (you build this in Studio):
+	PlayerGui
+	└─ AccessoryServiceGui (ScreenGui)
+	   └─ Main (Frame)
+	      ├─ Close (GuiButton)
+	      ├─ AccessoriesList (Frame or ScrollingFrame)
+	      │  └─ AccessoryTemplate (GuiButton, hidden template)
+	      └─ (optional) EmptyLabel (TextLabel)
+]]
 
-	local frame = Instance.new("Frame", screen)
-	frame.AnchorPoint = Vector2.new(0.5, 1)
-	frame.Position = UDim2.new(0.5, 0, 1, -120)
-	frame.Size = UDim2.new(0, 420, 0, 120)
-	frame.BackgroundTransparency = 0.25
-	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	frame.BorderSizePixel = 0
-	frame.Name = "Main"
+local function resolveAccessoryGui()
+	local screen = PlayerGui:FindFirstChild("AccessoryServiceGui")
+	if not screen then
+		warn("[AccessoryClient] Missing PlayerGui.AccessoryServiceGui. Create it in Studio.")
+		return nil
+	end
 
-	-- Exit button (X)
-	local close = Instance.new("TextButton", frame)
-	close.Text = "X"
-	close.Size = UDim2.new(0, 40, 0, 40)
-	close.Position = UDim2.new(1, -48, 0, 8)
-	close.Name = "Close"
+	local main = screen:FindFirstChild("Main")
+	if not main then
+		warn("[AccessoryClient] Missing AccessoryServiceGui.Main")
+		return nil
+	end
 
-	-- Accessory A button
-	local btnA = Instance.new("TextButton", frame)
-	btnA.Name = "AccessoryA"
-	btnA.Text = "Toggle Accessory A"
-	btnA.Size = UDim2.new(0, 180, 0, 44)
-	btnA.Position = UDim2.new(0, 12, 0, 12)
+	local closeButton = main:FindFirstChild("Close")
+	if not closeButton or not closeButton:IsA("GuiButton") then
+		warn("[AccessoryClient] Missing Main.Close (GuiButton)")
+		return nil
+	end
 
-	-- Accessory B button
-	local btnB = Instance.new("TextButton", frame)
-	btnB.Name = "AccessoryB"
-	btnB.Text = "Toggle Accessory B"
-	btnB.Size = UDim2.new(0, 180, 0, 44)
-	btnB.Position = UDim2.new(0, 210, 0, 12)
+	local accessoriesList = main:FindFirstChild("AccessoriesList")
+	if not accessoriesList then
+		warn("[AccessoryClient] Missing Main.AccessoriesList")
+		return nil
+	end
 
-	return screen
+	local template = accessoriesList:FindFirstChild("AccessoryTemplate")
+	if not template or not template:IsA("GuiButton") then
+		warn("[AccessoryClient] Missing AccessoriesList.AccessoryTemplate (GuiButton template)")
+		return nil
+	end
+
+	return {
+		screen = screen,
+		main = main,
+		close = closeButton,
+		list = accessoriesList,
+		template = template,
+	}
 end
 
-local gui = createAccessoryGui()
-gui.Enabled = false
+local guiRefs = resolveAccessoryGui()
 
--- camera control state
 local locked = false
 local targetPart = nil
 local lastCFrame = nil
 local petRef = nil
+local equippedByName = {}
+local accessoryButtonsByName = {}
+
+local guiConnections = {
+	close = nil,
+	dynamic = {},
+}
 
 local function enableCameraAtPart(part)
 	if not part then return end
 	local cam = workspace.CurrentCamera
-	-- save previous cam state so we can restore later
 	lastCFrame = cam.CFrame
 	cam.CameraType = Enum.CameraType.Scriptable
 	targetPart = part
@@ -71,144 +86,182 @@ local function disableCameraRestore()
 	cam.CameraType = Enum.CameraType.Custom
 	locked = false
 	targetPart = nil
-	-- restore last camera CFrame if available
 	if lastCFrame then
-		-- small protected pcall to avoid errors in edge cases
 		pcall(function() cam.CFrame = lastCFrame end)
 		lastCFrame = nil
 	end
 end
 
--- RenderStepped follow camera
-local camConn
-camConn = RunService.RenderStepped:Connect(function(dt)
+RunService.RenderStepped:Connect(function(dt)
 	if not locked or not targetPart or not targetPart.Parent then return end
 	local cam = workspace.CurrentCamera
-
-	-- If this is a dedicated Camera part (named "Camera") use its exact CFrame,
-	-- otherwise use a small offset so we look at the table nicely.
 	local desiredCFrame
 	if targetPart.Name == "Camera" then
-		-- use the Camera part's orientation/position exactly (you can position/rotate this part in Studio)
 		desiredCFrame = targetPart.CFrame
 	else
-		-- desired offset: slightly above and in front of table so we can see pet (adjust as needed)
 		desiredCFrame = targetPart.CFrame * CFrame.new(0, 2, 3) * CFrame.Angles(-0.2, math.rad(180), 0)
 	end
-
-	-- smooth lerp to the target
-	cam.CFrame = cam.CFrame:Lerp(desiredCFrame, math.clamp(16*dt, 0, 1))
+	cam.CFrame = cam.CFrame:Lerp(desiredCFrame, math.clamp(16 * dt, 0, 1))
 end)
 
--- store connections so we can disconnect when UI is reopened or closed
-local guiConnections = {A = nil, B = nil, Close = nil}
-
 local function disconnectGuiConnections()
-	-- safely disconnect stored RBXScriptConnections if present
-	if guiConnections.A then
-		pcall(function() guiConnections.A:Disconnect() end)
-		guiConnections.A = nil
+	for _, conn in ipairs(guiConnections.dynamic) do
+		pcall(function() conn:Disconnect() end)
 	end
-	if guiConnections.B then
-		pcall(function() guiConnections.B:Disconnect() end)
-		guiConnections.B = nil
-	end
-	if guiConnections.Close then
-		pcall(function() guiConnections.Close:Disconnect() end)
-		guiConnections.Close = nil
+	guiConnections.dynamic = {}
+
+	if guiConnections.close then
+		pcall(function() guiConnections.close:Disconnect() end)
+		guiConnections.close = nil
 	end
 
-	-- clear local pet reference when UI is closed or handlers removed
 	petRef = nil
+	accessoryButtonsByName = {}
 end
 
--- wire up GUI buttons (safe: disconnect previous handlers first)
-local function wireGuiButtons(player, pet)
-	-- disconnect any old handlers to avoid duplicate fires
-	disconnectGuiConnections()
+local function clearAccessoryButtons()
+	if not guiRefs then return end
+	for _, child in ipairs(guiRefs.list:GetChildren()) do
+		if child:IsA("GuiButton") and child ~= guiRefs.template then
+			child:Destroy()
+		end
+	end
+end
 
-	-- remember current pet in a local variable (do NOT attach arbitrary fields to Instances)
-	petRef = pet
+local function setAccessoryButtonVisual(accessoryName)
+	local button = accessoryButtonsByName[accessoryName]
+	if not button then return end
+	if equippedByName[accessoryName] then
+		button:SetAttribute("IsEquipped", true)
+		button.Text = tostring(accessoryName) .. " ✓"
+	else
+		button:SetAttribute("IsEquipped", false)
+		button.Text = tostring(accessoryName)
+	end
+end
 
-	local screen = gui
-	local btnA = screen.Main:FindFirstChild("AccessoryA")
-	local btnB = screen.Main:FindFirstChild("AccessoryB")
-	local close = screen.Main:FindFirstChild("Close")
-
-	-- small local debounce via disabling the button briefly after click
-	if btnA then
-		guiConnections.A = btnA.MouseButton1Click:Connect(function()
-			-- disable briefly so accidental double-clicks still won't spam
-			pcall(function() btnA.Active = false end)
-			-- use the captured 'pet' from this closure (safe because wireGuiButtons was called with the correct pet)
-			accessoryEvent:FireServer("ToggleAccessory", { pet = pet, which = "A" })
-			task.delay(0.15, function() if btnA and btnA.Parent then pcall(function() btnA.Active = true end) end end)
-		end)
+local function applyEquippedState(equippedSlots)
+	equippedByName = {}
+	if type(equippedSlots) == "table" then
+		if type(equippedSlots.A) == "string" and equippedSlots.A ~= "" then
+			equippedByName[equippedSlots.A] = true
+		end
+		if type(equippedSlots.B) == "string" and equippedSlots.B ~= "" then
+			equippedByName[equippedSlots.B] = true
+		end
 	end
 
-	if btnB then
-		guiConnections.B = btnB.MouseButton1Click:Connect(function()
-			pcall(function() btnB.Active = false end)
-			accessoryEvent:FireServer("ToggleAccessory", { pet = pet, which = "B" })
-			task.delay(0.15, function() if btnB and btnB.Parent then pcall(function() btnB.Active = true end) end end)
-		end)
+	for accessoryName in pairs(accessoryButtonsByName) do
+		setAccessoryButtonVisual(accessoryName)
+	end
+end
+
+local function buildAccessoryButtons(ownedAccessories)
+	if not guiRefs then return end
+	clearAccessoryButtons()
+	accessoryButtonsByName = {}
+
+	local count = 0
+	if type(ownedAccessories) == "table" then
+		for _, accessoryName in ipairs(ownedAccessories) do
+			if type(accessoryName) == "string" and accessoryName ~= "" then
+				local button = guiRefs.template:Clone()
+				button.Name = "Accessory_" .. accessoryName
+				button.Visible = true
+				button.Text = accessoryName
+				button.Parent = guiRefs.list
+				accessoryButtonsByName[accessoryName] = button
+				count += 1
+
+				table.insert(guiConnections.dynamic, button.MouseButton1Click:Connect(function()
+					if not petRef then return end
+					button.Active = false
+					accessoryEvent:FireServer("ToggleAccessory", { pet = petRef, accessoryName = accessoryName })
+					task.delay(0.2, function()
+						if button and button.Parent then
+							button.Active = true
+						end
+					end)
+				end))
+			end
+		end
 	end
 
-	if close then
-		guiConnections.Close = close.MouseButton1Click:Connect(function()
-			-- request server to exit and close UI locally
-			-- prefer petRef if available (defensive), else use closure 'pet'
-			local sendPet = petRef or pet
+	guiRefs.template.Visible = false
+
+	if guiRefs.list:IsA("ScrollingFrame") then
+		local cellWidth = guiRefs.template.AbsoluteSize.X > 0 and guiRefs.template.AbsoluteSize.X or 120
+		guiRefs.list.CanvasSize = UDim2.new(0, math.max(0, count * (cellWidth + 8)), 0, 0)
+	end
+
+	local emptyLabel = guiRefs.main:FindFirstChild("EmptyLabel")
+	if emptyLabel and emptyLabel:IsA("TextLabel") then
+		emptyLabel.Visible = count == 0
+	end
+end
+
+local function wireCloseButton()
+	if not guiRefs then return end
+	if guiConnections.close then
+		pcall(function() guiConnections.close:Disconnect() end)
+	end
+	guiConnections.close = guiRefs.close.MouseButton1Click:Connect(function()
+		local sendPet = petRef
+		if sendPet then
 			accessoryEvent:FireServer("ExitAccessory", { pet = sendPet })
-			gui.Enabled = false
-			disableCameraRestore()
-			-- disconnect handlers as UI is closed (this also clears petRef)
-			disconnectGuiConnections()
-		end)
-	end
+		end
+		guiRefs.screen.Enabled = false
+		disableCameraRestore()
+		disconnectGuiConnections()
+	end)
 end
 
 -- Listen to open UI event (safe: disconnect previous handlers before wiring)
-accessoryEvent.OnClientEvent:Connect(function(action, tablePart, pet)
-	if action == "OpenAccessoryUI" and tablePart and pet then
-		-- basic sanity: ensure instances exist
-		if not tablePart.Parent or not pet.Parent then return end
+accessoryEvent.OnClientEvent:Connect(function(action, tablePart, pet, payload)
+	if action == "OpenAccessoryUI" then
+		guiRefs = guiRefs or resolveAccessoryGui()
+		if not guiRefs then return end
+		if not tablePart or not pet or not tablePart.Parent or not pet.Parent then return end
 
-		-- disconnect any previous handlers (extra safety) then show UI
 		disconnectGuiConnections()
-		gui.Enabled = true
+		petRef = pet
+		guiRefs.screen.Enabled = true
 
-		-- wire buttons to the given pet (this will disconnect old handlers so we don't double-fire)
-		wireGuiButtons(Player, pet)
+		local owned = (type(payload) == "table" and payload.ownedAccessories) or {}
+		local equipped = (type(payload) == "table" and payload.equipped) or {}
 
-		-- Resolve camera target:
+		buildAccessoryButtons(owned)
+		applyEquippedState(equipped)
+		wireCloseButton()
+
 		local camPart = nil
 		if tablePart.Parent and tablePart.Parent:IsA("BasePart") and tablePart.Parent.Name == "Camera" then
 			camPart = tablePart.Parent
 		else
 			local childCam = tablePart:FindFirstChild("Camera")
-			if childCam and childCam:IsA("BasePart") then
-				camPart = childCam
-			else
-				camPart = tablePart
-			end
+			camPart = (childCam and childCam:IsA("BasePart")) and childCam or tablePart
 		end
-
 		enableCameraAtPart(camPart)
+	elseif action == "AccessoryState" then
+		if type(payload) == "table" then
+			applyEquippedState(payload.equipped)
+		end
+	elseif action == "AccessoryToggleFailed" then
+		if type(payload) == "table" and type(payload.reason) == "string" then
+			warn("[AccessoryClient] Toggle failed: " .. payload.reason)
+		end
 	end
 end)
 
 -- Add this to the local script, after the event listener:
 
 -- Close GUI if pet is no longer valid
-game:GetService("RunService").Heartbeat:Connect(function()
-	if gui.Enabled and petRef then
-		if not petRef or not petRef.Parent then
-			-- Pet was removed/destroyed
-			gui.Enabled = false
+RunService.Heartbeat:Connect(function()
+	if guiRefs and guiRefs.screen.Enabled and petRef then
+		if not petRef.Parent then
+			guiRefs.screen.Enabled = false
 			disableCameraRestore()
 			disconnectGuiConnections()
 		end
 	end
 end)
-
