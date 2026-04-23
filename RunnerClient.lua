@@ -72,6 +72,8 @@ local stumblingNow = false
 local exhaustedNow = false
 local exhaustionPhase = nil
 local waitingForJumpAnimEnd = false
+local wallBreakingNow = false
+local wallBreakSuccessNow = false
 
 local runTrack = nil
 local jumpStartTrack = nil
@@ -80,11 +82,17 @@ local stumbleTrack = nil
 local exhaustedSlideTrack = nil
 local exhaustedLoopTrack = nil
 local jumpStartStoppedConn = nil
+local wallBreakSuccessTrack = nil
+local wallBreakFailTrack = nil
+local wallBreakTrackStoppedConn = nil
+local wallBreakMarkerConn = nil
+local wallBreakKeyframeConn = nil
 
 local staminaCurrent = 0
 local staminaMax = 50
 local hiddenUiState = {}
 local savedCameraSubject = nil
+local modifiedWalls = {}
 
 local ContextActionService = game:GetService("ContextActionService")
 local MOVEMENT_LOCK_ACTION = "RunnerExhaustedMoveLock"
@@ -148,12 +156,13 @@ hookButtonAnimation(goBackButton)
 
 local function updateControlsLocked()
 	local jumpLocked = jumpingNow or stumblingNow or exhaustedNow
-	local goBackLocked = jumpingNow or stumblingNow or (exhaustedNow and exhaustionPhase ~= "Collapsed")
+	local goBackLocked = jumpingNow or stumblingNow or wallBreakingNow or (exhaustedNow and exhaustionPhase ~= "Collapsed")
+	jumpLocked = jumpLocked or wallBreakingNow
 	jumpButton.Active = (not jumpLocked) and runnerActive
 	goBackButton.Active = (not goBackLocked) and runnerActive
 	jumpButton.AutoButtonColor = (not jumpLocked) and runnerActive
 	goBackButton.AutoButtonColor = (not goBackLocked) and runnerActive
-	setMovementLocked(exhaustedNow)
+	setMovementLocked(exhaustedNow or wallBreakingNow)
 end
 
 local function stopTrack(track)
@@ -232,6 +241,18 @@ local function clearAllTracks()
 		jumpStartStoppedConn:Disconnect()
 		jumpStartStoppedConn = nil
 	end
+	if wallBreakTrackStoppedConn then
+		wallBreakTrackStoppedConn:Disconnect()
+		wallBreakTrackStoppedConn = nil
+	end
+	if wallBreakMarkerConn then
+		wallBreakMarkerConn:Disconnect()
+		wallBreakMarkerConn = nil
+	end
+	if wallBreakKeyframeConn then
+		wallBreakKeyframeConn:Disconnect()
+		wallBreakKeyframeConn = nil
+	end
 
 	stopTrack(runTrack)
 	stopTrack(jumpStartTrack)
@@ -239,6 +260,8 @@ local function clearAllTracks()
 	stopTrack(stumbleTrack)
 	stopTrack(exhaustedSlideTrack)
 	stopTrack(exhaustedLoopTrack)
+	stopTrack(wallBreakSuccessTrack)
+	stopTrack(wallBreakFailTrack)
 
 	runTrack = nil
 	jumpStartTrack = nil
@@ -246,7 +269,32 @@ local function clearAllTracks()
 	stumbleTrack = nil
 	exhaustedSlideTrack = nil
 	exhaustedLoopTrack = nil
+	wallBreakSuccessTrack = nil
+	wallBreakFailTrack = nil
 end
+
+local function applyLocalWallBreakVisual(wallPart)
+	if not wallPart or not wallPart:IsA("BasePart") then return end
+	if not modifiedWalls[wallPart] then
+		modifiedWalls[wallPart] = {
+			localTransparencyModifier = wallPart.LocalTransparencyModifier,
+			canCollide = wallPart.CanCollide,
+		}
+	end
+	wallPart.LocalTransparencyModifier = 1
+	wallPart.CanCollide = false
+end
+
+local function resetLocalWalls()
+	for wallPart, snapshot in pairs(modifiedWalls) do
+		if wallPart and wallPart.Parent then
+			wallPart.LocalTransparencyModifier = snapshot.localTransparencyModifier or 0
+			wallPart.CanCollide = snapshot.canCollide == true
+		end
+		modifiedWalls[wallPart] = nil
+	end
+end
+
 
 local function restoreRunnerCamera()
 	local camera = workspaceService.CurrentCamera
@@ -273,12 +321,12 @@ end
 
 
 jumpButton.Activated:Connect(function()
-	if not runnerActive or jumpingNow or stumblingNow or exhaustedNow then return end
+	if not runnerActive or jumpingNow or stumblingNow or exhaustedNow or wallBreakingNow then return end
 	actionRemote:FireServer("Jump")
 end)
 
 goBackButton.Activated:Connect(function()
-	if not runnerActive or jumpingNow or stumblingNow then return end
+	if not runnerActive or jumpingNow or stumblingNow or wallBreakingNow then return end
 	if exhaustedNow and exhaustionPhase ~= "Collapsed" then return end
 	actionRemote:FireServer("GoBack")
 end)
@@ -296,6 +344,7 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 			exhaustedNow = false
 			exhaustionPhase = nil
 			waitingForJumpAnimEnd = false
+			resetLocalWalls()
 			clearAllTracks()
 			staminaCurrent = 0
 			staminaMax = 50
@@ -309,6 +358,8 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		staminaMax = (payload and payload.maxStamina) or staminaMax
 		exhaustedNow = false
 		exhaustionPhase = nil
+		wallBreakingNow = false
+		wallBreakSuccessNow = false
 		renderStamina(false)
 
 		clearAllTracks()
@@ -324,6 +375,8 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		jumpSlideTrack = loadTrack(payload and (payload.jumpSlideAnimationId or payload.jumpAnimationId))
 		exhaustedSlideTrack = loadTrack(payload and payload.exhaustedSlideAnimationId)
 		exhaustedLoopTrack = loadTrack(payload and payload.exhaustedLoopAnimationId)
+		wallBreakSuccessTrack = loadTrack(payload and payload.breakSuccessAnimationId)
+		wallBreakFailTrack = loadTrack(payload and payload.breakFailAnimationId)
 
 		if jumpStartTrack then
 			jumpStartStoppedConn = jumpStartTrack.Stopped:Connect(function()
@@ -414,6 +467,8 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		if not isExhausted then
 			exhaustedNow = false
 			exhaustionPhase = nil
+			wallBreakingNow = false
+			wallBreakSuccessNow = false
 			if exhaustedSlideTrack then stopTrack(exhaustedSlideTrack) end
 			if exhaustedLoopTrack then stopTrack(exhaustedLoopTrack) end
 			if runnerActive and not jumpingNow and not stumblingNow and runTrack then
@@ -447,6 +502,90 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 			if exhaustedSlideTrack and not exhaustedSlideTrack.IsPlaying then
 				exhaustedSlideTrack.Looped = false
 				exhaustedSlideTrack:Play(0.06)
+			end
+		end
+		
+	elseif action == "WallBreakState" then
+		local active = enabled == true
+		if not active then
+			wallBreakingNow = false
+			wallBreakSuccessNow = false
+			if wallBreakTrackStoppedConn then
+				wallBreakTrackStoppedConn:Disconnect()
+				wallBreakTrackStoppedConn = nil
+			end
+			if wallBreakMarkerConn then
+				wallBreakMarkerConn:Disconnect()
+				wallBreakMarkerConn = nil
+			end
+			if wallBreakKeyframeConn then
+				wallBreakKeyframeConn:Disconnect()
+				wallBreakKeyframeConn = nil
+			end
+			if wallBreakSuccessTrack then stopTrack(wallBreakSuccessTrack) end
+			if wallBreakFailTrack then stopTrack(wallBreakFailTrack) end
+			if runnerActive and not jumpingNow and not stumblingNow and not exhaustedNow and runTrack then
+				runTrack.Looped = true
+				runTrack:Play(0.08)
+			end
+			updateControlsLocked()
+			return
+		end
+
+		wallBreakingNow = true
+		wallBreakSuccessNow = payload and payload.success == true
+		updateControlsLocked()
+
+		local phase = payload and payload.phase
+		if phase == "Animating" then
+			if runTrack then stopTrack(runTrack) end
+			if jumpStartTrack then stopTrack(jumpStartTrack) end
+			if jumpSlideTrack then stopTrack(jumpSlideTrack) end
+			if stumbleTrack then stopTrack(stumbleTrack) end
+
+			if wallBreakSuccessNow and payload and payload.wallPart then
+				applyLocalWallBreakVisual(payload.wallPart)
+			end
+
+			if payload and payload.successAnimationId then
+				wallBreakSuccessTrack = loadTrack(payload.successAnimationId) or wallBreakSuccessTrack
+			end
+			if payload and payload.failedAnimationId then
+				wallBreakFailTrack = loadTrack(payload.failedAnimationId) or wallBreakFailTrack
+			end
+
+			if wallBreakTrackStoppedConn then
+				wallBreakTrackStoppedConn:Disconnect()
+				wallBreakTrackStoppedConn = nil
+			end
+			if wallBreakMarkerConn then
+				wallBreakMarkerConn:Disconnect()
+				wallBreakMarkerConn = nil
+			end
+			if wallBreakKeyframeConn then
+				wallBreakKeyframeConn:Disconnect()
+				wallBreakKeyframeConn = nil
+			end
+
+			local selectedTrack = wallBreakSuccessNow and wallBreakSuccessTrack or wallBreakFailTrack
+			if selectedTrack then
+				selectedTrack.Looped = false
+				selectedTrack:Play(0.05)
+				wallBreakTrackStoppedConn = selectedTrack.Stopped:Connect(function()
+					actionRemote:FireServer("WallBreakAnimEnded")
+				end)
+				if not wallBreakSuccessNow then
+					wallBreakMarkerConn = selectedTrack:GetMarkerReachedSignal("Knockback"):Connect(function()
+						actionRemote:FireServer("WallBreakFailMarker")
+					end)
+					wallBreakKeyframeConn = selectedTrack.KeyframeReached:Connect(function(keyframeName)
+						if keyframeName == "Knockback" then
+							actionRemote:FireServer("WallBreakFailMarker")
+						end
+					end)
+				end
+			else
+				actionRemote:FireServer("WallBreakAnimEnded")
 			end
 		end
 	end
