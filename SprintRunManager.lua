@@ -8,6 +8,8 @@ local START_LINE_TAG = "PetRunStartLine"
 local START_LINE_NAME = "PetRunStartLine"
 local OBSTACLE_ZONE_TAG = "WildPetZone"
 local OBSTACLE_ZONE_NAME = "WildPetZonePart"
+local BREAK_WALL_TAG = "RunnerBreakWall"
+local BREAK_WALL_NAME = "RunnerBreakWall"
 
 local RUN_SPEED = 28
 local DEFAULT_WALK_SPEED = 16
@@ -33,6 +35,11 @@ local STUMBLE_DURATION_MIN = 0.5
 local STUMBLE_DURATION_MAX = 1.25
 local STUMBLE_SPEED_MULTIPLIER = 0.62
 local HITBOX_SIZE = Vector3.new(8, 6, 10)
+local WALL_BREAK_DEFAULT_TRIGGER_DISTANCE = 10
+local WALL_BREAK_DEFAULT_STOP_DISTANCE = 1.8
+local WALL_BREAK_APPROACH_SPEED_MULTIPLIER = 1
+local WALL_BREAK_KNOCKBACK_SPEED = 34
+local WALL_BREAK_COOLDOWN = 0.4
 
 local function getOrCreateRemote(name)
 	local remote = ReplicatedStorage:FindFirstChild(name)
@@ -105,6 +112,7 @@ function SprintRunManager:Initialize(playersService, wildPetManager)
 	self.startLines = {}
 	self.startLineConns = {}
 	self.obstacleZones = {}
+	self.breakWalls = {}
 	self.obstacleRng = Random.new()
 	self.liveObstacleFolder = workspace:FindFirstChild("RunnerLiveObstacles") or Instance.new("Folder")
 	self.liveObstacleFolder.Name = "RunnerLiveObstacles"
@@ -117,6 +125,7 @@ function SprintRunManager:Initialize(playersService, wildPetManager)
 
 	self:ScanStartLines()
 	self:ScanObstacleZones()
+	self:ScanBreakWalls()
 	self:_connectRemotes()
 	self:_connectPlayers()
 	self:_startHeartbeat()
@@ -143,6 +152,10 @@ function SprintRunManager:_connectRemotes()
 			self:GoBackToPlot(player)
 		elseif action == "JumpAnimEnded" then
 			self:OnJumpAnimationEnded(player)
+		elseif action == "WallBreakAnimEnded" then
+			self:OnWallBreakAnimationEnded(player)
+		elseif action == "WallBreakFailMarker" then
+			self:OnWallBreakFailMarker(player)
 		end
 	end)
 end
@@ -165,6 +178,33 @@ function SprintRunManager:_beginExhaustion(player, state, startingSpeed)
 	})
 end
 
+function SprintRunManager:_enterCollapsedExhaustion(player, state)
+	if not state then
+		return
+	end
+
+	state.exhausted = true
+	state.exhaustedStarted = false
+	state.exhaustionStartedAt = nil
+	state.exhaustionDecelDuration = 0
+	state.exhaustionStartSpeed = 0
+	state.exhaustionPhase = "Collapsed"
+	state.pendingFailExhaustion = false
+	state.pendingFailExhaustionAt = nil
+	state.failKnockbackUntil = nil
+	state.failKnockbackDirection = nil
+
+	self.stateRemote:FireClient(player, "ExhaustionState", true, {
+		phase = "Collapsed",
+	})
+	self.stateRemote:FireClient(player, "StaminaUpdate", true, {
+		current = state.currentStamina,
+		max = state.maxStamina or DEFAULT_STAMINA,
+		exhausted = true,
+		phase = "Collapsed",
+	})
+end
+
 
 function SprintRunManager:_startHeartbeat()
 	RunService.Heartbeat:Connect(function(dt)
@@ -182,6 +222,9 @@ function SprintRunManager:_startHeartbeat()
 			end
 
 			local now = os.clock()
+			if state.pendingFailExhaustion and now >= (state.pendingFailExhaustionAt or 0) then
+				self:_enterCollapsedExhaustion(player, state)
+			end
 
 			if state.stumbling then
 				if state.stumbleEndAt and now >= state.stumbleEndAt then
@@ -205,15 +248,50 @@ function SprintRunManager:_startHeartbeat()
 				if state.jumpEndAt and now >= state.jumpEndAt then
 					self:_endJumpState(player, state, true)
 				end
+				
+			elseif state.wallBreaking then
+				local wallPart = state.wallBreakWall
+				if (not wallPart) or (not wallPart.Parent) then
+					self:_clearWallBreakState(player, state, false, false)
+				elseif state.wallBreakPhase == "Approach" then
+					local targetPos = self:_getWallApproachTargetPosition(root, wallPart)
+					local toTarget = targetPos - root.Position
+					local horizontal = Vector3.new(toTarget.X, 0, toTarget.Z)
+					local dist = horizontal.Magnitude
+					local stopDistance = state.wallBreakStopDistance or WALL_BREAK_DEFAULT_STOP_DISTANCE
+					if dist <= stopDistance then
+						if state.wallBreakSuccess == true then
+							root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+						end
+						state.wallBreakPhase = "Animating"
+						self.stateRemote:FireClient(player, "WallBreakState", true, {
+							phase = "Animating",
+							success = state.wallBreakSuccess == true,
+							successAnimationId = state.wallBreakSuccessAnimationId,
+							failedAnimationId = state.wallBreakFailAnimationId,
+							wallPart = wallPart,
+						})
+					else
+						local moveDir = horizontal.Unit
+						local approachSpeed = math.max(0, (state.runSpeed or RUN_SPEED) * WALL_BREAK_APPROACH_SPEED_MULTIPLIER)
+						hum.WalkSpeed = approachSpeed
+						hum.JumpPower = 0
+						hum.JumpHeight = 0
+						hum.AutoRotate = true
+						hum.Jump = false
+						hum:Move(moveDir, false)
+						root.AssemblyLinearVelocity = Vector3.new(moveDir.X * approachSpeed, root.AssemblyLinearVelocity.Y, moveDir.Z * approachSpeed)
+					end
+				end
 			end
 
 			if state.jumping and state.jumpForwardForceEndAt and os.clock() >= state.jumpForwardForceEndAt then
 				state.jumpForwardForceEndAt = nil
 			end
-			
+
 			dt = math.max(dt or 0, 0)
 			local maxStamina = state.maxStamina or DEFAULT_STAMINA
-			if not state.exhausted then
+			if not state.exhausted and not state.wallBreaking and not state.pendingFailExhaustion then
 				state.currentStamina = math.max(0, (state.currentStamina or maxStamina) - (state.staminaDrainPerSecond or STAMINA_DRAIN_PER_SECOND) * dt)
 				if state.currentStamina <= 0 then
 					self:_beginExhaustion(player, state, state.runSpeed)
@@ -268,6 +346,53 @@ function SprintRunManager:_startHeartbeat()
 				hum.JumpHeight = 0
 				hum.Jump = false
 				hum:Move(Vector3.zero, false)
+			elseif state.wallBreaking then
+				if state.wallBreakPhase == "Animating" then
+					local isFailAnim = state.wallBreakSuccess == false
+					if (not isFailAnim) or (isFailAnim and not state.wallBreakFailLocked) then
+						local wallBreakSpeed = state.runSpeed or RUN_SPEED
+						hum.WalkSpeed = wallBreakSpeed
+						hum.JumpPower = 0
+						hum.JumpHeight = 0
+						hum.AutoRotate = true
+						hum.Jump = false
+						local wallBreakDir = root.CFrame.LookVector
+						hum:Move(wallBreakDir, false)
+						root.AssemblyLinearVelocity = Vector3.new(wallBreakDir.X * wallBreakSpeed, root.AssemblyLinearVelocity.Y, wallBreakDir.Z * wallBreakSpeed)
+					else
+						hum.WalkSpeed = 0
+						hum.JumpPower = 0
+						hum.JumpHeight = 0
+						hum.AutoRotate = false
+						hum.Jump = false
+						hum:Move(Vector3.zero, false)
+					end
+				else
+					local wallBreakSpeed = state.runSpeed or RUN_SPEED
+					hum.WalkSpeed = wallBreakSpeed
+					hum.JumpPower = 0
+					hum.JumpHeight = 0
+					hum.AutoRotate = true
+					hum.Jump = false
+					local wallBreakDir = root.CFrame.LookVector
+					hum:Move(wallBreakDir, false)
+					root.AssemblyLinearVelocity = Vector3.new(wallBreakDir.X * wallBreakSpeed, root.AssemblyLinearVelocity.Y, wallBreakDir.Z * wallBreakSpeed)
+				end
+			elseif state.pendingFailExhaustion then
+				hum.WalkSpeed = 0
+				hum.JumpPower = 0
+				hum.JumpHeight = 0
+				hum.AutoRotate = false
+				hum.Jump = false
+				hum:Move(Vector3.zero, false)
+				if state.failKnockbackUntil and now <= state.failKnockbackUntil and state.failKnockbackDirection then
+					local dir = state.failKnockbackDirection
+					root.AssemblyLinearVelocity = Vector3.new(
+						-dir.X * (WALL_BREAK_KNOCKBACK_SPEED * 1.2),
+						root.AssemblyLinearVelocity.Y,
+						-dir.Z * (WALL_BREAK_KNOCKBACK_SPEED * 1.2)
+					)
+				end
 			else
 				if hum.WalkSpeed ~= speed then
 					hum.WalkSpeed = speed
@@ -284,6 +409,8 @@ function SprintRunManager:_startHeartbeat()
 			if state._hitbox then
 				state._hitbox.CFrame = root.CFrame * CFrame.new(0, 0, -3)
 			end
+
+			self:_tryBeginWallBreak(player, state, root)
 			
 			local now = os.clock()
 			if (now - (state.lastStaminaUpdateAt or 0)) >= 0.1 then
@@ -297,6 +424,213 @@ function SprintRunManager:_startHeartbeat()
 			end
 		end
 		self:_tickObstacleZones()
+	end)
+end
+
+function SprintRunManager:ScanBreakWalls()
+	for _, wall in ipairs(CollectionService:GetTagged(BREAK_WALL_TAG)) do
+		if wall:IsA("BasePart") then
+			self:_registerBreakWall(wall)
+		end
+	end
+
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("BasePart") and inst.Name == BREAK_WALL_NAME then
+			self:_registerBreakWall(inst)
+		end
+	end
+end
+
+function SprintRunManager:_registerBreakWall(wall)
+	if self.breakWalls[wall] then return end
+	self.breakWalls[wall] = true
+	if wall:GetAttribute("BreakDefaultTransparency") == nil then
+		wall:SetAttribute("BreakDefaultTransparency", wall.Transparency)
+	end
+	if wall:GetAttribute("BreakDefaultCanCollide") == nil then
+		wall:SetAttribute("BreakDefaultCanCollide", wall.CanCollide)
+	end
+	wall.Destroying:Connect(function()
+		self.breakWalls[wall] = nil
+	end)
+end
+
+function SprintRunManager:_getClosestBreakWall(root)
+	if not root then return nil, nil end
+	local nearestWall = nil
+	local nearestDistance = nil
+	local look = root.CFrame.LookVector
+	local forward = Vector3.new(look.X, 0, look.Z)
+	if forward.Magnitude <= 0 then
+		forward = Vector3.new(0, 0, -1)
+	else
+		forward = forward.Unit
+	end
+	for wall in pairs(self.breakWalls) do
+		if wall and wall.Parent then
+			local closest = self:_getWallApproachTargetPosition(root, wall)
+			local offset = closest - root.Position
+			local horizontal = Vector3.new(offset.X, 0, offset.Z)
+			local dist = horizontal.Magnitude
+			if dist <= 0 then
+				continue
+			end
+			local toWall = horizontal.Unit
+			if forward:Dot(toWall) < 0.2 then
+				continue
+			end
+			local triggerDistance = tonumber(wall:GetAttribute("BreakTriggerDistance")) or WALL_BREAK_DEFAULT_TRIGGER_DISTANCE
+			if dist <= triggerDistance and (not nearestDistance or dist < nearestDistance) then
+				nearestDistance = dist
+				nearestWall = wall
+			end
+		else
+			self.breakWalls[wall] = nil
+		end
+	end
+	return nearestWall, nearestDistance
+end
+
+function SprintRunManager:_getWallApproachTargetPosition(root, wall)
+	if not root or not wall then
+		return Vector3.zero
+	end
+	local localPos = wall.CFrame:PointToObjectSpace(root.Position)
+	local halfSize = wall.Size * 0.5
+	local x = math.clamp(localPos.X, -halfSize.X, halfSize.X)
+	local y = math.clamp(localPos.Y, -halfSize.Y, halfSize.Y)
+	local z = math.clamp(localPos.Z, -halfSize.Z, halfSize.Z)
+	return wall.CFrame:PointToWorldSpace(Vector3.new(x, y, z))
+end
+
+function SprintRunManager:_tryBeginWallBreak(player, state, root)
+	if not state or not state.active then return end
+	if state.wallBreaking or state.jumping or state.stumbling or state.exhausted then return end
+	if os.clock() < (state.wallBreakCooldownUntil or 0) then return end
+
+	local wall = self:_getClosestBreakWall(root)
+	if not wall then return end
+	if state.brokenWalls and state.brokenWalls[wall] then return end
+
+	local staminaRequired = math.max(0, tonumber(wall:GetAttribute("BreakStaminaRequired")) or 0)
+	local currentStamina = tonumber(state.currentStamina) or 0
+	local success = currentStamina >= staminaRequired
+
+	state.wallBreaking = true
+	state.wallBreakWall = wall
+	state.wallBreakPhase = "Approach"
+	state.wallBreakSuccess = success
+	state.wallBreakKnockbackApplied = false
+	state.wallBreakFailLocked = false
+	state.wallBreakTriggeredAt = os.clock()
+	state.wallBreakStopDistance = tonumber(wall:GetAttribute("BreakStopDistance")) or WALL_BREAK_DEFAULT_STOP_DISTANCE
+	state.wallBreakSuccessAnimationId = wall:GetAttribute("BreakSuccessAnimationId")
+		or (state.startLine and state.startLine:GetAttribute("BreakSuccessAnimationId"))
+	state.wallBreakFailAnimationId = wall:GetAttribute("BreakFailAnimationId")
+		or (state.startLine and state.startLine:GetAttribute("BreakFailAnimationId"))
+	state.wallBreakCooldownUntil = os.clock() + WALL_BREAK_COOLDOWN
+
+	if success and staminaRequired > 0 then
+		state.currentStamina = math.max(0, currentStamina - staminaRequired)
+		self.stateRemote:FireClient(player, "StaminaUpdate", true, {
+			current = state.currentStamina,
+			max = state.maxStamina or DEFAULT_STAMINA,
+			exhausted = state.exhausted == true,
+		})
+	end
+
+	self.stateRemote:FireClient(player, "WallBreakState", true, {
+		phase = "Approach",
+		success = success,
+	})
+end
+
+function SprintRunManager:_clearWallBreakState(player, state, unlock, setCooldown)
+	if not state then return end
+	state.wallBreaking = false
+	state.wallBreakPhase = nil
+	state.wallBreakSuccess = nil
+	state.wallBreakKnockbackApplied = false
+	state.wallBreakFailLocked = false
+	state.wallBreakTriggeredAt = nil
+	state.wallBreakStopDistance = nil
+	state.wallBreakSuccessAnimationId = nil
+	state.wallBreakFailAnimationId = nil
+	state.wallBreakWall = nil
+	if setCooldown then
+		state.wallBreakCooldownUntil = os.clock() + WALL_BREAK_COOLDOWN
+	end
+	if unlock then
+		self.stateRemote:FireClient(player, "WallBreakState", false)
+	end
+end
+
+function SprintRunManager:OnWallBreakAnimationEnded(player)
+	local state = self.playerState[player]
+	if not state or not state.active or not state.wallBreaking then return end
+	local success = state.wallBreakSuccess == true
+
+	if success then
+		state.brokenWalls = state.brokenWalls or {}
+		local brokenWall = state.wallBreakWall
+		if brokenWall then
+			state.brokenWalls[brokenWall] = true
+		end
+		self:_clearWallBreakState(player, state, true, true)
+		return
+	end
+
+	state.currentStamina = 0
+	if not state.wallBreakKnockbackApplied then
+		self:OnWallBreakFailMarker(player)
+	end
+	state.pendingFailExhaustion = true
+	state.pendingFailExhaustionAt = os.clock() + 0.28
+	self.stateRemote:FireClient(player, "StaminaUpdate", true, {
+		current = state.currentStamina,
+		max = state.maxStamina or DEFAULT_STAMINA,
+		exhausted = false,
+	})
+	self:_clearWallBreakState(player, state, true, true)
+end
+
+function SprintRunManager:OnWallBreakFailMarker(player)
+	local state = self.playerState[player]
+	if not state or not state.active then return end
+	if not state.wallBreaking and not state.pendingFailExhaustion then return end
+	if state.wallBreaking and state.wallBreakSuccess == true then return end
+	if state.wallBreakKnockbackApplied then return end
+
+	local char = player.Character
+	local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+	if not root then return end
+
+	state.wallBreakKnockbackApplied = true
+	state.wallBreakFailLocked = true
+	local look = root.CFrame.LookVector
+	local horizontal = Vector3.new(look.X, 0, look.Z)
+	if horizontal.Magnitude <= 0 then
+		horizontal = Vector3.new(0, 0, -1)
+	else
+		horizontal = horizontal.Unit
+	end
+	
+	state.failKnockbackDirection = horizontal
+	state.failKnockbackUntil = os.clock() + 0.25
+
+	root.AssemblyLinearVelocity = Vector3.new(
+		-horizontal.X * (WALL_BREAK_KNOCKBACK_SPEED * 1.2),
+		root.AssemblyLinearVelocity.Y,
+		-horizontal.Z * (WALL_BREAK_KNOCKBACK_SPEED * 1.2)
+	)
+
+	local impulseVector = Vector3.new(
+		-horizontal.X * (WALL_BREAK_KNOCKBACK_SPEED * 5) * root.AssemblyMass,
+		0,
+		-horizontal.Z * (WALL_BREAK_KNOCKBACK_SPEED * 5) * root.AssemblyMass
+	)
+	pcall(function()
+		root:ApplyImpulse(impulseVector)
 	end)
 end
 
@@ -827,6 +1161,12 @@ function SprintRunManager:StartRunning(player, startLine)
 	state.lastStaminaUpdateAt = 0
 	state.speedPenaltyUntil = 0
 	state.speedPenaltyMultiplier = 1
+	state.brokenWalls = {}
+	state.wallBreakFailLocked = false
+	state.pendingFailExhaustion = false
+	state.pendingFailExhaustionAt = nil
+	state.failKnockbackUntil = nil
+	state.failKnockbackDirection = nil
 	state.jumpForwardSpeed = math.max(0, state.runSpeed * JUMP_FORWARD_SPEED_MULTIPLIER)
 	state.defaultFreefallEnabled = hum:GetStateEnabled(Enum.HumanoidStateType.Freefall)
 
@@ -847,6 +1187,8 @@ function SprintRunManager:StartRunning(player, startLine)
 		stumbleAnimationId = startLine and (startLine:GetAttribute("StumbleAnimationId") or startLine:GetAttribute("JumpSlideAnimationId") or startLine:GetAttribute("JumpAnimationId")) or nil,
 		exhaustedSlideAnimationId = startLine and (startLine:GetAttribute("ExhaustedSlideAnimationId") or startLine:GetAttribute("OutOfStaminaSlideAnimationId")) or nil,
 		exhaustedLoopAnimationId = startLine and (startLine:GetAttribute("ExhaustedLoopAnimationId") or startLine:GetAttribute("OutOfStaminaLoopAnimationId")) or nil,
+		breakSuccessAnimationId = startLine and startLine:GetAttribute("BreakSuccessAnimationId") or nil,
+		breakFailAnimationId = startLine and startLine:GetAttribute("BreakFailAnimationId") or nil,
 		currentStamina = state.currentStamina,
 		maxStamina = state.maxStamina,
 	})
@@ -989,6 +1331,18 @@ function SprintRunManager:StopRunning(player, notifyClient)
 	state.speedPenaltyMultiplier = 1
 	state.slideStateSent = false
 	state.stumbling = false
+	state.wallBreaking = false
+	state.wallBreakPhase = nil
+	state.wallBreakSuccess = nil
+	state.wallBreakKnockbackApplied = false
+	state.wallBreakFailLocked = false
+	state.wallBreakWall = nil
+	state.brokenWalls = {}
+	state.wallBreakCooldownUntil = 0
+	state.pendingFailExhaustion = false
+	state.pendingFailExhaustionAt = nil
+	state.failKnockbackUntil = nil
+	state.failKnockbackDirection = nil
 	state.stumbleEndAt = nil
 	state.stumbleStartedAt = nil
 	state.stumbleSpeed = nil
