@@ -353,6 +353,10 @@ function PetStandManager:GetPetIncomePerSecond(petModel)
 
 	local multiplier = self:GetLevelIncomeMultiplier(level)
 	local income = power * multiplier
+	local accessoryIncomePercent = tonumber(state.accessoryBuffs and state.accessoryBuffs.incomePercent) or 0
+	if accessoryIncomePercent ~= 0 then
+		income *= (1 + accessoryIncomePercent)
+	end
 
 	return math.max(1, math.floor(income + 0.5))
 end
