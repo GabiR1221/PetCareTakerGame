@@ -6,14 +6,16 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
-local mouse = player:GetMouse()
-local feedRemote = ReplicatedStorage:WaitForChild("PetFeedEvent")
+local feedInteractRemote = ReplicatedStorage:WaitForChild("PetFeedInteractEvent")
 
 local FEED_PROMPT_NAME = "FeedPromptClient"
 local PET_PROMPT_NAME = "PetPrompt"
 local FEED_MAX_DISTANCE = 8
+local FEED_HOLD_DURATION = 1.2
+local HOLD_COMPLETE_CANCEL_SUPPRESS_WINDOW = 0.25
 
 local trackedPickupPrompts = {}
+local cancelSuppressedUntilByPrompt = {}
 
 local function getPetModelFromInstance(target)
 	local current = target
@@ -61,10 +63,30 @@ local function getOrCreateFeedPrompt(pickupPrompt)
 		feedPrompt.ActionText = "Feed"
 		feedPrompt.ObjectText = "Pet"
 		feedPrompt.MaxActivationDistance = FEED_MAX_DISTANCE
-		feedPrompt.HoldDuration = 0
+		feedPrompt.HoldDuration = FEED_HOLD_DURATION
 		feedPrompt.RequiresLineOfSight = false
 		feedPrompt.Enabled = false
 		feedPrompt.Parent = helperPart
+
+		feedPrompt.PromptButtonHoldBegan:Connect(function()
+			if not hasFoodEquipped() then
+				return
+			end
+			local petModel = getPetModelFromInstance(helperPart)
+			if petModel then
+				cancelSuppressedUntilByPrompt[feedPrompt] = 0
+				feedInteractRemote:FireServer("start", petModel)
+			end
+		end)
+
+		feedPrompt.PromptButtonHoldEnded:Connect(function()
+			local suppressUntil = cancelSuppressedUntilByPrompt[feedPrompt] or 0
+			if os.clock() < suppressUntil then
+				cancelSuppressedUntilByPrompt[feedPrompt] = 0
+				return
+			end
+			feedInteractRemote:FireServer("cancel")
+		end)
 
 		feedPrompt.Triggered:Connect(function()
 			if not hasFoodEquipped() then
@@ -76,7 +98,8 @@ local function getOrCreateFeedPrompt(pickupPrompt)
 				return
 			end
 
-			feedRemote:FireServer(petModel)
+			cancelSuppressedUntilByPrompt[feedPrompt] = os.clock() + HOLD_COMPLETE_CANCEL_SUPPRESS_WINDOW
+			feedInteractRemote:FireServer("complete", petModel)
 		end)
 	end
 
