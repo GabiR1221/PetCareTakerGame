@@ -19,7 +19,7 @@ local accessoryEvent = ReplicatedStorage:WaitForChild("PetAccessoryEvent")
 ]]
 
 local function resolveAccessoryGui()
-	local screen = PlayerGui:FindFirstChild("AccessoryServiceGui")
+	local screen = PlayerGui:WaitForChild("AccessoryServiceGui")
 	if not screen then
 		warn("[AccessoryClient] Missing PlayerGui.AccessoryServiceGui. Create it in Studio.")
 		return nil
