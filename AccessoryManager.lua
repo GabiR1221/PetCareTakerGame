@@ -15,6 +15,71 @@ function AccessoryManager:Initialize(stateTable, carryingTable, playersService, 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.PetRigManager = require(script.Parent.PetRigManager)
+
+	-- Extend this table to add more buffs in the future.
+	-- Key must match accessory model/item name.
+	self.AccessoryBuffsByName = {
+		Hat1 = { incomePercent = 5 },
+	}
+end
+
+function AccessoryManager:_getBuffForAccessory(accessoryName)
+	if type(accessoryName) ~= "string" or accessoryName == "" then
+		return nil
+	end
+	local configured = self.AccessoryBuffsByName and self.AccessoryBuffsByName[accessoryName] or nil
+	if configured then
+		return configured
+	end
+
+	local storage = self.ServerStorage and self.ServerStorage:FindFirstChild("PetAccessories")
+	local template = storage and storage:FindFirstChild(accessoryName) or nil
+	if not template then
+		local replicatedAccessories = ReplicatedStorage:FindFirstChild("Accessories")
+		template = replicatedAccessories and replicatedAccessories:FindFirstChild(accessoryName) or nil
+	end
+	if template then
+		local attrPercent = tonumber(template:GetAttribute("IncomePercentBuff"))
+		if attrPercent then
+			return { incomePercent = attrPercent }
+		end
+	end
+
+	return nil
+end
+
+function AccessoryManager:_removeManagedAccessoriesFromPet(petModel)
+	if not petModel then return end
+	local rigidConstraint = petModel:FindFirstChildWhichIsA("RigidConstraint", true)
+	if rigidConstraint and rigidConstraint:IsA("RigidConstraint") then
+		local attachment1 = rigidConstraint.Attachment1
+		if attachment1 and attachment1.Parent and attachment1.Parent:IsDescendantOf(petModel) then
+			rigidConstraint.Attachment1 = nil
+		end
+	end
+	for _, child in ipairs(petModel:GetChildren()) do
+		if child:GetAttribute("ManagedPetAccessory") == true then
+			pcall(function() child:Destroy() end)
+		end
+	end
+end
+
+function AccessoryManager:_applyAccessoryBuffState(state, accessoryName)
+	state.accessoryBuffs = state.accessoryBuffs or {}
+	state.accessoryBuffs.incomePercent = 0
+	local buff = self:_getBuffForAccessory(accessoryName)
+	if buff and tonumber(buff.incomePercent) then
+		state.accessoryBuffs.incomePercent = tonumber(buff.incomePercent)
+	end
+end
+
+function AccessoryManager:_setSingleAccessoryState(state, accessoryName)
+	state.accessorySlots = state.accessorySlots or { A = nil, B = nil }
+	state.accessorySlots.A = accessoryName
+	state.accessorySlots.B = nil
+	state.equippedAccessoryName = accessoryName
+	self:_syncAccessoryLegacyState(state)
+	self:_applyAccessoryBuffState(state, accessoryName)
 end
 
 function AccessoryManager:_getOwnedAccessoryNamesForPlayer(player)
@@ -67,23 +132,38 @@ function AccessoryManager:_toggleNamedAccessoryOnPet(pet, state, accessoryName)
 	local slots = state.accessorySlots
 
 	if slots.A == accessoryName then
-		if self:RemoveAccessoryFromPet(pet, accessoryName) then
-			slots.A = nil
-		end
-		self:_syncAccessoryLegacyState(state)
+		self:_removeManagedAccessoriesFromPet(pet)
+		self:_setSingleAccessoryState(state, nil)
 		return true
 	end
 
-	if slots.B == accessoryName then
-		if self:RemoveAccessoryFromPet(pet, accessoryName) then
-			slots.B = nil
-		end
-		self:_syncAccessoryLegacyState(state)
-		return true
+	local accessoryStorage = self.ServerStorage and self.ServerStorage:FindFirstChild("PetAccessories")
+	local accessoryModelTemplate = accessoryStorage and accessoryStorage:FindFirstChild(accessoryName) or nil
+	if not accessoryModelTemplate then
+		local replicatedAccessories = ReplicatedStorage:FindFirstChild("Accessories")
+		accessoryModelTemplate = replicatedAccessories and replicatedAccessories:FindFirstChild(accessoryName) or nil
+	end
+	if not accessoryModelTemplate then
+		return false
 	end
 
-	local attachKey = (slots.A == nil and "A") or (slots.B == nil and "B") or nil
-	if not attachKey then
+	local clone = accessoryModelTemplate:Clone()
+	clone.Name = accessoryName
+	clone:SetAttribute("ManagedPetAccessory", true)
+	local attachPoint = "AccessoryAttach1"
+	self:_removeManagedAccessoriesFromPet(pet)
+	local ok = self:AttachAccessoryToPetModel(pet, clone, attachPoint)
+	if not ok then
+		pcall(function() clone:Destroy() end)
+		return false
+	end
+
+	self:_setSingleAccessoryState(state, accessoryName)
+	return true
+end
+
+function AccessoryManager:_equipNamedAccessoryOnPet(pet, state, accessoryName)
+	if not pet or not state or type(accessoryName) ~= "string" or accessoryName == "" then
 		return false
 	end
 
@@ -93,23 +173,52 @@ function AccessoryManager:_toggleNamedAccessoryOnPet(pet, state, accessoryName)
 		local replicatedAccessories = ReplicatedStorage:FindFirstChild("Accessories")
 		accessoryModelTemplate = replicatedAccessories and replicatedAccessories:FindFirstChild(accessoryName) or nil
 	end
-	
 	if not accessoryModelTemplate then
 		return false
 	end
 
 	local clone = accessoryModelTemplate:Clone()
 	clone.Name = accessoryName
-	local attachPoint = (attachKey == "A") and "AccessoryAttach1" or "AccessoryAttach2"
-	local ok = self:AttachAccessoryToPetModel(pet, clone, attachPoint)
+	clone:SetAttribute("ManagedPetAccessory", true)
+	self:_removeManagedAccessoriesFromPet(pet)
+	local ok = self:AttachAccessoryToPetModel(pet, clone, "AccessoryAttach1")
 	if not ok then
 		pcall(function() clone:Destroy() end)
 		return false
 	end
 
-	slots[attachKey] = accessoryName
-	self:_syncAccessoryLegacyState(state)
+	self:_setSingleAccessoryState(state, accessoryName)
 	return true
+end
+
+function AccessoryManager:RestoreAccessoriesOnPet(petModel)
+	if not petModel then return false end
+	local state = self.petState[petModel]
+	if not state then return false end
+
+	local equippedName = state.equippedAccessoryName
+	if type(equippedName) ~= "string" or equippedName == "" then
+		equippedName = state.accessorySlots and state.accessorySlots.A or nil
+	end
+	if type(equippedName) ~= "string" or equippedName == "" then
+		self:_setSingleAccessoryState(state, nil)
+		self:_removeManagedAccessoriesFromPet(petModel)
+		return false
+	end
+
+	local ok = self:_equipNamedAccessoryOnPet(petModel, state, equippedName)
+	if ok then
+		self:_setSingleAccessoryState(state, equippedName)
+	end
+	return ok
+end
+
+function AccessoryManager:RestoreAccessoriesForPlayer(userId)
+	for pet, state in pairs(self.petState) do
+		if pet and pet.Parent and state and tonumber(state.ownerUserId) == tonumber(userId) and state.wild ~= true then
+			self:RestoreAccessoriesOnPet(pet)
+		end
+	end
 end
 
 function AccessoryManager:ConnectAccessoryPrompt(tablePart)
@@ -299,12 +408,67 @@ function AccessoryManager:AttachAccessoryToPetModel(petModel, accessoryModel, at
 	local aPart = accessoryModel.PrimaryPart
 	if not aPart then return false end
 
+	accessoryModel.Parent = petModel
+	-- Keep accessory parts rigid to their own PrimaryPart so the whole model follows as one piece.
+	for _, bp in ipairs(accessoryModel:GetDescendants()) do
+		if bp:IsA("BasePart") and bp ~= aPart then
+			local hasJointToPrimary = false
+			for _, joint in ipairs(bp:GetChildren()) do
+				if joint:IsA("WeldConstraint") and (joint.Part0 == aPart or joint.Part1 == aPart) then
+					hasJointToPrimary = true
+					break
+				end
+			end
+			if not hasJointToPrimary then
+				local weldToPrimary = Instance.new("WeldConstraint")
+				weldToPrimary.Part0 = aPart
+				weldToPrimary.Part1 = bp
+				weldToPrimary.Parent = aPart
+			end
+		end
+	end
+	for _, bp in ipairs(accessoryModel:GetDescendants()) do
+		if bp:IsA("BasePart") then
+			bp.CanCollide = false
+			bp.Massless = true
+			bp.Anchored = false
+			bp.AssemblyLinearVelocity = Vector3.zero
+			bp.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
+	local petAttachment = petModel:FindFirstChild("PetAccessoryAttachment", true)
+	local rigidConstraint = petModel:FindFirstChildWhichIsA("RigidConstraint", true)
+	local accessoryAttachment = accessoryModel:FindFirstChild("AccessoryAttachment", true)
+	local canUseAttachmentRig = petAttachment
+		and petAttachment:IsA("Attachment")
+		and petAttachment.Parent
+		and petAttachment.Parent:IsA("BasePart")
+		and rigidConstraint
+		and rigidConstraint:IsA("RigidConstraint")
+		and accessoryAttachment
+		and accessoryAttachment:IsA("Attachment")
+		and accessoryAttachment.Parent
+		and accessoryAttachment.Parent:IsA("BasePart")
+
+	if canUseAttachmentRig then
+		local relativePivot = accessoryAttachment.WorldCFrame:ToObjectSpace(accessoryModel:GetPivot())
+		local targetPivot = petAttachment.WorldCFrame * relativePivot
+		accessoryModel:PivotTo(targetPivot)
+
+		rigidConstraint.Attachment0 = rigidConstraint.Attachment0 or petAttachment
+		rigidConstraint.Attachment1 = accessoryAttachment
+		rigidConstraint.Enabled = true
+		return true
+	end
+
+	-- Fallback to previous part-based behavior
 	local attachToPart = nil
 	local targetCFrame = nil
-	local namedAttachment = petModel:FindFirstChild("AccessoryAttachment", true)
-	if namedAttachment and namedAttachment:IsA("Attachment") and namedAttachment.Parent and namedAttachment.Parent:IsA("BasePart") then
-		attachToPart = namedAttachment.Parent
-		targetCFrame = namedAttachment.WorldCFrame
+	local legacyAttachment = petModel:FindFirstChild("AccessoryAttachment", true)
+	if legacyAttachment and legacyAttachment:IsA("Attachment") and legacyAttachment.Parent and legacyAttachment.Parent:IsA("BasePart") then
+		attachToPart = legacyAttachment.Parent
+		targetCFrame = legacyAttachment.WorldCFrame
 	else
 		local attachTo = petModel:FindFirstChild(attachPointName)
 		if attachTo and attachTo:IsA("BasePart") then
@@ -316,16 +480,7 @@ function AccessoryManager:AttachAccessoryToPetModel(petModel, accessoryModel, at
 		end
 	end
 
-	accessoryModel.Parent = petModel
 	accessoryModel:SetPrimaryPartCFrame(targetCFrame)
-	for _, bp in ipairs(accessoryModel:GetDescendants()) do
-		if bp:IsA("BasePart") then
-			bp.CanCollide = false
-			bp.Massless = true
-		end
-	end
-
-	-- Create weld constraint
 	local weld = Instance.new("WeldConstraint")
 	weld.Part0 = aPart
 	weld.Part1 = attachToPart
@@ -338,6 +493,13 @@ function AccessoryManager:RemoveAccessoryFromPet(petModel, accessoryName)
 	if not petModel then return false end
 	for _, child in ipairs(petModel:GetChildren()) do
 		if child.Name == accessoryName then
+			local rigidConstraint = petModel:FindFirstChildWhichIsA("RigidConstraint", true)
+			if rigidConstraint and rigidConstraint:IsA("RigidConstraint") then
+				local attachment1 = rigidConstraint.Attachment1
+				if attachment1 and attachment1:IsDescendantOf(child) then
+					rigidConstraint.Attachment1 = nil
+				end
+			end
 			-- Remove any welds
 			for _, weld in ipairs(child:GetDescendants()) do
 				if weld:IsA("WeldConstraint") or weld:IsA("Weld") then
