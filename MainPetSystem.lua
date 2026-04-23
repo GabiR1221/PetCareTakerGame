@@ -383,10 +383,10 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData67", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData71", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
-PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager)
+PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
 PetMoodVisualManager:Initialize(petState)
 SprintRunManager:Initialize(Players, WildPetManager)
 ToyHappinessManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
@@ -560,6 +560,9 @@ Players.PlayerAdded:Connect(function(player)
 	local petData = saveManager:LoadPlayerPets(player)
 	if petData and #petData > 0 then
 		WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
+		task.defer(function()
+			AccessoryManager:RestoreAccessoriesForPlayer(player.UserId)
+		end)
 	end
 end)
 
