@@ -199,6 +199,8 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		wetness = 0,
 		hunger = 100,
 		happiness = 100,
+		maxHunger = tonumber(pet:GetAttribute("MaxHunger")) or 100,
+		maxHappiness = tonumber(pet:GetAttribute("MaxHappiness")) or 100,
 		showered = true,
 		dried = true,
 		accessories = {A = false, B = false},
@@ -1119,6 +1121,8 @@ function WildPetManager:SpawnWildPet(preferredSpawnArea)
 		dried = true,
 		hunger = 100,
 		happiness = 100,
+		maxHunger = tonumber(pet:GetAttribute("MaxHunger")) or 100,
+		maxHappiness = tonumber(pet:GetAttribute("MaxHappiness")) or 100,
 		power = power,
 		rarityMultiplier = rarityMult,
 		petUid = petUid
@@ -1381,7 +1385,14 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			self.petState[pet].xp = savedXP
 			self.petState[pet].level = resolvedLevel
 			self.petState[pet].baseScale = detectedBaseScale
-			self.petState[pet].happiness = math.clamp(tonumber(self.petState[pet].happiness) or 100, 0, 100)
+			local persistedMaxHunger = tonumber(self.petState[pet].maxHunger)
+			local persistedMaxHappiness = tonumber(self.petState[pet].maxHappiness)
+			local templateMaxHunger = tonumber(pet:GetAttribute("MaxHunger"))
+			local templateMaxHappiness = tonumber(pet:GetAttribute("MaxHappiness"))
+			self.petState[pet].maxHunger = math.max(1, math.floor(persistedMaxHunger or templateMaxHunger or 100))
+			self.petState[pet].maxHappiness = math.max(1, math.floor(persistedMaxHappiness or templateMaxHappiness or 100))
+			self.petState[pet].hunger = math.clamp(tonumber(self.petState[pet].hunger) or self.petState[pet].maxHunger, 0, self.petState[pet].maxHunger)
+			self.petState[pet].happiness = math.clamp(tonumber(self.petState[pet].happiness) or self.petState[pet].maxHappiness, 0, self.petState[pet].maxHappiness)
 
 			if not self.petState[pet].power then
 				self.petState[pet].power = petInfo.power or 1
