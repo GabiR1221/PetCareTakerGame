@@ -173,8 +173,31 @@ function PetStateManager:SetPetScale(petModel, newScale)
 		currentModelScale = oldScale
 	end
 	local appliedCurrentScale = (type(currentModelScale) == "number" and currentModelScale > 0) and currentModelScale or oldScale
+
+	local function ensureHumanoidHipHeight()
+		local humanoid = petModel:FindFirstChildOfClass("Humanoid")
+		if not humanoid then return end
+
+		local baseHip = humanoid:GetAttribute("BaseHipHeight")
+		if type(baseHip) ~= "number" or baseHip <= 0 then
+			local storedBaseHip = petModel:GetAttribute("StoredBaseHipHeight")
+			if type(storedBaseHip) == "number" and storedBaseHip > 0 then
+				baseHip = storedBaseHip
+			else
+				baseHip = tonumber(humanoid.HipHeight) or 0
+			end
+			humanoid:SetAttribute("BaseHipHeight", baseHip)
+		end
+
+		local targetHip = math.max(0, (tonumber(baseHip) or 0) * newScale)
+		if math.abs((humanoid.HipHeight or 0) - targetHip) > 0.001 then
+			humanoid.HipHeight = targetHip
+		end
+	end
+
 	if math.abs(oldScale - newScale) < 0.0001 and math.abs(currentModelScale - newScale) < 0.0001 then
 		state.scale = newScale
+		ensureHumanoidHipHeight()
 		return
 	end
 
@@ -224,20 +247,7 @@ function PetStateManager:SetPetScale(petModel, newScale)
 		end
 	end
 
-	local humanoid = petModel:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		local baseHip = humanoid:GetAttribute("BaseHipHeight")
-		if type(baseHip) ~= "number" then
-			baseHip = (tonumber(humanoid.HipHeight) or 0) / (oldScale == 0 and 1 or oldScale)
-			humanoid:SetAttribute("BaseHipHeight", baseHip)
-		end
-
-		local targetHip = math.max(0, baseHip * newScale)
-		if math.abs((humanoid.HipHeight or 0) - targetHip) > 0.001 then
-			humanoid.HipHeight = targetHip
-		end
-	end
-
+	ensureHumanoidHipHeight()
 	state.scale = newScale
 end
 
