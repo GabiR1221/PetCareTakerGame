@@ -1239,6 +1239,10 @@ function ShowerDryerManager:_finishShowerForPet(player, pet, showerPart)
 
 	-- Award XP
 	self.PetStateManager:AddXP(pet, 20) -- SHOWER_XP
+	local questBridge = ReplicatedStorage:FindFirstChild("PassQuestProgressBridge")
+	if questBridge and questBridge:IsA("BindableEvent") and player then
+		(questBridge :: BindableEvent):Fire(player, "ShowerPet", 1)
+	end
 
 	-- Reset dirtiness; drying mechanic has been removed.
 	self.petState[pet] = self.petState[pet] or {}
