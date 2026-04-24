@@ -4,7 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local HUNGER_TICK_SECONDS = 5
 local HUNGER_DECAY_AMOUNT = 1
-local MAX_STAT_VALUE = 100
+local DEFAULT_MAX_STAT_VALUE = 100
 local MAX_FEED_DISTANCE = 20
 local FEED_HOLD_DURATION = 1.2
 local DEFAULT_FEED_ANIMATION_ID = "rbxassetid://85424941041976"
@@ -91,14 +91,18 @@ function PetFeedingManager:EnsurePetDefaults(petModel)
 	local state = self.petState[petModel]
 
 	if state.hunger == nil then
-		state.hunger = MAX_STAT_VALUE
+		state.hunger = DEFAULT_MAX_STAT_VALUE
 	end
 	if state.happiness == nil then
-		state.happiness = MAX_STAT_VALUE
+		state.happiness = DEFAULT_MAX_STAT_VALUE
 	end
 
-	state.hunger = math.clamp(tonumber(state.hunger) or MAX_STAT_VALUE, 0, MAX_STAT_VALUE)
-	state.happiness = math.clamp(tonumber(state.happiness) or MAX_STAT_VALUE, 0, MAX_STAT_VALUE)
+	if self.PetStateManager and self.PetStateManager.ClampPetCoreStats then
+		self.PetStateManager:ClampPetCoreStats(petModel, state)
+	else
+		state.hunger = math.clamp(tonumber(state.hunger) or DEFAULT_MAX_STAT_VALUE, 0, DEFAULT_MAX_STAT_VALUE)
+		state.happiness = math.clamp(tonumber(state.happiness) or DEFAULT_MAX_STAT_VALUE, 0, DEFAULT_MAX_STAT_VALUE)
+	end
 	return state
 end
 
@@ -365,8 +369,11 @@ function PetFeedingManager:StartHungerDecayLoop()
 			for petModel, state in pairs(self.petState) do
 				if petModel and petModel.Parent and state and state.ownerUserId and not state.wild then
 					self:EnsurePetDefaults(petModel)
+					local hungerMax = (self.PetStateManager and self.PetStateManager.GetPetStatMax)
+						and self.PetStateManager:GetPetStatMax(petModel, "hunger", state)
+						or DEFAULT_MAX_STAT_VALUE
 					local oldHunger = state.hunger
-					state.hunger = math.clamp(oldHunger - HUNGER_DECAY_AMOUNT, 0, MAX_STAT_VALUE)
+					state.hunger = math.clamp(oldHunger - HUNGER_DECAY_AMOUNT, 0, hungerMax)
 					if state.hunger ~= oldHunger then
 						self.PetStateManager:SendStateToOwner(petModel)
 
@@ -398,7 +405,10 @@ function PetFeedingManager:HandleFeedRequest(player, petModel)
 	end
 
 	self:EnsurePetDefaults(petModel)
-	state.hunger = math.clamp((state.hunger or MAX_STAT_VALUE) + hungerGain, 0, MAX_STAT_VALUE)
+	local hungerMax = (self.PetStateManager and self.PetStateManager.GetPetStatMax)
+		and self.PetStateManager:GetPetStatMax(petModel, "hunger", state)
+		or DEFAULT_MAX_STAT_VALUE
+	state.hunger = math.clamp((state.hunger or hungerMax) + hungerGain, 0, hungerMax)
 	self.PetStateManager:SendStateToOwner(petModel)
 
 	if xpReward > 0 then
