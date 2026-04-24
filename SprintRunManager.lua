@@ -205,6 +205,25 @@ function SprintRunManager:_enterCollapsedExhaustion(player, state)
 	})
 end
 
+function SprintRunManager:_restoreCharacterMovement(player, state)
+	local char = player and player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then return false end
+
+	local targetWalkSpeed = (state and state.defaultWalkSpeed) or DEFAULT_WALK_SPEED
+	if targetWalkSpeed <= 0 then
+		targetWalkSpeed = DEFAULT_WALK_SPEED
+	end
+
+	hum.WalkSpeed = targetWalkSpeed
+	hum.JumpPower = (state and state.defaultJumpPower) or hum.JumpPower
+	hum.JumpHeight = (state and state.defaultJumpHeight) or hum.JumpHeight
+	hum.AutoRotate = (state and state.defaultAutoRotate) ~= false
+	hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+	hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, (state and state.defaultFreefallEnabled) ~= false)
+	return true
+end
+
 
 function SprintRunManager:_startHeartbeat()
 	RunService.Heartbeat:Connect(function(dt)
@@ -346,6 +365,19 @@ function SprintRunManager:_startHeartbeat()
 				hum.JumpHeight = 0
 				hum.Jump = false
 				hum:Move(Vector3.zero, false)
+			elseif state.failKnockbackUntil and now <= state.failKnockbackUntil and state.failKnockbackDirection then
+				local dir = state.failKnockbackDirection
+				hum.WalkSpeed = 0
+				hum.JumpPower = 0
+				hum.JumpHeight = 0
+				hum.AutoRotate = false
+				hum.Jump = false
+				hum:Move(Vector3.zero, false)
+				root.AssemblyLinearVelocity = Vector3.new(
+					-dir.X * (WALL_BREAK_KNOCKBACK_SPEED * 1.2),
+					root.AssemblyLinearVelocity.Y,
+					-dir.Z * (WALL_BREAK_KNOCKBACK_SPEED * 1.2)
+				)
 			elseif state.wallBreaking then
 				if state.wallBreakPhase == "Animating" then
 					local isFailAnim = state.wallBreakSuccess == false
@@ -616,7 +648,7 @@ function SprintRunManager:OnWallBreakFailMarker(player)
 	end
 	
 	state.failKnockbackDirection = horizontal
-	state.failKnockbackUntil = os.clock() + 0.25
+	state.failKnockbackUntil = os.clock() + 0.4
 
 	root.AssemblyLinearVelocity = Vector3.new(
 		-horizontal.X * (WALL_BREAK_KNOCKBACK_SPEED * 1.2),
@@ -1307,6 +1339,14 @@ function SprintRunManager:GoBackToPlot(player)
 		end
 	end
 
+	-- Safety net: after teleporting back, force movement stats to defaults in case
+	-- an in-flight sprint heartbeat frame tries to overwrite humanoid values.
+	for i = 0, 3 do
+		task.delay(i * 0.08, function()
+			self:_restoreCharacterMovement(player, state)
+		end)
+	end
+
 	state.isReturning = false
 end
 
@@ -1353,21 +1393,9 @@ function SprintRunManager:StopRunning(player, notifyClient)
 	local char = player.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	if hum then
-		hum.WalkSpeed = state.defaultWalkSpeed or DEFAULT_WALK_SPEED
-		hum.JumpPower = state.defaultJumpPower or hum.JumpPower
-		hum.JumpHeight = state.defaultJumpHeight or hum.JumpHeight
-		hum.AutoRotate = state.defaultAutoRotate
-		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
-		hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, state.defaultFreefallEnabled ~= false)
+		self:_restoreCharacterMovement(player, state)
 		task.delay(0.1, function()
-			if hum and hum.Parent then
-				hum.WalkSpeed = state.defaultWalkSpeed or DEFAULT_WALK_SPEED
-				hum.JumpPower = state.defaultJumpPower or hum.JumpPower
-				hum.JumpHeight = state.defaultJumpHeight or hum.JumpHeight
-				hum.AutoRotate = state.defaultAutoRotate
-				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
-				hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, state.defaultFreefallEnabled ~= false)
-			end
+			self:_restoreCharacterMovement(player, state)
 		end)
 	end
 
