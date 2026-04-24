@@ -65,13 +65,15 @@ local function updateMenuForPet(pet, payload)
 	end
 
 	local hunger = tonumber(payload.hunger) or 100
-	hungerBarFill.Size = UDim2.new(math.clamp(hunger / 100, 0, 1), 0, 1, 0)
-	hungerBarText.Text = ("%d / 100"):format(hunger)
+	local hungerMax = math.max(1, math.floor(tonumber(payload.hungerMax) or 100))
+	hungerBarFill.Size = UDim2.new(math.clamp(hunger / hungerMax, 0, 1), 0, 1, 0)
+	hungerBarText.Text = ("%d / %d"):format(hunger, hungerMax)
 
 	if happinessBarFill and happinessBarText then
 		local happiness = tonumber(payload.happiness) or 100
-		happinessBarFill.Size = UDim2.new(math.clamp(happiness / 100, 0, 1), 0, 1, 0)
-		happinessBarText.Text = ("%d / 100"):format(happiness)
+		local happinessMax = math.max(1, math.floor(tonumber(payload.happinessMax) or 100))
+		happinessBarFill.Size = UDim2.new(math.clamp(happiness / happinessMax, 0, 1), 0, 1, 0)
+		happinessBarText.Text = ("%d / %d"):format(happiness, happinessMax)
 	end
 
 
