@@ -53,6 +53,14 @@ function PetRigManager:EnsurePetRig(pet)
 	humanoid.WalkSpeed = 6
 	humanoid.AutoRotate = true
 	humanoid.PlatformStand = false
+	
+	local storedBaseHip = pet:GetAttribute("StoredBaseHipHeight")
+	if type(storedBaseHip) == "number" and storedBaseHip > 0 then
+		humanoid:SetAttribute("BaseHipHeight", storedBaseHip)
+		humanoid.HipHeight = storedBaseHip
+	elseif type(humanoid:GetAttribute("BaseHipHeight")) ~= "number" then
+		humanoid:SetAttribute("BaseHipHeight", tonumber(humanoid.HipHeight) or 0)
+	end
 
 	for _, part in ipairs(pet:GetDescendants()) do
 		if part:IsA("BasePart") and part ~= hrp then
