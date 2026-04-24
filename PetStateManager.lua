@@ -5,6 +5,8 @@ local DEFAULT_BASE_PET_SCALE = 1.0
 local SCALE_PER_LEVEL = 0.08 -- intentionally conservative so high-level pets don't become oversized
 local MIN_ALLOWED_SCALE = 0.5
 local MAX_ALLOWED_SCALE = 2.25
+local DEFAULT_MAX_HUNGER = 100
+local DEFAULT_MAX_HAPPINESS = 100
 
 local function resolveInventoryPetIdByUid(player, petUid)
 	if not player or type(petUid) ~= "string" or petUid == "" then return nil end
@@ -27,6 +29,58 @@ function PetStateManager:Initialize(stateTable, petStateEvent, carryingTable)
 	self.petState = stateTable or {}
 	self.petStateEvent = petStateEvent
 	self.carryingPetByUserId = carryingTable or {}
+end
+
+function PetStateManager:GetPetStatMax(petModel, statKey, state)
+	local normalizedKey = string.lower(tostring(statKey or ""))
+	local maxField = nil
+	local attrName = nil
+	local fallbackDefault = DEFAULT_MAX_HUNGER
+
+	if normalizedKey == "hunger" then
+		maxField = "maxHunger"
+		attrName = "MaxHunger"
+		fallbackDefault = DEFAULT_MAX_HUNGER
+	elseif normalizedKey == "happiness" then
+		maxField = "maxHappiness"
+		attrName = "MaxHappiness"
+		fallbackDefault = DEFAULT_MAX_HAPPINESS
+	else
+		return fallbackDefault
+	end
+
+	state = state or (petModel and self.petState[petModel]) or nil
+	local raw = nil
+
+	if state and state[maxField] ~= nil then
+		raw = state[maxField]
+	elseif petModel then
+		raw = petModel:GetAttribute(attrName)
+		if raw == nil then
+			raw = petModel:GetAttribute("MaxStat")
+		end
+	end
+
+	local resolved = tonumber(raw) or fallbackDefault
+	resolved = math.max(1, math.floor(resolved))
+	if state then
+		state[maxField] = resolved
+	end
+	return resolved
+end
+
+function PetStateManager:ClampPetCoreStats(petModel, state)
+	if not petModel then return state end
+	self.petState[petModel] = self.petState[petModel] or {}
+	state = state or self.petState[petModel]
+
+	local hungerMax = self:GetPetStatMax(petModel, "hunger", state)
+	local happinessMax = self:GetPetStatMax(petModel, "happiness", state)
+
+	state.hunger = math.clamp(tonumber(state.hunger) or hungerMax, 0, hungerMax)
+	state.happiness = math.clamp(tonumber(state.happiness) or happinessMax, 0, happinessMax)
+
+	return state
 end
 
 function PetStateManager:GetLevelFromXP(xp)
@@ -115,6 +169,8 @@ function PetStateManager:SendStateToOwner(petModel)
 		scale = st.scale or 1,
 		dirtiness = tonumber(st.dirtiness) or 0,
 		wetness = 0,
+		hungerMax = self:GetPetStatMax(petModel, "hunger", st),
+		happinessMax = self:GetPetStatMax(petModel, "happiness", st),
 		hunger = tonumber(st.hunger) or 100,
 		happiness = tonumber(st.happiness) or 100,
 		petName = tostring(petModel.Name),
@@ -124,6 +180,8 @@ function PetStateManager:SendStateToOwner(petModel)
 		xpInLevel = xpInLevel,
 		xpForNext = xpForNext
 	}
+	payload.hunger = math.clamp(payload.hunger, 0, payload.hungerMax)
+	payload.happiness = math.clamp(payload.happiness, 0, payload.happinessMax)
 	
 	if payload.petUid ~= "" then
 		st.petUid = payload.petUid
