@@ -22,7 +22,7 @@ local DEFAULTS = {
 	DecayAmountMin = 3,
 	DecayAmountMax = 7,
 }
-
+local DEFAULT_MAX_HAPPINESS = 100
 
 local function getToyPrimaryPart(toy)
 	if not toy then return nil end
@@ -603,7 +603,10 @@ function ToyHappinessManager:_runHappinessSession(player, toyInstance, toyPrimar
 				if pet and pet.Parent then
 					local st = self.petState[pet]
 					if st and tostring(st.ownerUserId) == tostring(player.UserId) and st.wild ~= true and st.toyAssignedId == session.toyStableId then
-						st.happiness = math.clamp((tonumber(st.happiness) or 100) + happinessGain, 0, 100)
+						local happinessMax = (self.PetStateManager and self.PetStateManager.GetPetStatMax)
+							and self.PetStateManager:GetPetStatMax(pet, "happiness", st)
+							or DEFAULT_MAX_HAPPINESS
+						st.happiness = math.clamp((tonumber(st.happiness) or happinessMax) + happinessGain, 0, happinessMax)
 						self.PetStateManager:SendStateToOwner(pet)
 					end
 				end
@@ -760,9 +763,13 @@ function ToyHappinessManager:EnsurePetDefaults(petModel)
 	self.petState[petModel] = self.petState[petModel] or {}
 	local state = self.petState[petModel]
 	if state.happiness == nil then
-		state.happiness = 100
+		state.happiness = DEFAULT_MAX_HAPPINESS
+	end
+
+	if self.PetStateManager and self.PetStateManager.ClampPetCoreStats then
+		self.PetStateManager:ClampPetCoreStats(petModel, state)
 	else
-		state.happiness = math.clamp(tonumber(state.happiness) or 100, 0, 100)
+		state.happiness = math.clamp(tonumber(state.happiness) or DEFAULT_MAX_HAPPINESS, 0, DEFAULT_MAX_HAPPINESS)
 	end
 end
 
@@ -776,9 +783,12 @@ function ToyHappinessManager:_startHappinessDecayLoop()
 			for petModel, st in pairs(self.petState) do
 				if petModel and petModel.Parent and st and st.wild ~= true and st.ownerUserId then
 					self:EnsurePetDefaults(petModel)
+					local happinessMax = (self.PetStateManager and self.PetStateManager.GetPetStatMax)
+						and self.PetStateManager:GetPetStatMax(petModel, "happiness", st)
+						or DEFAULT_MAX_HAPPINESS
 					local decay = math.random(DEFAULTS.DecayAmountMin, DEFAULTS.DecayAmountMax)
 					local old = st.happiness
-					st.happiness = math.clamp(old - decay, 0, 100)
+					st.happiness = math.clamp(old - decay, 0, happinessMax)
 					if st.happiness ~= old then
 						self.PetStateManager:SendStateToOwner(petModel)
 						local owner = self.Players:GetPlayerByUserId(st.ownerUserId)
@@ -797,7 +807,7 @@ function ToyHappinessManager:_ownerHasLowHappinessPets(player, threshold)
 	local target = tonumber(threshold) or 80
 	for petModel, st in pairs(self.petState) do
 		if petModel and petModel.Parent and st and st.wild ~= true and tonumber(st.ownerUserId) == tonumber(player.UserId) then
-			if (tonumber(st.happiness) or 100) < target then
+			if (tonumber(st.happiness) or DEFAULT_MAX_HAPPINESS) < target then
 				return true
 			end
 		end
