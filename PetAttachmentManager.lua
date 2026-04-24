@@ -175,6 +175,11 @@ function PetAttachmentManager:AttachWildPetToPlayer(petModel, player, opts)
 	if petHum then
 		self.petState[petModel] = self.petState[petModel] or {}
 		self.petState[petModel].hadHumanoid = true
+		local storedBaseHip = petHum:GetAttribute("BaseHipHeight")
+		if type(storedBaseHip) ~= "number" then
+			storedBaseHip = tonumber(petHum.HipHeight) or 0
+		end
+		petModel:SetAttribute("StoredBaseHipHeight", math.max(0, tonumber(storedBaseHip) or 0))
 		pcall(function() petHum:Destroy() end)
 	end
 
@@ -250,6 +255,11 @@ function PetAttachmentManager:AttachPetToPlayer(petModel, player, opts)
 	if petHum then
 		self.petState[petModel] = self.petState[petModel] or {}
 		self.petState[petModel].hadHumanoid = true
+		local storedBaseHip = petHum:GetAttribute("BaseHipHeight")
+		if type(storedBaseHip) ~= "number" then
+			storedBaseHip = tonumber(petHum.HipHeight) or 0
+		end
+		petModel:SetAttribute("StoredBaseHipHeight", math.max(0, tonumber(storedBaseHip) or 0))
 		pcall(function() petHum:Destroy() end)
 	end
 
