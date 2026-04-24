@@ -463,10 +463,10 @@ end
 updateSideFrameState = function(payload)
 	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
 
-	setBar(SideFrame, "hungerbarfill", payload.hunger, 100)
+	setBar(SideFrame, "hungerbarfill", payload.hunger, tonumber(payload.hungerMax) or 100)
 	setBar(SideFrame, "wetbarfill", 0, 100)
 	setBar(SideFrame, "dirtbarfill", payload.dirtiness, 100)
-	setBar(SideFrame, "happinessbarfill", payload.happiness, 100)
+	setBar(SideFrame, "happinessbarfill", payload.happiness, tonumber(payload.happinessMax) or 100)
 
 	local xpFill = findSideFrameObject("xpbarfill")
 	if xpFill then
@@ -498,10 +498,10 @@ end
 local function updateSideFrameState(payload)
 	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
 
-	setBar(SideFrame, "hungerbarfill", payload.hunger, 100)
+	setBar(SideFrame, "hungerbarfill", payload.hunger, tonumber(payload.hungerMax) or 100)
 	setBar(SideFrame, "wetbarfill", 0, 100)
 	setBar(SideFrame, "dirtbarfill", payload.dirtiness, 100)
-	setBar(SideFrame, "happinessbarfill", payload.happiness, 100)
+	setBar(SideFrame, "happinessbarfill", payload.happiness, tonumber(payload.happinessMax) or 100)
 
 	local xpFill = findSideFrameObject("xpbarfill")
 	if xpFill then
@@ -960,18 +960,55 @@ local function wirePetsToysMenu()
 	local menusHolder = petsFrame:FindFirstChild("OtherMenusHolder")
 	if not mainFrame or not toysFrame or not menusHolder then return end
 
-	local petsButton = menusHolder:FindFirstChild("PetsButton")
-	local toysButton = menusHolder:FindFirstChild("ToysButton")
-	local accessoriesButton = menusHolder:FindFirstChild("AccessoriesButton")
+	local titleFrameLabel = petsFrame:FindFirstChild("TitleFrame")
+
+	local function resolveMenuButton(container, legacyName, frameName)
+		if not container then return nil end
+		local button = container:FindFirstChild(legacyName)
+		if button and button:IsA("GuiButton") then
+			return button
+		end
+
+		local frameButtonContainer = container:FindFirstChild(frameName .. "FrameButton")
+		if frameButtonContainer then
+			if frameButtonContainer:IsA("GuiButton") then
+				return frameButtonContainer
+			end
+
+			for _, desc in ipairs(frameButtonContainer:GetDescendants()) do
+				if desc:IsA("GuiButton") then
+					return desc
+				end
+			end
+		end
+
+		return nil
+	end
+
+	local petsButton = resolveMenuButton(menusHolder, "PetsButton", "Pets")
+	local toysButton = resolveMenuButton(menusHolder, "ToysButton", "Toys")
+	local accessoriesButton = resolveMenuButton(menusHolder, "AccessoriesButton", "Accessories")
 
 	local function showFrame(frameName)
-		if frameName ~= "Pets" then
-			CurrentlySelected = 0
-			showInventoryItemSideFrame(frameName == "Toys" and "Toys" or "Accessories", nil, "Select an item to see more details.")
-		else
+		CurrentlySelected = 0
+		setSideFrameOpen(false)
+
+		if frameName == "Pets" then
 			setPetBarsVisible(true)
-			setSideFrameInfoLabel("")
 		end
+
+		setSideFrameInfoLabel("")
+
+		if titleFrameLabel and titleFrameLabel:IsA("TextLabel") then
+			if frameName == "Toys" then
+				titleFrameLabel.Text = "Toys"
+			elseif frameName == "Accessories" then
+				titleFrameLabel.Text = "Accessories"
+			else
+				titleFrameLabel.Text = "Brainrots"
+			end
+		end
+
 		mainFrame.Visible = frameName == "Pets"
 		toysFrame.Visible = frameName == "Toys"
 		if accessoriesFrame then
