@@ -20,6 +20,26 @@ local function buildOwnedPetCsv(nameSet)
 	return table.concat(list, ",")
 end
 
+local function restorePetScaleAndHipHeight(petStateManager, pet, state)
+	if not petStateManager or not pet or not state then return end
+
+	local baseScale = tonumber(state.baseScale)
+	if not baseScale then
+		pcall(function()
+			baseScale = tonumber(pet:GetScale())
+		end)
+	end
+	baseScale = math.clamp(tonumber(baseScale) or 1.0, 0.5, 2.25)
+	state.baseScale = baseScale
+
+	local xp = math.max(0, math.floor(tonumber(state.xp) or 0))
+	state.xp = xp
+	state.level = petStateManager:GetLevelFromXP(xp)
+
+	local targetScale = petStateManager:CalculateScaleForLevel(state.level, baseScale)
+	petStateManager:SetPetScale(pet, targetScale)
+end
+
 local function grantAdoptedPetToInventory(player, petModel)
 	if not player or not petModel then return end
 	local templateName = petModel:GetAttribute("TemplateName") or petModel.Name
@@ -191,6 +211,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 
 	self.PetRigManager:EnsurePetRig(pet)
 	self.PetAnimationManager:SetupAnimatorForPet(pet)
+	restorePetScaleAndHipHeight(self.PetStateManager, pet, self.petState[pet])
 	self:PlacePetOnGround(pet, adoptionMat.Position)
 	local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
 	self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId, wanderZone)
@@ -957,6 +978,7 @@ function WildPetManager:AutoAdoptCarriedWildPet(player, options)
 	pcall(function()
 		self.PetRigManager:EnsurePetRig(pet)
 		self.PetAnimationManager:SetupAnimatorForPet(pet)
+		restorePetScaleAndHipHeight(self.PetStateManager, pet, state)
 	end)
 
 	if dropPosition then
