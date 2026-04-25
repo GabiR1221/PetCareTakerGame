@@ -65,15 +65,21 @@ type BuyResponse = { Success: boolean, Error: string?, ShopState: {ShopStateItem
 type NumericValue = IntValue | NumberValue
 
 type PersistedPassData = {
+	Version: number,
 	ClaimedRewardsCsv: string,
 	QuestProgressJson: string,
 	QuestClaimedCsv: string,
+	PassLevel: number,
+	EventXp: number,
+	EventCoins: number,
 }
 
-local PASS_DATASTORE_NAME = "PassRewardsData_v7"------------------------------------------------------------change this
+local PASS_DATASTORE_NAME = tostring(PassRewardsConfig.PassDataStoreName)
 local passDataStore = DataStoreService:GetDataStore(PASS_DATASTORE_NAME)
 local loadedFromDataStore: {[number]: boolean} = {}
 local saveInFlight: {[number]: boolean} = {}
+local premiumOwnershipCheckTimestamps: {[number]: number} = {}
+
 
 local function ensureRemoteFunction(name: string): RemoteFunction
 	local existing = ReplicatedStorage:FindFirstChild(name)
@@ -118,11 +124,34 @@ for _, item in ipairs(PassRewardsConfig.ShopItems) do shopItemsById[item.Id] = i
 
 local questGrantLocks: {[number]: {[number]: boolean}} = {}
 
+local function findChildByNameInsensitive(parent: Instance?, expectedName: string): Instance?
+	if not parent then return nil end
+	local direct = parent:FindFirstChild(expectedName)
+	if direct then return direct end
+	local loweredExpected = string.lower(expectedName)
+	for _, child in ipairs(parent:GetChildren()) do
+		if string.lower(child.Name) == loweredExpected then
+			return child
+		end
+	end
+	return nil
+end
+
 local function getPlayerServerFolder(player: Player): Folder?
 	local root = ServerStorage:FindFirstChild("PlayerData")
 	if not root then return nil end
 	return root:FindFirstChild(tostring(player.UserId)) :: Folder?
 end
+
+local function getPlayerDataValuesFolder(player: Player): Folder?
+	local data = player:FindFirstChild("Data")
+	local playerData = data and data:FindFirstChild("PlayerData")
+	if playerData and playerData:IsA("Folder") then
+		return playerData
+	end
+	return nil
+end
+
 
 local function waitForPlayerServerFolder(player: Player, timeoutSeconds: number): Folder?
 	local started = os.clock()
@@ -168,11 +197,48 @@ local function encodeProgress(progress: {[string]: number}): string
 	return HttpService:JSONEncode(progress)
 end
 
+local function getNumericValueInFolder(folder: Instance?, name: string): number?
+	if not folder then return nil end
+	local valueObj = folder:FindFirstChild(name)
+	if valueObj and (valueObj:IsA("IntValue") or valueObj:IsA("NumberValue")) then
+		return tonumber((valueObj :: NumericValue).Value)
+	end
+	return nil
+end
+
+local function findNumericValue(parent: Instance?, name: string): NumericValue?
+	if not parent then return nil end
+	local valueObj = parent:FindFirstChild(name)
+	if valueObj and (valueObj:IsA("IntValue") or valueObj:IsA("NumberValue")) then
+		return valueObj :: NumericValue
+	end
+	return nil
+end
+
 local function buildPersistedPayloadFromFolder(folder: Folder): PersistedPassData
+	local player = Players:GetPlayerByUserId(tonumber(folder.Name) or 0)
+	local valuesFolder = if player then getPlayerDataValuesFolder(player) else nil
+	local passLevelName = tostring(PassRewardsConfig.ProgressionLevelValueName or "PassLevel")
+	local passXpName = tostring(PassRewardsConfig.ProgressionXpValueName or "EventXp")
+	local eventCoinsName = tostring(PassRewardsConfig.EventCoinsValueName or "EventCoins")
+	local passLevel = 1
+	local passXp = 0
+	local eventCoins = 0
+	local passLevelRaw = getNumericValueInFolder(valuesFolder, passLevelName)
+	local passXpRaw = getNumericValueInFolder(valuesFolder, passXpName)
+	local eventCoinsRaw = getNumericValueInFolder(valuesFolder, eventCoinsName)
+	if passLevelRaw then passLevel = math.max(1, math.floor(passLevelRaw)) end
+	if passXpRaw then passXp = math.max(0, math.floor(passXpRaw)) end
+	if eventCoinsRaw then eventCoins = math.max(0, math.floor(eventCoinsRaw)) end
+
 	return {
+		Version = math.max(1, math.floor(tonumber(PassRewardsConfig.PassDataVersion) or 1)),
 		ClaimedRewardsCsv = tostring(folder:GetAttribute(PassRewardsConfig.ClaimedAttributeName) or ""),
 		QuestProgressJson = tostring(folder:GetAttribute(PassRewardsConfig.QuestProgressAttributeName) or ""),
 		QuestClaimedCsv = tostring(folder:GetAttribute(PassRewardsConfig.QuestClaimedAttributeName) or ""),
+		PassLevel = passLevel,
+		EventXp = passXp,
+		EventCoins = eventCoins,
 	}
 end
 
@@ -188,7 +254,9 @@ local function savePassDataForPlayer(player: Player, blocking: boolean?)
 	local function runSave()
 		for attempt = 1, 3 do
 			local ok, err = pcall(function()
-				passDataStore:SetAsync(key, payload)
+				passDataStore:UpdateAsync(key, function(_old)
+					return payload
+				end)
 			end)
 			if ok then
 				saveInFlight[userId] = nil
@@ -224,6 +292,16 @@ local function ensurePassDataLoaded(player: Player)
 	folder:SetAttribute(PassRewardsConfig.ClaimedAttributeName, "")
 	folder:SetAttribute(PassRewardsConfig.QuestProgressAttributeName, "{}")
 	folder:SetAttribute(PassRewardsConfig.QuestClaimedAttributeName, "")
+	local valuesFolder = getPlayerDataValuesFolder(player)
+	local passLevelName = tostring(PassRewardsConfig.ProgressionLevelValueName or "PassLevel")
+	local passXpName = tostring(PassRewardsConfig.ProgressionXpValueName or "EventXp")
+	local eventCoinsName = tostring(PassRewardsConfig.EventCoinsValueName or "EventCoins")
+	local passLevelValue = findNumericValue(valuesFolder, passLevelName)
+	local passXpValue = findNumericValue(valuesFolder, passXpName)
+	local eventCoinsValue = findNumericValue(valuesFolder, eventCoinsName)
+	if passLevelValue then passLevelValue.Value = 1 end
+	if passXpValue then passXpValue.Value = 0 end
+	if eventCoinsValue then eventCoinsValue.Value = 0 end
 
 	local key = tostring(player.UserId)
 	local ok, data = pcall(function()
@@ -234,6 +312,12 @@ local function ensurePassDataLoaded(player: Player)
 		return
 	end
 	if type(data) ~= "table" then return end
+
+	local savedVersion = math.max(0, math.floor(tonumber(data.Version) or 0))
+	local expectedVersion = math.max(1, math.floor(tonumber(PassRewardsConfig.PassDataVersion) or 1))
+	if savedVersion ~= expectedVersion then
+		return
+	end
 
 	local claimedCsv = data.ClaimedRewardsCsv
 	if type(claimedCsv) == "string" then
@@ -249,6 +333,27 @@ local function ensurePassDataLoaded(player: Player)
 	if type(questClaimedCsv) == "string" then
 		folder:SetAttribute(PassRewardsConfig.QuestClaimedAttributeName, questClaimedCsv)
 	end
+
+	if passLevelValue and tonumber(data.PassLevel) then
+		passLevelValue.Value = math.max(1, math.floor(tonumber(data.PassLevel) or 1))
+	end
+	if passXpValue and tonumber(data.EventXp) then
+		passXpValue.Value = math.max(0, math.floor(tonumber(data.EventXp) or 0))
+	end
+	if eventCoinsValue and tonumber(data.EventCoins) then
+		eventCoinsValue.Value = math.max(0, math.floor(tonumber(data.EventCoins) or 0))
+	end
+end
+
+
+local function normalizeClaimedRewards(claimedSet: {[number]: boolean}): {[number]: boolean}
+	local normalized: {[number]: boolean} = {}
+	for rewardId, isClaimed in pairs(claimedSet) do
+		if isClaimed and rewardsById[rewardId] ~= nil then
+			normalized[rewardId] = true
+		end
+	end
+	return normalized
 end
 
 local function getClaimedRewards(player: Player): {[number]: boolean}
@@ -257,7 +362,13 @@ local function getClaimedRewards(player: Player): {[number]: boolean}
 	if not folder then return {} end
 	local raw = tostring(folder:GetAttribute(PassRewardsConfig.ClaimedAttributeName) or "")
 	if raw == "" then return {} end
-	return parseCsvToSet(raw)
+	local claimed = normalizeClaimedRewards(parseCsvToSet(raw))
+	local normalizedCsv = encodeSetToCsv(claimed)
+	if normalizedCsv ~= raw then
+		folder:SetAttribute(PassRewardsConfig.ClaimedAttributeName, normalizedCsv)
+		savePassDataForPlayer(player)
+	end
+	return claimed
 end
 
 local function setClaimedReward(player: Player, rewardId: number)
@@ -304,24 +415,57 @@ local function setQuestProgress(player: Player, progress: {[string]: number})
 	savePassDataForPlayer(player)
 end
 
-local function findNumericValue(parent: Instance?, name: string): NumericValue?
-	if not parent then return nil end
-	local valueObj = parent:FindFirstChild(name)
-	if valueObj and (valueObj:IsA("IntValue") or valueObj:IsA("NumberValue")) then
-		return valueObj :: NumericValue
+local function getPassXpValue(player: Player): NumericValue?
+	local data = player:FindFirstChild("Data")
+	local playerData = data and data:FindFirstChild("PlayerData")
+	local xpName = tostring(PassRewardsConfig.ProgressionXpValueName or "EventXp")
+	return findNumericValue(playerData, xpName)
+end
+
+local function getPassLevelValue(player: Player): NumericValue?
+	local data = player:FindFirstChild("Data")
+	local playerData = data and data:FindFirstChild("PlayerData")
+	local levelName = tostring(PassRewardsConfig.ProgressionLevelValueName or "PassLevel")
+	return findNumericValue(playerData, levelName)
+end
+
+local function awardPassXpAndLevels(player: Player, amount: number): (boolean, string?)
+	if amount <= 0 then return false, "InvalidAmount" end
+	local xpValue = getPassXpValue(player)
+	if not xpValue then return false, "PassXpNotFound" end
+	local levelValue = getPassLevelValue(player)
+	if not levelValue then return false, "PassLevelNotFound" end
+
+	local requiredPerLevel = math.max(1, math.floor(tonumber(PassRewardsConfig.ProgressionXpPerLevel) or 10))
+	local totalXp = math.max(0, math.floor(xpValue.Value)) + amount
+	local levelUps = math.floor(totalXp / requiredPerLevel)
+	xpValue.Value = totalXp % requiredPerLevel
+	if levelUps > 0 then
+		levelValue.Value = math.max(0, math.floor(levelValue.Value)) + levelUps
 	end
-	return nil
+	savePassDataForPlayer(player)
+	return true, nil
 end
 
 local function grantCurrency(player: Player, currencyName: string, amount: number): (boolean, string?)
 	if amount <= 0 then return false, "InvalidAmount" end
+	local xpName = tostring(PassRewardsConfig.ProgressionXpValueName or "EventXp")
+	local eventCoinsName = tostring(PassRewardsConfig.EventCoinsValueName or "EventCoins")
+	if currencyName == xpName then
+		return awardPassXpAndLevels(player, amount)
+	end
+
 	local data = player:FindFirstChild("Data")
 	local playerData = data and data:FindFirstChild("PlayerData")
 	local valueObj = findNumericValue(playerData, currencyName)
 	if not valueObj then return false, "CurrencyNotFound" end
 	valueObj.Value += amount
+	if currencyName == eventCoinsName then
+		savePassDataForPlayer(player)
+	end
 	return true, nil
 end
+
 
 local function chargeCurrency(player: Player, currencyName: string, amount: number): (boolean, string?)
 	if amount < 0 then return false, "InvalidPrice" end
@@ -332,6 +476,9 @@ local function chargeCurrency(player: Player, currencyName: string, amount: numb
 	if not valueObj then return false, "CurrencyNotFound" end
 	if valueObj.Value < amount then return false, "NotEnoughCurrency" end
 	valueObj.Value -= amount
+	if currencyName == tostring(PassRewardsConfig.EventCoinsValueName or "EventCoins") then
+		savePassDataForPlayer(player)
+	end
 	return true, nil
 end
 
@@ -340,7 +487,12 @@ local function refundCurrency(player: Player, currencyName: string, amount: numb
 	local data = player:FindFirstChild("Data")
 	local playerData = data and data:FindFirstChild("PlayerData")
 	local valueObj = findNumericValue(playerData, currencyName)
-	if valueObj then valueObj.Value += amount end
+	if valueObj then
+		valueObj.Value += amount
+		if currencyName == tostring(PassRewardsConfig.EventCoinsValueName or "EventCoins") then
+			savePassDataForPlayer(player)
+		end
+	end
 end
 
 local function countPets(player: Player): number
@@ -403,7 +555,8 @@ end
 
 local function getPremiumPurchaseConfig(): PremiumPurchaseState
 	local entryName = tostring(PassRewardsConfig.PremiumAccessEntryName or "")
-	local entry = ReplicatedStorage:FindFirstChild("Gamepasses") and ReplicatedStorage.Gamepasses:FindFirstChild(entryName) or nil
+	local gamepassesFolder = ReplicatedStorage:FindFirstChild("Gamepasses")
+	local entry = findChildByNameInsensitive(gamepassesFolder, entryName)
 	local purchaseType = getPurchaseTypeFromEntry(entry)
 	if PassRewardsConfig.PremiumAccessPurchaseType == "GamePass" then
 		purchaseType = "GamePass"
@@ -430,7 +583,7 @@ local function getPremiumFlag(player: Player): BoolValue?
 	if not gamepasses or not gamepasses:IsA("Folder") then return nil end
 	local flagName = tostring(PassRewardsConfig.PremiumAccessEntryName or "")
 	if flagName == "" then return nil end
-	local flag = gamepasses:FindFirstChild(flagName)
+	local flag = findChildByNameInsensitive(gamepasses, flagName)
 	if flag and flag:IsA("BoolValue") then
 		return flag
 	end
@@ -449,12 +602,20 @@ local function playerHasPremiumAccess(player: Player): boolean
 	return premiumFlag ~= nil and premiumFlag.Value == true
 end
 
-local function syncPremiumOwnershipIfNeeded(player: Player)
+local function syncPremiumOwnershipIfNeeded(player: Player, forceCheck: boolean?)
 	local purchaseCfg = getPremiumPurchaseConfig()
 	if not purchaseCfg.Enabled then return end
 	if purchaseCfg.PurchaseType ~= "GamePass" then return end
 	local premiumFlag = getPremiumFlag(player)
 	if not premiumFlag or premiumFlag.Value then return end
+
+	local now = os.clock()
+	local last = premiumOwnershipCheckTimestamps[player.UserId] or 0
+	if not forceCheck and (now - last) < 2 then
+		return
+	end
+	premiumOwnershipCheckTimestamps[player.UserId] = now
+
 	local ok, ownsPass = pcall(function()
 		return MarketplaceService:UserOwnsGamePassAsync(player.UserId, purchaseCfg.ProductId)
 	end)
@@ -475,6 +636,7 @@ local function getPlayerPassLevel(player: Player): number
 end
 
 local function getRewardStateForPlayer(player: Player): RewardsStateResponse
+	syncPremiumOwnershipIfNeeded(player)
 	local claimed = getClaimedRewards(player)
 	local out: {RewardStateItem} = {}
 	local hasPremiumAccess = playerHasPremiumAccess(player)
@@ -661,6 +823,20 @@ questProgressBridge.Event:Connect(function(player: Player, action: string, amoun
 	incrementQuestProgress(player, action, math.max(1, math.floor(tonumber(amount) or 1)))
 end)
 
+MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(playerWhoPurchased, gamePassId, wasPurchased)
+	if not wasPurchased then return end
+	if typeof(playerWhoPurchased) ~= "Instance" or not playerWhoPurchased:IsA("Player") then return end
+	local purchaseCfg = getPremiumPurchaseConfig()
+	if purchaseCfg.PurchaseType ~= "GamePass" or purchaseCfg.ProductId <= 0 then return end
+	if tonumber(gamePassId) ~= purchaseCfg.ProductId then return end
+
+	local premiumFlag = getPremiumFlag(playerWhoPurchased)
+	if premiumFlag then
+		premiumFlag.Value = true
+	end
+	premiumOwnershipCheckTimestamps[playerWhoPurchased.UserId] = os.clock()
+end)
+
 Players.PlayerAdded:Connect(function(player)
 	ensurePassDataLoaded(player)
 	syncPremiumOwnershipIfNeeded(player)
@@ -671,6 +847,7 @@ Players.PlayerRemoving:Connect(function(player)
 	loadedFromDataStore[player.UserId] = nil
 	saveInFlight[player.UserId] = nil
 	questGrantLocks[player.UserId] = nil
+	premiumOwnershipCheckTimestamps[player.UserId] = nil
 end)
 
 game:BindToClose(function()
