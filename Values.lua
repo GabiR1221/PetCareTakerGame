@@ -18,18 +18,17 @@ return {
 			{Name = "ShowOtherPets", Value = 0, ID = 4, Type = "BoolValue"},
 			{Name = "BestZone", Value = 0, ID = 5, Type = "IntValue"},
 			{Name = "Currency2", Value = 0, ID = 6, Type = "NumberValue"},
+			{Name = "EventCoins", Value = 0, ID = 12, Type = "NumberValue"},
+			{Name = "PassLevel", Value = 1, ID = 13, Type = "IntValue"},
 			
 			--// Statistics
 			{Name = "EggsHatched", Value = 0, ID = 9, Type = "IntValue"},
 			{Name = "TotalCurrency", Value = 0, ID = 10, Type = "IntValue"},
 
 			--// Gem Upgrades
-			{Name = "GemUpgrade1", Value = 0, ID = 7, Type = "IntValue"},
-			{Name = "GemUpgrade2", Value = 0, ID = 8, Type = "IntValue"},
-			{Name = "GemUpgrade3", Value = 0, ID = 11, Type = "IntValue"},
-			{Name = "GemUpgrade4", Value = 0, ID = 12, Type = "IntValue"},
-			{Name = "GemUpgrade5", Value = 0, ID = 13, Type = "IntValue"},
-			{Name = "ToyInventoryJson", Value = "", ID = 14, Type = "StringValue"},
+			{Name = "GemUpgrade3", Value = 0, ID = 7, Type = "IntValue"},
+			{Name = "GemUpgrade4", Value = 0, ID = 8, Type = "IntValue"},
+			{Name = "ToyInventoryJson", Value = "", ID = 11, Type = "StringValue"},
 		},
 		
 		["Gamepasses"] = {
@@ -41,6 +40,7 @@ return {
 			{Name = "Lucky", Value = false, ID = 6, Type = "BoolValue"},
 			{Name = "AutoEgg", Value = false, ID = 7, Type = "BoolValue"},
 			{Name = "Cameleon", Value = false, ID = 8, Type = "BoolValue"},
+			{Name = "PremiumPass", Value = false, ID = 9, Type = "BoolValue"},
 		}
 	},
 	
