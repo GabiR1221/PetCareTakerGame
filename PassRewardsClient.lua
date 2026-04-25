@@ -2,6 +2,8 @@
 -- Client binder for Pass UI (Rewards + Quests + Shop).
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MarketplaceService = game:GetService("MarketplaceService")
+local Players = game:GetService("Players")
 
 local modulesFolder = ReplicatedStorage:WaitForChild("Modules")
 local PassRewardsConfig = require(modulesFolder:WaitForChild("PassRewardsConfig"))
@@ -9,11 +11,47 @@ local PassRewardsConfig = require(modulesFolder:WaitForChild("PassRewardsConfig"
 local passFrame = script.Parent
 local rewardsHolder = passFrame:WaitForChild("RewardsHolder") :: GuiObject
 local rewardsScrolling = rewardsHolder:WaitForChild("Rewards")
+local freeRewardsContainer = rewardsScrolling:FindFirstChild("FreeRewards")
+local premiumRewardsContainer = rewardsScrolling:FindFirstChild("PremiumRewards")
 local questsHolder = passFrame:WaitForChild("QuestsHolder") :: GuiObject
 local questsScrolling = questsHolder:WaitForChild("Quests")
 local shopHolder = passFrame:WaitForChild("ShopHolder") :: GuiObject
 local shopItemsScrolling = shopHolder:WaitForChild("Items")
 local otherMenusHolder = passFrame:WaitForChild("OtherMenusHolder")
+local LOCK_ICON_IMAGE = "rbxassetid://10734950309"
+
+local function resolvePremiumPurchaseButton(): GuiButton?
+	local candidateNames = {
+		"PurchaseButton",
+		"RewardButton",
+	}
+	local sideInfoNames = {
+		"SideInfoFrame",
+		"SideInfo",
+	}
+
+	for _, sideInfoName in ipairs(sideInfoNames) do
+		local sideInfo = rewardsHolder:FindFirstChild(sideInfoName) or passFrame:FindFirstChild(sideInfoName)
+		if sideInfo then
+			for _, buttonName in ipairs(candidateNames) do
+				local button = sideInfo:FindFirstChild(buttonName)
+				if button and button:IsA("GuiButton") then
+					return button
+				end
+			end
+		end
+	end
+
+	for _, descendant in ipairs(rewardsHolder:GetDescendants()) do
+		if descendant:IsA("GuiButton") and (descendant.Name == "PurchaseButton" or descendant.Name == "RewardButton") then
+			return descendant
+		end
+	end
+	return nil
+end
+
+local premiumBuyButton = resolvePremiumPurchaseButton()
+local localPlayer: Player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
 local claimRemote = ReplicatedStorage:WaitForChild(PassRewardsConfig.ClaimRemoteName) :: RemoteFunction
 local rewardsStateRemote = ReplicatedStorage:WaitForChild(PassRewardsConfig.StateRemoteName) :: RemoteFunction
@@ -25,10 +63,26 @@ local questStateUpdatedRemote = ReplicatedStorage:WaitForChild("PassQuestStateUp
 type RewardStateItem = {
 	Id: number,
 	Type: string,
+	Tier: "Free" | "Premium",
+	RequiredLevel: number,
 	RewardText: string,
 	RewardImage: string,
 	Claimed: boolean,
 	CanClaim: boolean,
+}
+
+type PremiumPurchaseState = {
+	Enabled: boolean,
+	EntryName: string,
+	ProductId: number,
+	PurchaseType: "GamePass" | "DeveloperProduct",
+}
+
+type RewardsStateResponse = {
+	Rewards: {RewardStateItem},
+	HasPremiumAccess: boolean,
+	PlayerLevel: number,
+	PremiumPurchase: PremiumPurchaseState,
 }
 
 type QuestStateItem = {
@@ -78,6 +132,14 @@ type TabSpec = {
 local rewardsById: {[number]: RewardStateItem} = {}
 local rewardClaimLocks: {[number]: boolean} = {}
 local shopBuyLocks: {[number]: boolean} = {}
+local hasPremiumAccess = false
+local playerPassLevel = 0
+local premiumPurchaseState: PremiumPurchaseState = {
+	Enabled = false,
+	EntryName = "",
+	ProductId = 0,
+	PurchaseType = "GamePass",
+}
 
 local tabSpecs: {TabSpec} = {
 	{
@@ -156,7 +218,24 @@ end
 local function getRewardFrameById(id: number): Frame?
 	local frame = rewardsScrolling:FindFirstChild(tostring(id))
 	if frame and frame:IsA("Frame") then return frame end
+	if freeRewardsContainer and freeRewardsContainer:IsA("GuiObject") then
+		local freeFrame = freeRewardsContainer:FindFirstChild(tostring(id))
+		if freeFrame and freeFrame:IsA("Frame") then return freeFrame end
+	end
+	if premiumRewardsContainer and premiumRewardsContainer:IsA("GuiObject") then
+		local premiumFrame = premiumRewardsContainer:FindFirstChild(tostring(id))
+		if premiumFrame and premiumFrame:IsA("Frame") then return premiumFrame end
+	end
 	return nil
+end
+
+local function getRewardFrameByTierAndId(tier: "Free" | "Premium", id: number): Frame?
+	local targetContainer = if tier == "Premium" then premiumRewardsContainer else freeRewardsContainer
+	if targetContainer and targetContainer:IsA("GuiObject") then
+		local frame = targetContainer:FindFirstChild(tostring(id))
+		if frame and frame:IsA("Frame") then return frame end
+	end
+	return getRewardFrameById(id)
 end
 
 local function getQuestFrame(category: string, slot: number, id: number): Frame?
@@ -175,9 +254,9 @@ local function getShopItemFrame(id: number): Frame?
 	return nil
 end
 
-local function setRewardButtonVisual(button: TextButton, canClaim: boolean, claimed: boolean)
+local function setRewardButtonVisual(button: TextButton, canClaim: boolean, claimed: boolean, requiredLevel: number?, currentLevel: number?)
 	if claimed then
-		button.Text = "Claimed"
+		button.Text = "Claimed ✓"
 		button.Active = false
 		button.AutoButtonColor = false
 	elseif canClaim then
@@ -185,9 +264,52 @@ local function setRewardButtonVisual(button: TextButton, canClaim: boolean, clai
 		button.Active = true
 		button.AutoButtonColor = true
 	else
-		button.Text = "Locked"
+		if requiredLevel and currentLevel and currentLevel < requiredLevel then
+			button.Text = string.format("Level %d", requiredLevel)
+		else
+			button.Text = "Locked"
+		end
 		button.Active = false
 		button.AutoButtonColor = false
+	end
+end
+
+local function setPremiumLockedVisual(frame: Frame, locked: boolean)
+	local overlay = frame:FindFirstChild("PremiumLockOverlay") :: Frame?
+	if not overlay then
+		local createdOverlay = Instance.new("Frame")
+		createdOverlay.Name = "PremiumLockOverlay"
+		createdOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		createdOverlay.BackgroundTransparency = 0.35
+		createdOverlay.BorderSizePixel = 0
+		createdOverlay.Size = UDim2.fromScale(1, 1)
+		createdOverlay.ZIndex = 20
+		createdOverlay.Parent = frame
+
+		local lockImage = Instance.new("ImageLabel")
+		lockImage.Name = "LockIcon"
+		lockImage.BackgroundTransparency = 1
+		lockImage.AnchorPoint = Vector2.new(0.5, 0.5)
+		lockImage.Position = UDim2.fromScale(0.5, 0.5)
+		lockImage.Size = UDim2.fromScale(0.28, 0.28)
+		lockImage.Image = LOCK_ICON_IMAGE
+		lockImage.ScaleType = Enum.ScaleType.Fit
+		lockImage.ZIndex = 21
+		lockImage.Parent = createdOverlay
+
+		overlay = createdOverlay
+	end
+	if overlay then
+		overlay.Visible = locked
+	end
+end
+
+local function clearPremiumLockedVisuals()
+	if not premiumRewardsContainer or not premiumRewardsContainer:IsA("GuiObject") then return end
+	for _, child in ipairs(premiumRewardsContainer:GetChildren()) do
+		if child:IsA("Frame") then
+			setPremiumLockedVisual(child, false)
+		end
 	end
 end
 
@@ -226,35 +348,91 @@ local function bindRewardClaimButton(rewardId: number, button: TextButton)
 			end
 		end
 		local updated = rewardsById[rewardId]
-		setRewardButtonVisual(button, updated ~= nil and updated.CanClaim == true, updated ~= nil and updated.Claimed == true)
+		local updatedRequiredLevel: number? = nil
+		if updated then
+			updatedRequiredLevel = updated.RequiredLevel
+		end
+		setRewardButtonVisual(
+			button,
+			updated ~= nil and updated.CanClaim == true,
+			updated ~= nil and updated.Claimed == true,
+			updatedRequiredLevel,
+			playerPassLevel
+		)
 		rewardClaimLocks[rewardId] = false
 	end)
 end
 
 local function refreshRewards()
-	local ok, result = pcall(function(): {RewardStateItem}
+	local ok, result = pcall(function(): RewardsStateResponse
 		return rewardsStateRemote:InvokeServer()
 	end)
-	if not ok or type(result) ~= "table" then return end
+	if not ok or type(result) ~= "table" or type(result.Rewards) ~= "table" then return end
+	hasPremiumAccess = result.HasPremiumAccess == true
+	playerPassLevel = math.max(0, math.floor(tonumber(result.PlayerLevel) or 0))
+	if type(result.PremiumPurchase) == "table" then
+		premiumPurchaseState = result.PremiumPurchase
+	end
 	table.clear(rewardsById)
-	for _, reward in ipairs(result :: {RewardStateItem}) do
+	for _, reward in ipairs(result.Rewards :: {RewardStateItem}) do
 		rewardsById[reward.Id] = reward
-		local frame = getRewardFrameById(reward.Id)
+		local frame = getRewardFrameByTierAndId(reward.Tier, reward.Id)
 		if frame then
 			local rewardImage = frame:FindFirstChild("RewardImage")
 			local rewardText = frame:FindFirstChild("RewardText")
 			local rewardButton = frame:FindFirstChild("RewardButton")
-			if rewardImage and rewardImage:IsA("ImageLabel") and rewardText and rewardText:IsA("TextLabel") and rewardButton and rewardButton:IsA("TextButton") then
+			local isPremiumLocked = reward.Tier == "Premium" and not hasPremiumAccess
+			local isLevelLocked = playerPassLevel < math.max(1, math.floor(tonumber(reward.RequiredLevel) or 1))
+			local isLocked = isPremiumLocked or isLevelLocked
+			if rewardImage and rewardImage:IsA("ImageLabel") then
 				rewardImage.Image = tostring(reward.RewardImage)
+				rewardImage.ImageColor3 = isLocked and Color3.fromRGB(25, 25, 25) or Color3.fromRGB(255, 255, 255)
+			end
+			if rewardText and rewardText:IsA("TextLabel") then
 				rewardText.Text = tostring(reward.RewardText)
-				setRewardButtonVisual(rewardButton, reward.CanClaim, reward.Claimed)
+				rewardText.TextColor3 = isLocked and Color3.fromRGB(150, 150, 150) or Color3.fromRGB(255, 255, 255)
+			end
+			if rewardButton and rewardButton:IsA("TextButton") then
+				setRewardButtonVisual(rewardButton, reward.CanClaim, reward.Claimed, reward.RequiredLevel, playerPassLevel)
 				if rewardButton:GetAttribute("PassRewardBound") ~= true then
 					rewardButton:SetAttribute("PassRewardBound", true)
 					bindRewardClaimButton(reward.Id, rewardButton)
 				end
 			end
+			setPremiumLockedVisual(frame, isLocked)
 		end
 	end
+	if hasPremiumAccess then
+		clearPremiumLockedVisuals()
+	end
+end
+
+local function bindPremiumPurchaseButton()
+	if (not premiumBuyButton) or (not premiumBuyButton:IsA("GuiButton")) then
+		premiumBuyButton = resolvePremiumPurchaseButton()
+	end
+	if not premiumBuyButton or not premiumBuyButton:IsA("GuiButton") then
+		warn("[PassRewards] Could not find premium purchase button (looked for PurchaseButton/RewardButton in SideInfoFrame/SideInfo).")
+		return
+	end
+	premiumBuyButton.MouseButton1Click:Connect(function()
+		if premiumPurchaseState.Enabled ~= true or premiumPurchaseState.ProductId <= 0 then
+			warn("[PassRewards] Premium purchase is not configured. Check ReplicatedStorage.Gamepasses entry and product id.")
+			return
+		end
+		if premiumPurchaseState.PurchaseType == "DeveloperProduct" then
+			MarketplaceService:PromptProductPurchase(localPlayer, premiumPurchaseState.ProductId)
+		else
+			MarketplaceService:PromptGamePassPurchase(localPlayer, premiumPurchaseState.ProductId)
+		end
+	end)
+end
+
+local function scheduleRewardsRefreshBurst()
+	task.delay(0.4, refreshRewards)
+	task.delay(1.2, refreshRewards)
+	task.delay(2.5, refreshRewards)
+	task.delay(4.0, refreshRewards)
 end
 
 local function refreshQuests()
@@ -339,6 +517,7 @@ local function refreshShop()
 end
 
 bindMenuButtons()
+bindPremiumPurchaseButton()
 refreshRewards()
 refreshQuests()
 refreshShop()
@@ -349,9 +528,28 @@ task.spawn(function()
 		if passFrame.Visible and questsHolder.Visible then
 			refreshQuests()
 		end
+		if passFrame.Visible and rewardsHolder.Visible then
+			refreshRewards()
+		end
 	end
 end)
 
 questStateUpdatedRemote.OnClientEvent:Connect(function()
 	refreshQuests()
+end)
+
+MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(playerWhoPurchased, _gamePassId, wasPurchased)
+	if playerWhoPurchased ~= localPlayer or not wasPurchased then return end
+	hasPremiumAccess = true
+	clearPremiumLockedVisuals()
+	refreshRewards()
+	scheduleRewardsRefreshBurst()
+end)
+
+MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId, _productId, wasPurchased)
+	if userId ~= localPlayer.UserId or not wasPurchased then return end
+	hasPremiumAccess = true
+	clearPremiumLockedVisuals()
+	refreshRewards()
+	scheduleRewardsRefreshBurst()
 end)
