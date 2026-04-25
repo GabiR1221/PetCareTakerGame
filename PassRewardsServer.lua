@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local HttpService = game:GetService("HttpService")
 local DataStoreService = game:GetService("DataStoreService")
+local MarketplaceService = game:GetService("MarketplaceService")
 
 local modulesFolder = ReplicatedStorage:WaitForChild("Modules")
 local PassRewardsConfig = require(modulesFolder:WaitForChild("PassRewardsConfig"))
@@ -13,10 +14,26 @@ local PassRewardsConfig = require(modulesFolder:WaitForChild("PassRewardsConfig"
 type RewardStateItem = {
 	Id: number,
 	Type: string,
+	Tier: "Free" | "Premium",
+	RequiredLevel: number,
 	RewardText: string,
 	RewardImage: string,
 	Claimed: boolean,
 	CanClaim: boolean,
+}
+
+type PremiumPurchaseState = {
+	Enabled: boolean,
+	EntryName: string,
+	ProductId: number,
+	PurchaseType: "GamePass" | "DeveloperProduct",
+}
+
+type RewardsStateResponse = {
+	Rewards: {RewardStateItem},
+	HasPremiumAccess: boolean,
+	PlayerLevel: number,
+	PremiumPurchase: PremiumPurchaseState,
 }
 
 type QuestStateItem = {
@@ -53,7 +70,7 @@ type PersistedPassData = {
 	QuestClaimedCsv: string,
 }
 
-local PASS_DATASTORE_NAME = "PassRewardsData_v1"
+local PASS_DATASTORE_NAME = "PassRewardsData_v7"------------------------------------------------------------change this
 local passDataStore = DataStoreService:GetDataStore(PASS_DATASTORE_NAME)
 local loadedFromDataStore: {[number]: boolean} = {}
 local saveInFlight: {[number]: boolean} = {}
@@ -159,7 +176,7 @@ local function buildPersistedPayloadFromFolder(folder: Folder): PersistedPassDat
 	}
 end
 
-local function savePassDataForPlayer(player: Player)
+local function savePassDataForPlayer(player: Player, blocking: boolean?)
 	local userId = player.UserId
 	if saveInFlight[userId] then return end
 	local folder = getPlayerServerFolder(player)
@@ -168,7 +185,7 @@ local function savePassDataForPlayer(player: Player)
 	saveInFlight[userId] = true
 	local payload = buildPersistedPayloadFromFolder(folder)
 	local key = tostring(userId)
-	task.spawn(function()
+	local function runSave()
 		for attempt = 1, 3 do
 			local ok, err = pcall(function()
 				passDataStore:SetAsync(key, payload)
@@ -183,22 +200,30 @@ local function savePassDataForPlayer(player: Player)
 			task.wait(0.5 * attempt)
 		end
 		saveInFlight[userId] = nil
-	end)
+	end
+	if blocking then
+		runSave()
+	else
+		task.spawn(runSave)
+	end
 end
 
 local function ensurePassDataLoaded(player: Player)
 	if loadedFromDataStore[player.UserId] then return end
-	loadedFromDataStore[player.UserId] = true
 
 	local folder = waitForPlayerServerFolder(player, 8)
 	if not folder then
 		warn(string.format("[PassRewards] Missing PlayerData folder for %s", player.Name))
 		return
 	end
+	loadedFromDataStore[player.UserId] = true
 
-	folder:SetAttribute(PassRewardsConfig.ClaimedAttributeName, tostring(folder:GetAttribute(PassRewardsConfig.ClaimedAttributeName) or ""))
-	folder:SetAttribute(PassRewardsConfig.QuestProgressAttributeName, tostring(folder:GetAttribute(PassRewardsConfig.QuestProgressAttributeName) or "{}"))
-	folder:SetAttribute(PassRewardsConfig.QuestClaimedAttributeName, tostring(folder:GetAttribute(PassRewardsConfig.QuestClaimedAttributeName) or ""))
+	-- Always reset to pass-defaults first so an empty/new datastore key starts from a clean slate.
+	-- We intentionally do NOT preserve any pre-existing attribute values here because those may come
+	-- from unrelated save systems and can leak stale pass progress into a "new" pass datastore.
+	folder:SetAttribute(PassRewardsConfig.ClaimedAttributeName, "")
+	folder:SetAttribute(PassRewardsConfig.QuestProgressAttributeName, "{}")
+	folder:SetAttribute(PassRewardsConfig.QuestClaimedAttributeName, "")
 
 	local key = tostring(player.UserId)
 	local ok, data = pcall(function()
@@ -208,9 +233,7 @@ local function ensurePassDataLoaded(player: Player)
 		warn(string.format("[PassRewards] Failed to load pass data for %s", player.Name))
 		return
 	end
-	if type(data) ~= "table" then
-		return
-	end
+	if type(data) ~= "table" then return end
 
 	local claimedCsv = data.ClaimedRewardsCsv
 	if type(claimedCsv) == "string" then
@@ -369,20 +392,120 @@ local function grantQuestReward(player: Player, quest: any): (boolean, string?)
 	return false, "UnsupportedQuestReward"
 end
 
-local function getRewardStateForPlayer(player: Player): {RewardStateItem}
+local function getPurchaseTypeFromEntry(entry: Instance?): "GamePass" | "DeveloperProduct"
+	if not entry then return "GamePass" end
+	local configuredType = string.lower(tostring(entry:GetAttribute("PurchaseType") or ""))
+	if configuredType == "developerproduct" or configuredType == "devproduct" or configuredType == "product" then
+		return "DeveloperProduct"
+	end
+	return "GamePass"
+end
+
+local function getPremiumPurchaseConfig(): PremiumPurchaseState
+	local entryName = tostring(PassRewardsConfig.PremiumAccessEntryName or "")
+	local entry = ReplicatedStorage:FindFirstChild("Gamepasses") and ReplicatedStorage.Gamepasses:FindFirstChild(entryName) or nil
+	local purchaseType = getPurchaseTypeFromEntry(entry)
+	if PassRewardsConfig.PremiumAccessPurchaseType == "GamePass" then
+		purchaseType = "GamePass"
+	elseif PassRewardsConfig.PremiumAccessPurchaseType == "DeveloperProduct" then
+		purchaseType = "DeveloperProduct"
+	end
+
+	local productId = 0
+	if entry and (entry:IsA("IntValue") or entry:IsA("NumberValue")) then
+		productId = math.floor(tonumber(entry.Value) or 0)
+	end
+
+	return {
+		Enabled = entry ~= nil and productId > 0,
+		EntryName = entryName,
+		ProductId = productId,
+		PurchaseType = purchaseType,
+	}
+end
+
+local function getPremiumFlag(player: Player): BoolValue?
+	local data = player:FindFirstChild("Data")
+	local gamepasses = data and data:FindFirstChild("Gamepasses")
+	if not gamepasses or not gamepasses:IsA("Folder") then return nil end
+	local flagName = tostring(PassRewardsConfig.PremiumAccessEntryName or "")
+	if flagName == "" then return nil end
+	local flag = gamepasses:FindFirstChild(flagName)
+	if flag and flag:IsA("BoolValue") then
+		return flag
+	end
+	if not flag then
+		local created = Instance.new("BoolValue")
+		created.Name = flagName
+		created.Value = false
+		created.Parent = gamepasses
+		return created
+	end
+	return nil
+end
+
+local function playerHasPremiumAccess(player: Player): boolean
+	local premiumFlag = getPremiumFlag(player)
+	return premiumFlag ~= nil and premiumFlag.Value == true
+end
+
+local function syncPremiumOwnershipIfNeeded(player: Player)
+	local purchaseCfg = getPremiumPurchaseConfig()
+	if not purchaseCfg.Enabled then return end
+	if purchaseCfg.PurchaseType ~= "GamePass" then return end
+	local premiumFlag = getPremiumFlag(player)
+	if not premiumFlag or premiumFlag.Value then return end
+	local ok, ownsPass = pcall(function()
+		return MarketplaceService:UserOwnsGamePassAsync(player.UserId, purchaseCfg.ProductId)
+	end)
+	if ok and ownsPass == true then
+		premiumFlag.Value = true
+	end
+end
+
+local function getPlayerPassLevel(player: Player): number
+	local configuredName = tostring(PassRewardsConfig.ProgressionLevelValueName or "PassLevel")
+	local data = player:FindFirstChild("Data")
+	local playerData = data and data:FindFirstChild("PlayerData")
+	local valueObj = playerData and playerData:FindFirstChild(configuredName)
+	if valueObj and (valueObj:IsA("IntValue") or valueObj:IsA("NumberValue")) then
+		return math.max(0, math.floor((valueObj :: NumericValue).Value))
+	end
+	return 1
+end
+
+local function getRewardStateForPlayer(player: Player): RewardsStateResponse
 	local claimed = getClaimedRewards(player)
 	local out: {RewardStateItem} = {}
+	local hasPremiumAccess = playerHasPremiumAccess(player)
+	local playerLevel = getPlayerPassLevel(player)
 	for _, reward in ipairs(PassRewardsConfig.Rewards) do
+		local tier: "Free" | "Premium" = reward.Tier == "Premium" and "Premium" or "Free"
+		local requiredLevel = math.max(1, math.floor(tonumber(reward.Level) or reward.Id))
+		local canClaim = claimed[reward.Id] ~= true
+		if playerLevel < requiredLevel then
+			canClaim = false
+		end
+		if tier == "Premium" and not hasPremiumAccess then
+			canClaim = false
+		end
 		table.insert(out, {
 			Id = reward.Id,
 			Type = reward.Type,
+			Tier = tier,
+			RequiredLevel = requiredLevel,
 			RewardText = reward.RewardText,
 			RewardImage = reward.RewardImage,
 			Claimed = claimed[reward.Id] == true,
-			CanClaim = claimed[reward.Id] ~= true,
+			CanClaim = canClaim,
 		})
 	end
-	return out
+	return {
+		Rewards = out,
+		HasPremiumAccess = hasPremiumAccess,
+		PlayerLevel = playerLevel,
+		PremiumPurchase = getPremiumPurchaseConfig(),
+	}
 end
 
 local function getQuestStateForPlayer(player: Player): {QuestStateItem}
@@ -488,6 +611,13 @@ claimRemote.OnServerInvoke = function(player: Player, rewardId: any): ClaimRespo
 	local reward = rewardsById[id]
 	if not reward then return {Success = false, Error = "RewardNotConfigured"} end
 	if getClaimedRewards(player)[id] then return {Success = false, Error = "AlreadyClaimed"} end
+	local requiredLevel = math.max(1, math.floor(tonumber(reward.Level) or reward.Id))
+	if getPlayerPassLevel(player) < requiredLevel then
+		return {Success = false, Error = "LevelLocked"}
+	end
+	if reward.Tier == "Premium" and not playerHasPremiumAccess(player) then
+		return {Success = false, Error = "PremiumRequired"}
+	end
 
 	local ok: boolean
 	local err: string?
@@ -499,7 +629,7 @@ claimRemote.OnServerInvoke = function(player: Player, rewardId: any): ClaimRespo
 	if not ok then return {Success = false, Error = err or "GrantFailed"} end
 
 	setClaimedReward(player, id)
-	return {Success = true, RewardId = id, NewState = getRewardStateForPlayer(player)}
+	return {Success = true, RewardId = id, NewState = getRewardStateForPlayer(player).Rewards}
 end
 
 buyShopRemote.OnServerInvoke = function(player: Player, itemId: any): BuyResponse
@@ -533,11 +663,18 @@ end)
 
 Players.PlayerAdded:Connect(function(player)
 	ensurePassDataLoaded(player)
+	syncPremiumOwnershipIfNeeded(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-	savePassDataForPlayer(player)
+	savePassDataForPlayer(player, true)
 	loadedFromDataStore[player.UserId] = nil
 	saveInFlight[player.UserId] = nil
 	questGrantLocks[player.UserId] = nil
+end)
+
+game:BindToClose(function()
+	for _, player in ipairs(Players:GetPlayers()) do
+		savePassDataForPlayer(player, true)
+	end
 end)
