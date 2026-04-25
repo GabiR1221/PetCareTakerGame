@@ -18,8 +18,9 @@ return {
 			{Name = "ShowOtherPets", Value = 0, ID = 4, Type = "BoolValue"},
 			{Name = "BestZone", Value = 0, ID = 5, Type = "IntValue"},
 			{Name = "Currency2", Value = 0, ID = 6, Type = "NumberValue"},
-			{Name = "EventCoins", Value = 0, ID = 12, Type = "NumberValue"},
+			{Name = "EventXp", Value = 0, ID = 12, Type = "NumberValue"},
 			{Name = "PassLevel", Value = 1, ID = 13, Type = "IntValue"},
+			{Name = "EventCoins", Value = 0, ID = 14, Type = "NumberValue"},
 			
 			--// Statistics
 			{Name = "EggsHatched", Value = 0, ID = 9, Type = "IntValue"},
