@@ -10,12 +10,19 @@ local SessionLock = require(script.Parent:WaitForChild("SessionLock"))
 local MPS = game:GetService("MarketplaceService")
 
 local PetMultipliers = require(RS.Modules.PetMultipliers)
+local PassRewardsConfig = require(RS.Modules.PassRewardsConfig)
 
 local function CreateFolder(Player,FolderName)
 	local NewFolder = Instance.new("Folder")
 	NewFolder.Name = FolderName
 	NewFolder.Parent = Player
 	return NewFolder
+end
+
+local function getSaveValueObject(playerDataFolder, folderName, valueName)
+	local folder = playerDataFolder and playerDataFolder:FindFirstChild(folderName)
+	if not folder then return nil end
+	return folder:FindFirstChild(valueName)
 end
 
 LoadingFunctions.LoadData = function(Player)
@@ -97,6 +104,33 @@ LoadingFunctions.LoadData = function(Player)
 				end
 			end
 		end		
+	end
+	
+	local passMarkerName = "PassDataStoreMarker"
+	local expectedPassDataStoreName = tostring(PassRewardsConfig.PassDataStoreName or "")
+	local passMarkerObj = getSaveValueObject(MainFolder, "PlayerData", passMarkerName)
+	local previousPassDataStoreName = passMarkerObj and tostring(passMarkerObj.Value or "") or ""
+	if expectedPassDataStoreName ~= "" and previousPassDataStoreName ~= expectedPassDataStoreName then
+		local passLevelName = tostring(PassRewardsConfig.ProgressionLevelValueName or "PassLevel")
+		local passXpName = tostring(PassRewardsConfig.ProgressionXpValueName or "EventXp")
+		local eventCoinsName = tostring(PassRewardsConfig.EventCoinsValueName or "EventCoins")
+
+		local passLevelObj = getSaveValueObject(MainFolder, "PlayerData", passLevelName)
+		local passXpObj = getSaveValueObject(MainFolder, "PlayerData", passXpName)
+		local eventCoinsObj = getSaveValueObject(MainFolder, "PlayerData", eventCoinsName)
+
+		if passLevelObj and (passLevelObj:IsA("IntValue") or passLevelObj:IsA("NumberValue")) then
+			passLevelObj.Value = 1
+		end
+		if passXpObj and (passXpObj:IsA("IntValue") or passXpObj:IsA("NumberValue")) then
+			passXpObj.Value = 0
+		end
+		if eventCoinsObj and (eventCoinsObj:IsA("IntValue") or eventCoinsObj:IsA("NumberValue")) then
+			eventCoinsObj.Value = 0
+		end
+		if passMarkerObj and passMarkerObj:IsA("StringValue") then
+			passMarkerObj.Value = expectedPassDataStoreName
+		end
 	end
 
 	-- Check Gamepasses
