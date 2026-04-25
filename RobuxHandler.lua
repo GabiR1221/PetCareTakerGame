@@ -7,6 +7,7 @@ local Players = game:GetService("Players")
 --// Variables
 
 local GamepassFolder = ReplicatedStorage.Gamepasses
+local PassRewardsConfig = require(ReplicatedStorage.Modules.PassRewardsConfig)
 local PetGrantBridgeName = "PetGamepassGrantBridge"
 local PetGrantBridge = ReplicatedStorage:FindFirstChild(PetGrantBridgeName)
 local NotifyEvent = ReplicatedStorage:FindFirstChild("GameNotificationEvent")
@@ -71,6 +72,13 @@ end
 local function grantsPermanentOwnership(valueObject)
 	if not valueObject then return false end
 	return valueObject:GetAttribute("GrantsPermanentOwnership") == true
+end
+
+local function isPremiumPassEntry(valueObject)
+	if not valueObject then return false end
+	local configuredPremiumName = tostring(PassRewardsConfig.PremiumAccessEntryName or "")
+	if configuredPremiumName == "" then return false end
+	return string.lower(valueObject.Name) == string.lower(configuredPremiumName)
 end
 
 local function markOwnedInData(player, purchaseEntry)
@@ -260,7 +268,7 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 		local explicitType = getPurchaseType(purchaseEntry)
 		local petsToGrant = getGrantedPetsForGamepass(purchaseEntry)
 		local hasPetGrantConfig = #petsToGrant > 0
-		local hasPermanentOwnershipGrant = explicitType == "DeveloperProduct" and grantsPermanentOwnership(purchaseEntry)
+		local hasPermanentOwnershipGrant = explicitType == "DeveloperProduct" and (grantsPermanentOwnership(purchaseEntry) or isPremiumPassEntry(purchaseEntry))
 		if explicitType ~= "DeveloperProduct" and not hasPetGrantConfig then continue end
 		if explicitType == "DeveloperProduct" and not hasPetGrantConfig and not hasPermanentOwnershipGrant then continue end
 
