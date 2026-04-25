@@ -59,6 +59,8 @@ export type ShopItemDefinition = {
 }
 
 export type PassConfig = {
+	PassDataVersion: number,
+	PassDataStoreName: string,
 	Rewards: {RewardDefinition},
 	Quests: {QuestDefinition},
 	ShopItems: {ShopItemDefinition},
@@ -75,9 +77,14 @@ export type PassConfig = {
 	PremiumAccessEntryName: string,
 	PremiumAccessPurchaseType: "Auto" | "GamePass" | "DeveloperProduct",
 	ProgressionLevelValueName: string,
+	ProgressionXpValueName: string,
+	ProgressionXpPerLevel: number,
+	EventCoinsValueName: string,
 }
 
 local PassRewardsConfig: PassConfig = {
+	PassDataVersion = 11, -- bump this (2,3,4,...) any time you want to hard-reset all pass progress------------------------------------------------------------------
+	PassDataStoreName = "PassRewardsData_v11", -- change this to reset ONLY pass data (without resetting main game data)-----------------------------------------------
 	Rewards = {
 		{
 			Id = 1,
@@ -121,7 +128,7 @@ local PassRewardsConfig: PassConfig = {
 			QuestReward = "Reward: 150 Cash",
 			QuestImage = "rbxassetid://0",
 			RewardType = "Currency",
-			RewardCurrencyName = "EventCoins",
+			RewardCurrencyName = "EventXp",
 			RewardAmount = 10,
 		},
 		{
@@ -147,12 +154,12 @@ local PassRewardsConfig: PassConfig = {
 			QuestReward = "Reward: 1000 Cash",
 			QuestImage = "rbxassetid://0",
 			RewardType = "Currency",
-			RewardCurrencyName = "EventCoins",
+			RewardCurrencyName = "EventXp",
 			RewardAmount = 100,
 		},
 		{
 			Id = 4,
-			Slot = 1,
+			Slot = 2,
 			Category = "HourlyQuests",
 			Action = "ShowerPet",
 			Target = 1,
@@ -160,7 +167,7 @@ local PassRewardsConfig: PassConfig = {
 			QuestReward = "Reward: 150 Cash",
 			QuestImage = "rbxassetid://0",
 			RewardType = "Currency",
-			RewardCurrencyName = "EventCoins",
+			RewardCurrencyName = "EventXp",
 			RewardAmount = 10,
 		},
 	},
@@ -171,9 +178,9 @@ local PassRewardsConfig: PassConfig = {
 			PetName = "OdinDinDinDun",
 			ItemText = "Dog (Test)",
 			ItemImage = "rbxassetid://0",
-			PriceCurrency = "Currency",
-			PriceAmount = 250,	
-			ItemPriceText = "250 Cash",
+			PriceCurrency = "EventCoins",
+			PriceAmount = 25,
+			ItemPriceText = "25 EventCoins",
 		},
 		{
 			Id = 2,
@@ -181,9 +188,9 @@ local PassRewardsConfig: PassConfig = {
 			PetName = "OdinDinDinDun",
 			ItemText = "Cat (Test)",
 			ItemImage = "rbxassetid://0",
-			PriceCurrency = "Currency",
-			PriceAmount = 500,
-			ItemPriceText = "500 Cash",
+			PriceCurrency = "EventCoins",
+			PriceAmount = 50,
+			ItemPriceText = "50 EventCoins",
 		},
 	},
 	ClaimedAttributeName = "PassClaimedRewardsCsv",
@@ -199,6 +206,9 @@ local PassRewardsConfig: PassConfig = {
 	PremiumAccessEntryName = "PremiumPass",
 	PremiumAccessPurchaseType = "Auto",
 	ProgressionLevelValueName = "PassLevel",
+	ProgressionXpValueName = "EventXp",
+	ProgressionXpPerLevel = 10,
+	EventCoinsValueName = "EventCoins",
 }
 
 return PassRewardsConfig
