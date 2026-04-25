@@ -229,9 +229,11 @@ local function getRewardFrameById(id: number): Frame?
 	return nil
 end
 
-local function getRewardFrameByTierAndId(tier: "Free" | "Premium", id: number): Frame?
+local function getRewardFrameByTierAndLevelOrId(tier: "Free" | "Premium", level: number, id: number): Frame?
 	local targetContainer = if tier == "Premium" then premiumRewardsContainer else freeRewardsContainer
 	if targetContainer and targetContainer:IsA("GuiObject") then
+		local byLevel = targetContainer:FindFirstChild(tostring(level))
+		if byLevel and byLevel:IsA("Frame") then return byLevel end
 		local frame = targetContainer:FindFirstChild(tostring(id))
 		if frame and frame:IsA("Frame") then return frame end
 	end
@@ -313,8 +315,10 @@ local function clearPremiumLockedVisuals()
 	end
 end
 
-local function bindRewardClaimButton(rewardId: number, button: TextButton)
+local function bindRewardClaimButton(button: TextButton)
 	button.MouseButton1Click:Connect(function()
+		local rewardId = math.floor(tonumber(button:GetAttribute("PassRewardId")) or 0)
+		if rewardId <= 0 then return end
 		if rewardClaimLocks[rewardId] then return end
 		rewardClaimLocks[rewardId] = true
 		local rewardState = rewardsById[rewardId]
@@ -376,7 +380,11 @@ local function refreshRewards()
 	table.clear(rewardsById)
 	for _, reward in ipairs(result.Rewards :: {RewardStateItem}) do
 		rewardsById[reward.Id] = reward
-		local frame = getRewardFrameByTierAndId(reward.Tier, reward.Id)
+		local frame = getRewardFrameByTierAndLevelOrId(
+			reward.Tier,
+			math.max(1, math.floor(tonumber(reward.RequiredLevel) or 1)),
+			reward.Id
+		)
 		if frame then
 			local rewardImage = frame:FindFirstChild("RewardImage")
 			local rewardText = frame:FindFirstChild("RewardText")
@@ -393,17 +401,15 @@ local function refreshRewards()
 				rewardText.TextColor3 = isLocked and Color3.fromRGB(150, 150, 150) or Color3.fromRGB(255, 255, 255)
 			end
 			if rewardButton and rewardButton:IsA("TextButton") then
+				rewardButton:SetAttribute("PassRewardId", reward.Id)
 				setRewardButtonVisual(rewardButton, reward.CanClaim, reward.Claimed, reward.RequiredLevel, playerPassLevel)
 				if rewardButton:GetAttribute("PassRewardBound") ~= true then
 					rewardButton:SetAttribute("PassRewardBound", true)
-					bindRewardClaimButton(reward.Id, rewardButton)
+					bindRewardClaimButton(rewardButton)
 				end
 			end
 			setPremiumLockedVisual(frame, isLocked)
 		end
-	end
-	if hasPremiumAccess then
-		clearPremiumLockedVisuals()
 	end
 end
 
@@ -541,7 +547,6 @@ end)
 MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(playerWhoPurchased, _gamePassId, wasPurchased)
 	if playerWhoPurchased ~= localPlayer or not wasPurchased then return end
 	hasPremiumAccess = true
-	clearPremiumLockedVisuals()
 	refreshRewards()
 	scheduleRewardsRefreshBurst()
 end)
@@ -549,7 +554,6 @@ end)
 MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId, _productId, wasPurchased)
 	if userId ~= localPlayer.UserId or not wasPurchased then return end
 	hasPremiumAccess = true
-	clearPremiumLockedVisuals()
 	refreshRewards()
 	scheduleRewardsRefreshBurst()
 end)
