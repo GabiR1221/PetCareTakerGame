@@ -2,9 +2,12 @@
 -- Shared config for the Pass system (Rewards + Quests + Shop).
 -- Place this ModuleScript in ReplicatedStorage.Modules.
 
+
 export type CurrencyReward = {
 	Id: number,
 	Type: "Currency",
+	Tier: "Free" | "Premium"?,
+	Level: number?,
 	CurrencyName: string,
 	Amount: number,
 	RewardText: string,
@@ -14,6 +17,8 @@ export type CurrencyReward = {
 export type PetReward = {
 	Id: number,
 	Type: "Pet",
+	Tier: "Free" | "Premium"?,
+	Level: number?,
 	PetName: string,
 	Amount: number,
 	RewardText: string,
@@ -67,6 +72,9 @@ export type PassConfig = {
 	GetQuestStateRemoteName: string,
 	GetShopStateRemoteName: string,
 	BuyShopItemRemoteName: string,
+	PremiumAccessEntryName: string,
+	PremiumAccessPurchaseType: "Auto" | "GamePass" | "DeveloperProduct",
+	ProgressionLevelValueName: string,
 }
 
 local PassRewardsConfig: PassConfig = {
@@ -74,6 +82,8 @@ local PassRewardsConfig: PassConfig = {
 		{
 			Id = 1,
 			Type = "Currency",
+			Tier = "Free",
+			Level = 1,
 			CurrencyName = "Currency",
 			Amount = 500,
 			RewardText = "+500 Cash",
@@ -82,6 +92,8 @@ local PassRewardsConfig: PassConfig = {
 		{
 			Id = 2,
 			Type = "Currency",
+			Tier = "Free",
+			Level = 2,
 			CurrencyName = "Currency2",
 			Amount = 100,
 			RewardText = "+100 Gems",
@@ -90,6 +102,8 @@ local PassRewardsConfig: PassConfig = {
 		{
 			Id = 3,
 			Type = "Pet",
+			Tier = "Premium",
+			Level = 3,
 			PetName = "OdinDinDinDun", -- MUST match ReplicatedStorage.Pets child name exactly
 			Amount = 1,
 			RewardText = "Adopt Dog",
@@ -102,13 +116,13 @@ local PassRewardsConfig: PassConfig = {
 			Slot = 1,
 			Category = "HourlyQuests",
 			Action = "ShowerPet",
-			Target = 3,
-			QuestText = "Shower any pet 3 times",
+			Target = 2,
+			QuestText = "Shower any pet 2 times",
 			QuestReward = "Reward: 150 Cash",
 			QuestImage = "rbxassetid://0",
 			RewardType = "Currency",
-			RewardCurrencyName = "Currency",
-			RewardAmount = 150,
+			RewardCurrencyName = "EventCoins",
+			RewardAmount = 10,
 		},
 		{
 			Id = 2,
@@ -128,13 +142,26 @@ local PassRewardsConfig: PassConfig = {
 			Slot = 1,
 			Category = "WeeklyQuests",
 			Action = "AdoptPet",
-			Target = 8,
-			QuestText = "Catch/Adopt 8 pets",
+			Target = 2,
+			QuestText = "Catch/Adopt 2 pets",
 			QuestReward = "Reward: 1000 Cash",
 			QuestImage = "rbxassetid://0",
 			RewardType = "Currency",
-			RewardCurrencyName = "Currency",
-			RewardAmount = 1000,
+			RewardCurrencyName = "EventCoins",
+			RewardAmount = 100,
+		},
+		{
+			Id = 4,
+			Slot = 1,
+			Category = "HourlyQuests",
+			Action = "ShowerPet",
+			Target = 1,
+			QuestText = "Shower any pet 1 times",
+			QuestReward = "Reward: 150 Cash",
+			QuestImage = "rbxassetid://0",
+			RewardType = "Currency",
+			RewardCurrencyName = "EventCoins",
+			RewardAmount = 10,
 		},
 	},
 	ShopItems = {
@@ -169,6 +196,9 @@ local PassRewardsConfig: PassConfig = {
 	GetQuestStateRemoteName = "GetPassQuestsState",
 	GetShopStateRemoteName = "GetPassShopState",
 	BuyShopItemRemoteName = "BuyPassShopItem",
+	PremiumAccessEntryName = "PremiumPass",
+	PremiumAccessPurchaseType = "Auto",
+	ProgressionLevelValueName = "PassLevel",
 }
 
 return PassRewardsConfig
