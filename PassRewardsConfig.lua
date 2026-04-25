@@ -83,8 +83,8 @@ export type PassConfig = {
 }
 
 local PassRewardsConfig: PassConfig = {
-	PassDataVersion = 11, -- bump this (2,3,4,...) any time you want to hard-reset all pass progress------------------------------------------------------------------
-	PassDataStoreName = "PassRewardsData_v11", -- change this to reset ONLY pass data (without resetting main game data)-----------------------------------------------
+	PassDataVersion = 16, -- bump this (2,3,4,...) any time you want to hard-reset all pass progress------------------------------------------------------------------
+	PassDataStoreName = "PassRewardsData_v16", -- change this to reset ONLY pass data (without resetting main game data)-----------------------------------------------
 	Rewards = {
 		{
 			Id = 1,
@@ -114,6 +114,26 @@ local PassRewardsConfig: PassConfig = {
 			PetName = "OdinDinDinDun", -- MUST match ReplicatedStorage.Pets child name exactly
 			Amount = 1,
 			RewardText = "Adopt Dog",
+			RewardImage = "rbxassetid://0",
+		},
+		{
+			Id = 4,
+			Type = "Currency",
+			Tier = "Premium",
+			Level = 1,
+			CurrencyName = "Currency",
+			Amount = 50,
+			RewardText = "adaada",
+			RewardImage = "rbxassetid://0",
+		},
+		{
+			Id = 5,
+			Type = "Currency",
+			Tier = "Premium",
+			Level = 2,
+			CurrencyName = "Currency",
+			Amount = 100,
+			RewardText = "adaadaaaaa",
 			RewardImage = "rbxassetid://0",
 		},
 	},
