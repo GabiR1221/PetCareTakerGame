@@ -21,6 +21,7 @@ return {
 			{Name = "EventXp", Value = 0, ID = 12, Type = "NumberValue"},
 			{Name = "PassLevel", Value = 1, ID = 13, Type = "IntValue"},
 			{Name = "EventCoins", Value = 0, ID = 14, Type = "NumberValue"},
+			{Name = "PassDataStoreMarker", Value = "", ID = 15, Type = "StringValue"},
 			
 			--// Statistics
 			{Name = "EggsHatched", Value = 0, ID = 9, Type = "IntValue"},
