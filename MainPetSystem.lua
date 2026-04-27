@@ -48,7 +48,7 @@ local petCarryEvent = ReplicatedStorage:FindFirstChild("PetCarryEvent")
 local PetGamepassGrantBridgeName = "PetGamepassGrantBridge"
 local PetSellBridgeName = "PetSellBridge"
 local PetSellRequestBridgeName = "PetSellRequestBridge"
-
+local PetInventoryAdoptionBridgeName = "PetInventoryAdoptionBridge"
 -- Configuration
 local SHOWER_HOLD_TIME = 3
 local PICKUP_PROMPT_MAX_DISTANCE = 6
@@ -56,6 +56,7 @@ local GIVEBACK_PROMPT_MAX_DISTANCE = 6
 local SHOWER_XP = 20
 local DRY_XP = 12
 local PETGROUND_XP_PER_SEC = 5
+local ENABLE_PET_PICKUP_TOOLS = true -- Set to false to restore weld/carry pickup behavior.
 
 -- Initialize state trackers (these could be moved to their respective managers)
 local carryingPetByUserId = {}
@@ -66,7 +67,37 @@ local petGroundDirtinessTasks = {}
 local petPickupPromptConns = {}
 local sellPromptConns = {}
 local attachDropPickupPrompt
+local createPetPickupTool
 local isInsideTycoonBounds
+local stashedPetModelsByUserId = {}
+
+local function getStashedPetBucket(userId)
+	if not stashedPetModelsByUserId[userId] then
+		stashedPetModelsByUserId[userId] = {}
+	end
+	return stashedPetModelsByUserId[userId]
+end
+
+local function setPetStashedModel(userId, petUid, petModel)
+	if not userId or type(petUid) ~= "string" or petUid == "" then return end
+	local bucket = getStashedPetBucket(userId)
+	bucket[petUid] = petModel
+end
+
+local function getPetStashedModel(userId, petUid)
+	local bucket = stashedPetModelsByUserId[userId]
+	if not bucket then return nil end
+	return bucket[petUid]
+end
+
+local function clearPetStashedModel(userId, petUid)
+	local bucket = stashedPetModelsByUserId[userId]
+	if not bucket then return end
+	bucket[petUid] = nil
+	if next(bucket) == nil then
+		stashedPetModelsByUserId[userId] = nil
+	end
+end
 
 local function getTycoonReturnPartForPlayer(userId)
 	local tycoonModel = TycoonUtils:FindTycoonByOwnerId(userId)
@@ -199,6 +230,274 @@ local function getPickupPartFromPet(petModel)
 	end
 	local primary = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
 	return primary
+end
+
+local function removePetToolInstances(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then return end
+	for _, container in ipairs({ player:FindFirstChild("Backpack"), player:FindFirstChild("StarterGear"), player.Character }) do
+		if container then
+			for _, child in ipairs(container:GetChildren()) do
+				if child:IsA("Tool") and tostring(child:GetAttribute("PetUID") or "") == petUid then
+					child:Destroy()
+				end
+			end
+		end
+	end
+end
+
+local function findOwnedPetByUid(userId, petUid)
+	if type(petUid) ~= "string" or petUid == "" then return nil, nil end
+	local stashed = getPetStashedModel(userId, petUid)
+	if stashed and stashed.Parent then
+		return stashed, petState[stashed]
+	end
+
+	for petModel, state in pairs(petState) do
+		if state and tostring(state.ownerUserId) == tostring(userId) then
+			local modelUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+			if modelUid == petUid then
+				return petModel, state
+			end
+		end
+	end
+	return nil, nil
+end
+
+local function deployPetFromTool(player, petUid)
+	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
+	if not petModel or not state then
+		removePetToolInstances(player, petUid)
+		return false
+	end
+
+	local character = player.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	if not root then
+		return false
+	end
+	local tycoonModel, returnPart = getTycoonReturnPartForPlayer(player.UserId)
+	if tycoonModel and returnPart and not isInsideTycoonBounds(root, tycoonModel, returnPart) then
+		return false
+	end
+	if carryingPetByUserId[player.UserId] == petModel and state.location == "player" then
+		return true
+	end
+
+	local attached = false
+	local ok = pcall(function()
+		attached = PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false }) == true
+	end)
+	if not ok or not attached then
+		return false
+	end
+
+	state.location = "player"
+	state.npc = nil
+	state.shower = nil
+	PetStateManager:SendStateToOwner(petModel)
+	clearPetStashedModel(player.UserId, petUid)
+	return true
+end
+
+local function stowCarriedPetAsTool(player)
+	if not player then return false end
+	local carriedPet = carryingPetByUserId[player.UserId]
+	if not carriedPet or not carriedPet.Parent then
+		return false
+	end
+
+	local state = petState[carriedPet]
+	if not state or state.wild == true then
+		return false
+	end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return false
+	end
+
+	PetAttachmentManager:DetachPetFromPlayer(carriedPet)
+	carriedPet.Parent = ServerStorage
+	state.location = "inventory"
+	state.npc = nil
+	state.shower = nil
+	local petUid = tostring(state.petUid or carriedPet:GetAttribute("PetUID") or "")
+	if petUid == "" then
+		return false
+	end
+	setPetStashedModel(player.UserId, petUid, carriedPet)
+	PetStateManager:SendStateToOwner(carriedPet)
+	for _, container in ipairs({ player:FindFirstChild("Backpack"), player.Character, player:FindFirstChild("StarterGear") }) do
+		if container then
+			for _, item in ipairs(container:GetChildren()) do
+				if item:IsA("Tool") and tostring(item:GetAttribute("PetUID") or "") == petUid then
+					return true
+				end
+			end
+		end
+	end
+	return createPetPickupTool(player, carriedPet, state)
+end
+
+local function equipPetToolByUid(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then return end
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+	local backpack = player:FindFirstChild("Backpack")
+	if not backpack then return end
+	for _, tool in ipairs(backpack:GetChildren()) do
+		if tool:IsA("Tool") and tostring(tool:GetAttribute("PetUID") or "") == petUid then
+			humanoid:EquipTool(tool)
+			break
+		end
+	end
+end
+
+local function buildPetToolHandle(petModel)
+	local sourcePart = nil
+	if petModel then
+		for _, candidate in ipairs(petModel:GetDescendants()) do
+			if candidate:IsA("MeshPart") and candidate.Transparency < 0.95 then
+				sourcePart = candidate
+				break
+			end
+		end
+		if not sourcePart then
+			for _, candidate in ipairs(petModel:GetDescendants()) do
+				if candidate:IsA("BasePart")
+					and candidate.Transparency < 0.95
+					and candidate.Name ~= "HumanoidRootPart"
+				then
+					sourcePart = candidate
+					break
+				end
+			end
+		end
+	end
+	local handle = nil
+
+	if sourcePart and sourcePart:IsA("BasePart") then
+		handle = sourcePart:Clone()
+		for _, desc in ipairs(handle:GetDescendants()) do
+			if not desc:IsA("DataModelMesh") and not desc:IsA("SpecialMesh") then
+				desc:Destroy()
+			end
+		end
+	else
+		handle = Instance.new("Part")
+		handle.Color = Color3.fromRGB(155, 208, 255)
+	end
+
+	handle.Name = "Handle"
+	handle.Anchored = false
+	handle.CanCollide = false
+	handle.CanQuery = false
+	handle.CanTouch = false
+	handle.Massless = true
+	handle.Transparency = math.clamp(tonumber(handle.Transparency) or 0, 0, 0.2)
+	if not sourcePart then
+		handle.Size = Vector3.new(1.1, 1.1, 1.1)
+	end
+	handle.CFrame = CFrame.new()
+	return handle
+end
+
+createPetPickupTool = function(player, petModel, state)
+	local petUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+	if petUid == "" then
+		return false
+	end
+
+	removePetToolInstances(player, petUid)
+
+	local petName = tostring(petModel:GetAttribute("TemplateName") or petModel.Name or "Pet")
+	local tool = Instance.new("Tool")
+	tool.Name = petName
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+	tool:SetAttribute("PetTool", true)
+	tool:SetAttribute("InventoryCategory", "Pets")
+	tool:SetAttribute("PetUID", petUid)
+	tool:SetAttribute("TemplateName", petName)
+	tool:SetAttribute("SkipToolSave", true)
+
+	local handle = buildPetToolHandle(petModel)
+	handle.Parent = tool
+
+	tool.Activated:Connect(function()
+		deployPetFromTool(player, petUid)
+	end)
+	tool.Equipped:Connect(function()
+		deployPetFromTool(player, petUid)
+	end)
+
+	tool.Parent = player:WaitForChild("Backpack")
+	local starterGear = player:FindFirstChild("StarterGear")
+	if starterGear then
+		tool:Clone().Parent = starterGear
+	end
+	return true
+end
+
+local function tryPickupOwnedPetAsTool(player, petModel)
+	if not player or not petModel or not petModel:IsA("Model") or not petModel.Parent then
+		return false
+	end
+
+	local state = petState[petModel]
+	if not state or state.wild == true then
+		return false
+	end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return false
+	end
+	if state.location == "player" or state.location == "npc" or state.location == "shower" then
+		return false
+	end
+
+	local character = player.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	local pickupPart = getPickupPartFromPet(petModel)
+	if not root or not pickupPart then
+		return false
+	end
+
+	local maxDistance = tonumber(pickupPart:GetAttribute("PickupDistance")) or PICKUP_PROMPT_MAX_DISTANCE
+	if (pickupPart.Position - root.Position).Magnitude > (maxDistance + 1.5) then
+		return false
+	end
+
+	PetMovement.StopWandering(petModel)
+	local helper = petModel:FindFirstChild("PetPickupPart")
+	if helper then
+		pcall(function() helper:Destroy() end)
+	end
+	if petPickupPromptConns[petModel] then
+		pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
+		petPickupPromptConns[petModel] = nil
+	end
+
+	petModel.Parent = ServerStorage
+	state.location = "inventory"
+	setPetStashedModel(player.UserId, tostring(state.petUid or petModel:GetAttribute("PetUID") or ""), petModel)
+	PetStateManager:SendStateToOwner(petModel)
+
+	return createPetPickupTool(player, petModel, state)
+end
+
+local function restoreInventoryPetToolsForPlayer(player)
+	for petModel, state in pairs(petState) do
+		if state
+			and tostring(state.ownerUserId) == tostring(player.UserId)
+			and state.wild ~= true
+			and tostring(state.location) == "inventory"
+		then
+			local petUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+			if petUid ~= "" then
+				petModel.Parent = ServerStorage
+				setPetStashedModel(player.UserId, petUid, petModel)
+				createPetPickupTool(player, petModel, state)
+			end
+		end
+	end
 end
 
 local function tryPickupOwnedPet(player, petModel)
@@ -423,7 +722,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData80", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData89", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -438,6 +737,44 @@ if not petGamepassGrantBridge or not petGamepassGrantBridge:IsA("BindableEvent")
 	petGamepassGrantBridge.Name = PetGamepassGrantBridgeName
 	petGamepassGrantBridge.Parent = ReplicatedStorage
 end
+
+local petInventoryAdoptionBridge = ReplicatedStorage:FindFirstChild(PetInventoryAdoptionBridgeName)
+if not petInventoryAdoptionBridge or not petInventoryAdoptionBridge:IsA("BindableEvent") then
+	petInventoryAdoptionBridge = Instance.new("BindableEvent")
+	petInventoryAdoptionBridge.Name = PetInventoryAdoptionBridgeName
+	petInventoryAdoptionBridge.Parent = ReplicatedStorage
+end
+
+petInventoryAdoptionBridge.Event:Connect(function(player, _templateName, petUid)
+	if ENABLE_PET_PICKUP_TOOLS ~= true then return end
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	if type(petUid) ~= "string" or petUid == "" then return end
+
+	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
+	if not petModel or not state then return end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then return end
+	if state.wild == true then return end
+
+	PetMovement.StopWandering(petModel)
+	local helper = petModel:FindFirstChild("PetPickupPart")
+	if helper then
+		pcall(function() helper:Destroy() end)
+	end
+	if petPickupPromptConns[petModel] then
+		pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
+		petPickupPromptConns[petModel] = nil
+	end
+
+	petModel.Parent = ServerStorage
+	state.location = "inventory"
+	setPetStashedModel(player.UserId, petUid, petModel)
+	PetStateManager:SendStateToOwner(petModel)
+	createPetPickupTool(player, petModel, state)
+	equipPetToolByUid(player, petUid)
+	if saveManager then
+		saveManager:ScheduleSave(player)
+	end
+end)
 
 petGamepassGrantBridge.Event:Connect(function(player, gamepassName, petsToGrant)
 	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
@@ -538,12 +875,20 @@ petCarryEvent.OnServerEvent:Connect(function(player, action, payload)
 		if typeof(targetPet) ~= "Instance" then
 			return
 		end
-		tryPickupOwnedPet(player, targetPet)
+		if ENABLE_PET_PICKUP_TOOLS then
+			tryPickupOwnedPetAsTool(player, targetPet)
+		else
+			tryPickupOwnedPet(player, targetPet)
+		end
 		return
 	end
 	if action ~= "DropPet" then return end
 	if not player then return end
 
+	if ENABLE_PET_PICKUP_TOOLS then
+		stowCarriedPetAsTool(player)
+		return
+	end
 	dropCarriedPet(player, { blockWildDrop = true })
 end)
 
@@ -605,7 +950,17 @@ Players.PlayerAdded:Connect(function(player)
 	end
 	local petData = saveManager:LoadPlayerPets(player)
 	if petData and #petData > 0 then
+		if not ENABLE_PET_PICKUP_TOOLS then
+			for _, petInfo in ipairs(petData) do
+				if type(petInfo) == "table" and petInfo.location == "inventory" then
+					petInfo.location = "free"
+				end
+			end
+		end
 		WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
+		if ENABLE_PET_PICKUP_TOOLS then
+			restoreInventoryPetToolsForPlayer(player)
+		end
 		task.defer(function()
 			AccessoryManager:RestoreAccessoriesForPlayer(player.UserId)
 		end)
@@ -613,6 +968,7 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
+	stashedPetModelsByUserId[player.UserId] = nil
 	if saveManager then
 		saveManager:SavePlayerPets(player)
 	else
