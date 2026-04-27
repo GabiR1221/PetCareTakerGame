@@ -1,39 +1,67 @@
 local dss = game:GetService("DataStoreService")
-local toolsDS = dss:GetDataStore("ToolsData1")
+local toolsDS = dss:GetDataStore("ToolsData10")
 
 local toolsFolder = game.ServerStorage.ToolsFolder
 
 game.Players.PlayerAdded:Connect(function(plr)
-	
+
 	local toolsSaved = toolsDS:GetAsync(plr.UserId .. "-tools") or {}
-	
+
 	for i, toolSaved in pairs(toolsSaved) do
-			
+
 		if toolsFolder:FindFirstChild(toolSaved) then 
-			
-			toolsFolder[toolSaved]:Clone().Parent = plr.Backpack
-			toolsFolder[toolSaved]:Clone().Parent = plr.StarterGear 
+
+			local backpackTool = toolsFolder[toolSaved]:Clone()
+			if backpackTool:IsA("Tool") and backpackTool:GetAttribute("InventoryCategory") == nil then
+				backpackTool:SetAttribute("InventoryCategory", "Food")
+			end
+			backpackTool.Parent = plr.Backpack
+
+			local starterTool = toolsFolder[toolSaved]:Clone()
+			if starterTool:IsA("Tool") and starterTool:GetAttribute("InventoryCategory") == nil then
+				starterTool:SetAttribute("InventoryCategory", "Food")
+			end
+			starterTool.Parent = plr.StarterGear
 		end
 	end
-	
+
 	plr.CharacterRemoving:Connect(function(char)
-    	
+
 		char.Humanoid:UnequipTools()
-    end)
+	end)
 end)
 
 
 game.Players.PlayerRemoving:Connect(function(plr)
-	
+
 	local toolsOwned = {}
-	
-	for i, toolInBackpack in pairs(plr.Backpack:GetChildren()) do
-		
-		table.insert(toolsOwned, toolInBackpack.Name)
+	local seen = {}
+
+	local function collectTools(container)
+		if not container then return end
+		for _, item in pairs(container:GetChildren()) do
+			if item:IsA("Tool")
+				and item:GetAttribute("PetTool") ~= true
+				and item:GetAttribute("SkipToolSave") ~= true
+				and not seen[item.Name]
+			then
+				seen[item.Name] = true
+				table.insert(toolsOwned, item.Name)
+			end
+		end
 	end
-	
+
+	collectTools(plr:FindFirstChild("Backpack"))
+	collectTools(plr:FindFirstChild("StarterGear"))
+	local inventoryStash = plr:FindFirstChild("InventoryStash")
+	if inventoryStash then
+		for _, tabFolder in ipairs(inventoryStash:GetChildren()) do
+			collectTools(tabFolder)
+		end
+	end
+
 	local success, errormsg = pcall(function()
-		
+
 		toolsDS:SetAsync(plr.UserId .. "-tools", toolsOwned)
 	end)
 	if errormsg then warn(errormsg) end
