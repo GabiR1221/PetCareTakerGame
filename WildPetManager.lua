@@ -214,10 +214,15 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 	self.PetRigManager:EnsurePetRig(pet)
 	self.PetAnimationManager:SetupAnimatorForPet(pet)
 	restorePetScaleAndHipHeight(self.PetStateManager, pet, self.petState[pet])
-	self:PlacePetOnGround(pet, adoptionMat.Position)
-	local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
-	self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId, wanderZone)
-	self:AddOwnedPetPickupPrompt(pet, player.UserId)
+	if player:GetAttribute("RunnerActive") == true then
+		self.petState[pet].location = "inventory"
+		pet.Parent = ServerStorage
+	else
+		self:PlacePetOnGround(pet, adoptionMat.Position)
+		local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+		self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId, wanderZone)
+		self:AddOwnedPetPickupPrompt(pet, player.UserId)
+	end
 
 	grantAdoptedPetToInventory(player, pet)
 	self:UpdateOwnedPetRegistryForPlayer(player)
@@ -968,38 +973,43 @@ function WildPetManager:AutoAdoptCarriedWildPet(player, options)
 	self.PetAttachmentManager:DetachPetFromPlayer(pet)
 	pet.Parent = workspace
 
-	local dropPosition = nil
-	if typeof(options.adoptionPosition) == "Vector3" then
-		dropPosition = options.adoptionPosition
-	else
-		local tycoonModel, _ = self.TycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
-		local adoptionMat = tycoonModel and self:GetAdoptionMatForTycoon(tycoonModel)
-		dropPosition = adoptionMat and adoptionMat.Position or nil
-	end
-
 	pcall(function()
 		self.PetRigManager:EnsurePetRig(pet)
 		self.PetAnimationManager:SetupAnimatorForPet(pet)
 		restorePetScaleAndHipHeight(self.PetStateManager, pet, state)
 	end)
 
-	if dropPosition then
-		self:PlacePetOnGround(pet, dropPosition)
-		local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
-		self.PetMovement.StartWandering(pet, dropPosition, 20, player.UserId, wanderZone)
+	if player:GetAttribute("RunnerActive") == true then
+		state.location = "inventory"
+		pet.Parent = ServerStorage
 	else
-		-- safe fallback if adoption mat can't be resolved
-		local char = player.Character
-		local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-		if root then
-			self:PlacePetOnGround(pet, root.Position + (root.CFrame.LookVector * 3))
-			local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
-			self.PetMovement.StartWandering(pet, root.Position, 20, player.UserId, wanderZone)
+		local dropPosition = nil
+		if typeof(options.adoptionPosition) == "Vector3" then
+			dropPosition = options.adoptionPosition
 		else
-			self.PetMovement.StartWandering(pet)
+			local tycoonModel, _ = self.TycoonUtils:FindTycoonByOwnerIdWithDesk(player.UserId)
+			local adoptionMat = tycoonModel and self:GetAdoptionMatForTycoon(tycoonModel)
+			dropPosition = adoptionMat and adoptionMat.Position or nil
 		end
+
+		if dropPosition then
+			self:PlacePetOnGround(pet, dropPosition)
+			local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+			self.PetMovement.StartWandering(pet, dropPosition, 20, player.UserId, wanderZone)
+		else
+			-- safe fallback if adoption mat can't be resolved
+			local char = player.Character
+			local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+			if root then
+				self:PlacePetOnGround(pet, root.Position + (root.CFrame.LookVector * 3))
+				local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
+				self.PetMovement.StartWandering(pet, root.Position, 20, player.UserId, wanderZone)
+			else
+				self.PetMovement.StartWandering(pet)
+			end
+		end
+		self:AddOwnedPetPickupPrompt(pet, player.UserId)
 	end
-	self:AddOwnedPetPickupPrompt(pet, player.UserId)
 
 	local adoptionEvent = ReplicatedStorage:FindFirstChild("PetAdoptionEvent")
 	if adoptionEvent and adoptionEvent:IsA("RemoteEvent") then
@@ -1424,7 +1434,10 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 				end
 			end
 
-			if not restoredToStand then
+			if not restoredToStand and petInfo.location == "inventory" then
+				pet.Parent = ServerStorage
+				self.petState[pet].location = "inventory"
+			elseif not restoredToStand then
 				self:PlacePetOnGround(pet, matPos)
 				self.petState[pet].location = "free"
 				local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
