@@ -97,10 +97,21 @@ local function applyGemShopReward(baseValue, rewardConfig, upgradeValue)
 		return baseValue
 	end
 
+	local upgradedReward
 	if exponential.Value then
-		return baseValue * (defaultReward.Value + (increasePer.Value ^ upgradeValue))
+		upgradedReward = defaultReward.Value + (increasePer.Value ^ upgradeValue)
+	else
+		upgradedReward = defaultReward.Value + (increasePer.Value * upgradeValue)
 	end
-	return baseValue * (defaultReward.Value + (increasePer.Value * upgradeValue))
+
+	local upgradeRoot = rewardConfig.Parent
+	local operatorValue = upgradeRoot and upgradeRoot:FindFirstChild("Operator")
+	local operator = operatorValue and tostring(operatorValue.Value) or "x"
+	if operator == "+" then
+		return baseValue + upgradedReward
+	end
+
+	return baseValue * upgradedReward
 end
 
 
