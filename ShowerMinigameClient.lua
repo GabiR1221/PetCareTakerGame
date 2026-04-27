@@ -42,6 +42,7 @@ title.TextXAlignment = Enum.TextXAlignment.Left
 title.Text = "Shower"
 title.ZIndex = 11
 title.Parent = panel
+title.Size = UDim2.new(1, -64, 0, 28)
 
 local stageLabel = Instance.new("TextLabel")
 stageLabel.Name = "StageLabel"
@@ -139,6 +140,7 @@ exitButton.Text = "X"
 exitButton.AutoButtonColor = true
 exitButton.ZIndex = 12
 exitButton.Parent = panel
+exitButton.Visible = false
 
 
 local savedCameraType = nil
@@ -150,6 +152,10 @@ local cameraConn = nil
 local cursorTrackConn = nil
 local lastToolMoveFireAt = 0
 local lastToolMovePoint = nil
+local lastExitFireAt = 0
+local pointerScreenPos = nil
+local activeTouch = nil
+local isTouchDragging = false
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -180,6 +186,7 @@ local function endShowerView()
 	controlWall = nil
 	currentPet = nil
 	gui.Enabled = false
+	exitButton.Visible = false
 end
 
 local function startShowerView(targetCameraPart)
@@ -222,8 +229,10 @@ local function updateBar(progress)
 	percentLabel.Text = ("%d%%"):format(math.floor(progress * 100 + 0.5))
 end
 
-local function getMovePoint()
-	local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+local function getMovePoint(screenPos)
+	local x = (screenPos and screenPos.X) or mouse.X
+	local y = (screenPos and screenPos.Y) or mouse.Y
+	local ray = camera:ViewportPointToRay(x, y)
 	if currentPet and currentPet.Parent then
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Include
@@ -268,7 +277,7 @@ local function startCursorTracking()
 	clearCursorTracking()
 	cursorTrackConn = RunService.RenderStepped:Connect(function()
 		if not gui.Enabled then return end
-		local mousePos = UserInputService:GetMouseLocation()
+		local mousePos = pointerScreenPos or UserInputService:GetMouseLocation()
 		local isOverPanel = mousePos and (
 			mousePos.X >= panel.AbsolutePosition.X
 				and mousePos.X <= (panel.AbsolutePosition.X + panel.AbsoluteSize.X)
@@ -278,7 +287,7 @@ local function startCursorTracking()
 		if isOverPanel then return end
 
 		local now = tick()
-		local movePoint = getMovePoint()
+		local movePoint = getMovePoint(mousePos)
 		if not movePoint then return end
 		local worldPos = movePoint.worldPos
 		if typeof(worldPos) ~= "Vector3" then return end
@@ -348,7 +357,11 @@ hookRotateButton(rotateRight, 1)
 
 exitButton.Activated:Connect(function()
 	if gui.Enabled then
+		local now = tick()
+		if (now - lastExitFireAt) < 0.2 then return end
+		lastExitFireAt = now
 		showerRemote:FireServer("Exit", {})
+		endShowerView()
 	end
 end)
 
@@ -366,12 +379,11 @@ end
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed or not gui.Enabled then return end
 	if not gui.Enabled then return end
-	if input.UserInputType ~= Enum.UserInputType.MouseButton1
-		and input.UserInputType ~= Enum.UserInputType.Touch then
-		return
-	end
+	local isPointerPress = input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch
+	if not isPointerPress then return end
 
-	local inputPos = input.Position
+	local inputPos = input.Position or UserInputService:GetMouseLocation()
 	if not inputPos then return end
 
 	if isPointInsideButton(rotateLeft, inputPos) then
@@ -381,13 +393,44 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	elseif gameProcessed then
 		return
 	end
+
+	if input.UserInputType == Enum.UserInputType.Touch then
+		activeTouch = input
+		isTouchDragging = true
+		pointerScreenPos = inputPos
+	end
 end)	
+
+UserInputService.InputChanged:Connect(function(input, gameProcessed)
+	if gameProcessed or not gui.Enabled then return end
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		pointerScreenPos = input.Position
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.Touch and activeTouch and input == activeTouch and isTouchDragging then
+		pointerScreenPos = input.Position
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch and activeTouch and input == activeTouch then
+		activeTouch = nil
+		isTouchDragging = false
+		pointerScreenPos = nil
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		pointerScreenPos = nil
+	end
+end)
 
 showerRemote.OnClientEvent:Connect(function(action, payload)
 	payload = payload or {}
 
 	if action == "Start" then
 		gui.Enabled = true
+		pointerScreenPos = nil
+		activeTouch = nil
+		isTouchDragging = false
 		lastRotateFireAt = 0
 		lastToolMoveFireAt = 0
 		lastToolMovePoint = nil
@@ -409,6 +452,9 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		updateBar(payload.progress or 0)
 	elseif action == "End" then
 		endShowerView()
+		pointerScreenPos = nil
+		activeTouch = nil
+		isTouchDragging = false
 	end
 end)
 
