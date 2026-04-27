@@ -3018,59 +3018,291 @@ coroutine.wrap(SellRing)()
 coroutine.wrap(FoodRing)()
 
 ---upgradetemplates
-local GemUpgradeTemplate = Frames.GemShop.Upgrades.Template
-GemUpgradeTemplate.Parent = script
-GemUpgradeTemplate.Name = "GemUpgradeTemplate" -- this moves the template from the ui to the script (easier for people to edit :) 
+local function initGemShopUpgrades()
+	local GemUpgradeTemplate = Frames.GemShop.Upgrades.Template
+	GemUpgradeTemplate.Parent = script
+	GemUpgradeTemplate.Name = "GemUpgradeTemplate"
 
-for _,v in Gemshop:GetChildren() do
-	local i = v.Name
-	local NewUpgrade = GemUpgradeTemplate:Clone()
-	NewUpgrade.LayoutOrder = tonumber(i)
-	NewUpgrade.Name = i
-	NewUpgrade.Title.Text = v.UpgradeName.Value
+	local AFFORDABLE_COLOR = Color3.fromRGB(60, 190, 80)
+	local UNAFFORDABLE_COLOR = Color3.fromRGB(190, 60, 60)
+	local PRODUCT_PRICE_CACHE = {}
 
-	local function CalcReward(Reward)
-		local R = v.Reward
-
-		if R.Exponential.Value then
-			return R.DefaultReward.Value + R.IncreasePer.Value ^ Reward
-		else
-			return R.DefaultReward.Value + R.IncreasePer.Value * Reward
+	local function getPurchaseType(entry)
+		local configuredType = entry and tostring(entry:GetAttribute("PurchaseType") or ""):lower() or ""
+		if configuredType == "developerproduct" or configuredType == "devproduct" or configuredType == "product" then
+			return "DeveloperProduct"
 		end
+		return "GamePass"
 	end
 
-	local function CalcCost()
-		local C = v.Price
 
-		if C.Exponential.Value then
-			return C.DefaultPrice.Value * C.IncreasePer.Value ^ PlayerData["GemUpgrade"..i].Value
-		else
-			return C.DefaultPrice.Value + C.IncreasePer.Value * (PlayerData["GemUpgrade"..i].Value+1)
+	local function getButtonActivator(frame)
+		if not frame then return nil end
+		if frame:IsA("GuiButton") then return frame end
+		local namedClick = frame:FindFirstChild("Click")
+		if namedClick and namedClick:IsA("GuiButton") then return namedClick end
+		for _, descendant in ipairs(frame:GetDescendants()) do
+			if descendant:IsA("GuiButton") then
+				return descendant
+			end
 		end
+		return nil
 	end
 
-	local function Update()
-		local O = v.Operator.Value
-		local CurrentLevel = PlayerData["GemUpgrade"..i].Value
-
-		if CurrentLevel < v.Max.Value then
-			NewUpgrade.Description.Text = O..Utilities.Short.en(CalcReward(CurrentLevel)).." > "..O..Utilities.Short.en(CalcReward(CurrentLevel+1))
-			NewUpgrade.Buy.Amount.Text = Utilities.Short.en(CalcCost())
-		else
-			NewUpgrade.Description.Text = O..Utilities.Short.en(CalcReward(CurrentLevel)).." > Max"
-			NewUpgrade.Buy.Amount.Text = "Max"
+	local function getGamepassEntryForUpgrade(upgradeFolder, currentLevel)
+		local explicitName = upgradeFolder:GetAttribute("GamepassName")
+		if explicitName and ReplicatedStorage.Gamepasses:FindFirstChild(tostring(explicitName)) then
+			return ReplicatedStorage.Gamepasses[tostring(explicitName)]
 		end
+
+		local explicitId = tonumber(upgradeFolder:GetAttribute("GamepassId"))
+		if explicitId then
+			for _, entry in ipairs(ReplicatedStorage.Gamepasses:GetChildren()) do
+				if tonumber(entry.Value) == explicitId then
+					return entry
+				end
+			end
+		end
+
+		local bestEntry = nil
+		local bestTierStart = -math.huge
+		for _, entry in ipairs(ReplicatedStorage.Gamepasses:GetChildren()) do
+			if tostring(entry:GetAttribute("GemUpgradeTarget")) == tostring(upgradeFolder.Name) then
+				local tierStart = tonumber(entry:GetAttribute("GemUpgradeTierStart"))
+				if tierStart == nil then
+					tierStart = tonumber(entry:GetAttribute("GemUpgradeTierMin")) or 0
+				end
+
+				if tierStart <= currentLevel and tierStart >= bestTierStart then
+					bestTierStart = tierStart
+					bestEntry = entry
+				end
+			end
+		end
+		return bestEntry
 	end
 
-	Update()
-	PlayerData["GemUpgrade"..i].Changed:Connect(Update)
+	local function getProductPrice(productId, purchaseType)
+		local cacheKey = tostring(purchaseType) .. ":" .. tostring(productId)
+		if PRODUCT_PRICE_CACHE[cacheKey] ~= nil then
+			return PRODUCT_PRICE_CACHE[cacheKey] or nil
+		end
+		local success, info = pcall(function()
+			if purchaseType == "DeveloperProduct" then
+				return MarketPlaceService:GetProductInfo(productId, Enum.InfoType.Product)
+			end
+			return MarketPlaceService:GetProductInfo(productId, Enum.InfoType.GamePass)
+		end)
+		local robuxPrice = success and info and info.PriceInRobux or nil
+		PRODUCT_PRICE_CACHE[cacheKey] = robuxPrice or false
+		return robuxPrice
+	end
 
-	NewUpgrade.Parent = Frames.GemShop.Upgrades
+	local function calcReward(rewardConfig, level)
+		if rewardConfig.Exponential.Value then
+			return rewardConfig.DefaultReward.Value + rewardConfig.IncreasePer.Value ^ level
+		end
+		return rewardConfig.DefaultReward.Value + rewardConfig.IncreasePer.Value * level
+	end
 
-	NewUpgrade.Buy.Click.MouseButton1Click:Connect(function()
-		Remotes.GemUpgrade:FireServer(i)
-	end)
+	local function calcSingleCost(costConfig, level)
+		if costConfig.Exponential.Value then
+			return costConfig.DefaultPrice.Value * costConfig.IncreasePer.Value ^ level
+		end
+		return costConfig.DefaultPrice.Value + costConfig.IncreasePer.Value * (level + 1)
+	end
+
+	for _, upgradeFolder in Gemshop:GetChildren() do
+		local upgradeId = upgradeFolder.Name
+		local levelValue = PlayerData["GemUpgrade" .. upgradeId]
+		if not levelValue then
+			continue
+		end
+
+		local card = GemUpgradeTemplate:Clone()
+		card.LayoutOrder = tonumber(upgradeId)
+		card.Name = upgradeId
+		card.Title.Text = upgradeFolder.UpgradeName.Value
+
+		local tempImage = findDescendant(card, "TempImage")
+		if tempImage and tempImage:IsA("ImageLabel") then
+			local imageRaw = upgradeFolder:GetAttribute("TempImage") or upgradeFolder:GetAttribute("Image") or upgradeFolder:GetAttribute("ImageId")
+			if imageRaw ~= nil then
+				local imageIdNumber = tonumber(imageRaw)
+				if imageIdNumber and not tostring(imageRaw):match("rbxassetid://") then
+					tempImage.Image = "rbxassetid://" .. imageIdNumber
+				else
+					tempImage.Image = tostring(imageRaw)
+				end
+			end
+		end
+
+		local buttonFrames = {
+			Buy1 = findDescendant(card, "Buy1"),
+			Buy2 = findDescendant(card, "Buy2"),
+			Buy3 = findDescendant(card, "Buy3"),
+			Buy4 = findDescendant(card, "Buy4"),
+		}
+
+		local buttonAmounts = {
+			Buy1 = buttonFrames.Buy1 and findDescendant(buttonFrames.Buy1, "Amount"),
+			Buy2 = buttonFrames.Buy2 and findDescendant(buttonFrames.Buy2, "Amount"),
+			Buy3 = buttonFrames.Buy3 and findDescendant(buttonFrames.Buy3, "Amount"),
+			Buy4 = buttonFrames.Buy4 and findDescendant(buttonFrames.Buy4, "Amount"),
+		}
+
+		local buttonActivators = {
+			Buy1 = getButtonActivator(buttonFrames.Buy1),
+			Buy2 = getButtonActivator(buttonFrames.Buy2),
+			Buy3 = getButtonActivator(buttonFrames.Buy3),
+			Buy4 = getButtonActivator(buttonFrames.Buy4),
+		}
+
+		local rewardConfig = upgradeFolder.Reward
+		local costConfig = upgradeFolder.Price
+		local maxLevel = upgradeFolder.Max.Value
+		local tierLabel = findDescendant(card, "Tier")
+
+		local function setButtonColor(buttonName, enabled)
+			local frame = buttonFrames[buttonName]
+			if frame and frame:IsA("Frame") then
+				frame.BackgroundColor3 = enabled and AFFORDABLE_COLOR or UNAFFORDABLE_COLOR
+			end
+		end
+
+		local function setButtonVisible(buttonName, visible)
+			local frame = buttonFrames[buttonName]
+			if frame then
+				frame.Visible = visible
+			end
+		end
+
+		local function setAmount(buttonName, text)
+			local label = buttonAmounts[buttonName]
+			if label then
+				label.Text = text
+			end
+		end
+
+		local function calcBulkCost(currentLevel, requestedAmount)
+			local amountToBuy = math.clamp(requestedAmount, 0, math.max(maxLevel - currentLevel, 0))
+			if amountToBuy <= 0 then
+				return 0, 0
+			end
+
+			local totalCost = 0
+			for offset = 0, amountToBuy - 1 do
+				totalCost += calcSingleCost(costConfig, currentLevel + offset)
+			end
+			return totalCost, amountToBuy
+		end
+
+		local function updateCard()
+			local currentLevel = levelValue.Value
+			local currency = PlayerData.Currency.Value
+			local operator = upgradeFolder.Operator.Value
+			local remaining = math.max(maxLevel - currentLevel, 0)
+			local gamepassEntry = getGamepassEntryForUpgrade(upgradeFolder, currentLevel)
+			local gamepassId = gamepassEntry and tonumber(gamepassEntry.Value) or nil
+			local gamepassType = getPurchaseType(gamepassEntry)
+			local gamepassAmount = tonumber(gamepassEntry and gamepassEntry:GetAttribute("GemUpgradeAmount")) or 10
+			local displayBaseValue = tonumber(upgradeFolder:GetAttribute("DisplayBaseValue"))
+			local displayPrefix = (displayBaseValue == nil) and operator or ""
+			local function toDisplayValue(level)
+				local raw = calcReward(rewardConfig, level)
+				if displayBaseValue == nil then
+					return raw
+				end
+				if operator == "+" then
+					return displayBaseValue + raw
+				end
+				return displayBaseValue * raw
+			end
+
+			if currentLevel < maxLevel then
+				card.Description.Text = displayPrefix .. Utilities.Short.en(toDisplayValue(currentLevel)) .. " > " .. displayPrefix .. Utilities.Short.en(toDisplayValue(currentLevel + 1))
+			else
+				card.Description.Text = displayPrefix .. Utilities.Short.en(toDisplayValue(currentLevel)) .. " > Max"
+			end
+			if tierLabel and tierLabel:IsA("TextLabel") then
+				tierLabel.Text = "Tier: " .. tostring(currentLevel)
+			end
+
+			local cost1, buyable1 = calcBulkCost(currentLevel, 1)
+			local cost5, buyable5 = calcBulkCost(currentLevel, 5)
+			local cost10, buyable10 = calcBulkCost(currentLevel, 10)
+			local canShowBuy1 = remaining >= 1
+			local canShowBuy5 = remaining >= 5
+			local canShowBuy10 = remaining >= 10
+			local canShowGamepass = gamepassId ~= nil and remaining >= gamepassAmount and currentLevel < maxLevel
+
+			setAmount("Buy1", buyable1 > 0 and Utilities.Short.en(cost1) or "Max")
+			setAmount("Buy2", buyable5 > 0 and Utilities.Short.en(cost5) or "Max")
+			setAmount("Buy3", buyable10 > 0 and Utilities.Short.en(cost10) or "Max")
+			setButtonVisible("Buy1", canShowBuy1)
+			setButtonVisible("Buy2", canShowBuy5)
+			setButtonVisible("Buy3", canShowBuy10)
+			setButtonVisible("Buy4", canShowGamepass)
+
+			setButtonColor("Buy1", canShowBuy1 and buyable1 > 0 and currency >= cost1)
+			setButtonColor("Buy2", canShowBuy5 and buyable5 > 0 and currency >= cost5)
+			setButtonColor("Buy3", canShowBuy10 and buyable10 > 0 and currency >= cost10)
+
+			if gamepassId then
+				local robuxPrice = getProductPrice(gamepassId, gamepassType)
+				setAmount("Buy4", robuxPrice and ("\u{E002}" .. tostring(robuxPrice)) or "R$ ?")
+			else
+				setAmount("Buy4", "No Pass")
+			end
+			setButtonColor("Buy4", canShowGamepass)
+		end
+
+		card.Parent = Frames.GemShop.Upgrades
+		updateCard()
+		levelValue.Changed:Connect(updateCard)
+		PlayerData.Currency.Changed:Connect(updateCard)
+
+		if buttonActivators.Buy1 then
+			buttonActivators.Buy1.MouseButton1Click:Connect(function()
+				Remotes.GemUpgrade:FireServer(upgradeId, 1)
+			end)
+		end
+		if buttonActivators.Buy2 then
+			buttonActivators.Buy2.MouseButton1Click:Connect(function()
+				Remotes.GemUpgrade:FireServer(upgradeId, 5)
+			end)
+		end
+		if buttonActivators.Buy3 then
+			buttonActivators.Buy3.MouseButton1Click:Connect(function()
+				Remotes.GemUpgrade:FireServer(upgradeId, 10)
+			end)
+		end
+		if buttonActivators.Buy4 then
+			buttonActivators.Buy4.MouseButton1Click:Connect(function()
+				local currentLevel = levelValue.Value
+				local gamepassEntry = getGamepassEntryForUpgrade(upgradeFolder, currentLevel)
+				local gamepassId = gamepassEntry and tonumber(gamepassEntry.Value) or nil
+				local gamepassType = getPurchaseType(gamepassEntry)
+				local gamepassAmount = tonumber(gamepassEntry and gamepassEntry:GetAttribute("GemUpgradeAmount")) or 10
+				if not gamepassId then return end
+				if currentLevel + gamepassAmount > maxLevel then return end
+				if gamepassType == "DeveloperProduct" then
+					MarketPlaceService:PromptProductPurchase(Player, gamepassId)
+					return
+				end
+
+				local hasPass = false
+				local success = pcall(function()
+					hasPass = MarketPlaceService:UserOwnsGamePassAsync(Player.UserId, gamepassId)
+				end)
+				if success and hasPass then return end
+				MarketPlaceService:PromptGamePassPurchase(Player, gamepassId)
+			end)
+		end
+	end
 end
+
+initGemShopUpgrades()
 
 --// Codes
 local CodesFrame = Frames.Codes
