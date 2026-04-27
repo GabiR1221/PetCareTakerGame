@@ -35,6 +35,14 @@ for _, folder in ipairs(ShopItems:GetChildren()) do
 	end
 end
 
+local foodReceiptBridge = ReplicatedStorage:FindFirstChild("FoodShopHandleReceipt")
+if not foodReceiptBridge or not foodReceiptBridge:IsA("BindableFunction") then
+	foodReceiptBridge = Instance.new("BindableFunction")
+	foodReceiptBridge.Name = "FoodShopHandleReceipt"
+	foodReceiptBridge.Parent = ReplicatedStorage
+end
+
+
 local function buildFolders()
 	local folders = {}
 	for _, folder in ipairs(ShopItems:GetChildren()) do
@@ -193,6 +201,8 @@ local function GiveItem(player, itemName)
 	if tool then
 		local clone = tool:Clone()
 		if clone:IsA("Tool") then
+			clone:SetAttribute("InventoryCategory", "Food")
+			clone:SetAttribute("FoodTool", true)
 			clone.Parent = player.Backpack
 		else
 			clone.Parent = player:WaitForChild("StarterGear")
@@ -257,8 +267,8 @@ BuyItem.OnServerInvoke = function(player, itemName)
 	return true, "Purchased " .. itemName
 end
 
--- Robux purchases
-MarketplaceService.ProcessReceipt = function(receiptInfo)
+-- Robux purchases (handled via central receipt dispatcher)
+foodReceiptBridge.OnInvoke = function(receiptInfo)
 	local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
 	if not player then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
@@ -280,8 +290,6 @@ MarketplaceService.ProcessReceipt = function(receiptInfo)
 		if success then
 			UpdateShop:FireAllClients()
 			return Enum.ProductPurchaseDecision.PurchaseGranted
-		else
-			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 	end
 
