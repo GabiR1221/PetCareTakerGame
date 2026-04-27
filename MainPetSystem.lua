@@ -191,6 +191,69 @@ local function dropCarriedPet(player, options)
 	return true
 end
 
+local function getPickupPartFromPet(petModel)
+	if not petModel or not petModel:IsA("Model") then return nil end
+	local helper = petModel:FindFirstChild("PetPickupPart")
+	if helper and helper:IsA("BasePart") then
+		return helper
+	end
+	local primary = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+	return primary
+end
+
+local function tryPickupOwnedPet(player, petModel)
+	if not player or not petModel or not petModel:IsA("Model") or not petModel.Parent then
+		return false
+	end
+	if carryingPetByUserId[player.UserId] then
+		return false
+	end
+
+	local state = petState[petModel]
+	if not state or state.wild == true then
+		return false
+	end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return false
+	end
+	if state.location == "player" or state.location == "npc" or state.location == "shower" then
+		return false
+	end
+
+	local character = player.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	local pickupPart = getPickupPartFromPet(petModel)
+	if not root or not pickupPart then
+		return false
+	end
+
+	local maxDistance = tonumber(pickupPart:GetAttribute("PickupDistance")) or PICKUP_PROMPT_MAX_DISTANCE
+	if (pickupPart.Position - root.Position).Magnitude > (maxDistance + 1.5) then
+		return false
+	end
+
+	local ok = pcall(function()
+		PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false })
+	end)
+	if not ok then
+		return false
+	end
+
+	local helper = petModel:FindFirstChild("PetPickupPart")
+	if helper then
+		pcall(function() helper:Destroy() end)
+	end
+	if petPickupPromptConns[petModel] then
+		pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
+		petPickupPromptConns[petModel] = nil
+	end
+
+	petState[petModel] = petState[petModel] or {}
+	petState[petModel].location = "player"
+	PetStateManager:SendStateToOwner(petModel)
+	return true
+end
+
 isInsideTycoonBounds = function(referencePart, tycoonModel, returnPart)
 	if not referencePart or not tycoonModel then return true end
 
@@ -296,6 +359,8 @@ function attachDropPickupPrompt(petModel, ownerUserId)
 	helper.Anchored = false
 	helper.Transparency = 1
 	helper.CanCollide = false
+	helper.CanTouch = false
+	helper.CanQuery = false
 	helper.Parent = petModel
 
 	local pp = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
@@ -306,39 +371,14 @@ function attachDropPickupPrompt(petModel, ownerUserId)
 		w.Part1 = pp
 		w.Parent = helper
 	end
-
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = "PetPrompt"
-	prompt.ActionText = "Pick Up Pet"
-	prompt.ObjectText = "Pet"
-	prompt.RequiresLineOfSight = false
-	prompt.MaxActivationDistance = 6
-	prompt.HoldDuration = 0
-	prompt.Parent = helper
+	helper:SetAttribute("PickupDistance", PICKUP_PROMPT_MAX_DISTANCE)
 
 	if petPickupPromptConns[petModel] then
 		pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
 		petPickupPromptConns[petModel] = nil
 	end
 
-	petPickupPromptConns[petModel] = prompt.Triggered:Connect(function(requestingPlayer)
-		if not requestingPlayer or not requestingPlayer.Character or not requestingPlayer.Character.PrimaryPart then return end
-		if carryingPetByUserId[requestingPlayer.UserId] then return end
-		if tostring(requestingPlayer.UserId) ~= tostring(ownerUserId) then return end
-
-		local ok = pcall(function()
-			PetAttachmentManager:AttachPetToPlayer(petModel, requestingPlayer, { resetFlags = false })
-		end)
-		if ok then
-			pcall(function() helper:Destroy() end)
-			if petPickupPromptConns[petModel] then
-				pcall(function() petPickupPromptConns[petModel]:Disconnect() end)
-				petPickupPromptConns[petModel] = nil
-			end
-			petState[petModel] = petState[petModel] or {}
-			petState[petModel].location = "player"
-		end
-	end)
+	petPickupPromptConns[petModel] = nil
 end
 
 
@@ -383,7 +423,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData71", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData80", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -484,13 +524,21 @@ if accessoryEvent then
 	end)
 end
 
-petCarryEvent.OnServerEvent:Connect(function(player, action)
+petCarryEvent.OnServerEvent:Connect(function(player, action, payload)
 	if action == "RequestCarryState" then
 		local carriedPet = carryingPetByUserId[player.UserId]
 		local currentlyCarrying = carriedPet ~= nil
 		local petName = currentlyCarrying and tostring(carriedPet.Name) or nil
 		local canDrop = currentlyCarrying and canPlayerDropCarriedPetAtCurrentPosition(player, carriedPet) or false
 		petCarryEvent:FireClient(player, "CarryState", currentlyCarrying, petName, canDrop)
+		return
+	end
+	if action == "TryPickupPet" then
+		local targetPet = payload
+		if typeof(targetPet) ~= "Instance" then
+			return
+		end
+		tryPickupOwnedPet(player, targetPet)
 		return
 	end
 	if action ~= "DropPet" then return end
@@ -511,8 +559,6 @@ if petStateEvent then
 		end
 	end)
 end
-
-
 
 -- Scan for existing NPCs
 for _, npc in ipairs(NPCS_FOLDER:GetChildren()) do
