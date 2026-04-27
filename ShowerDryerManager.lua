@@ -81,9 +81,61 @@ function ShowerDryerManager:_bindPetToShowerWeld(session)
 	weld.Parent = showerPart
 
 	session.showerPetWeld = weld
+	session.baseWeldC0 = weld.C0
 	return weld
 end
 
+function ShowerDryerManager:_updateRubPose(session, targetSurfacePos, targetSurfaceNormal, touchedPart)
+	if not session then return end
+	local weld = session.showerPetWeld
+	if not weld or not weld.Parent then return end
+
+	local baseC0 = session.baseWeldC0 or weld.C0
+	session.baseWeldC0 = baseC0
+	session.rubOffset = session.rubOffset or Vector3.zero
+	session.rubTilt = session.rubTilt or Vector3.zero
+	session.lastRubUpdateAt = session.lastRubUpdateAt or tick()
+
+	if touchedPart and touchedPart.Parent and targetSurfacePos and targetSurfaceNormal then
+		local now = tick()
+		local dt = math.max(now - (session.lastRubUpdateAt or now), 1 / 240)
+		session.lastRubTime = now
+		session.lastRubUpdateAt = now
+		local normal = targetSurfaceNormal
+		if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
+			normal = Vector3.new(0, 1, 0)
+		else
+			normal = normal.Unit
+		end
+
+		local dragIntensity = 0.55
+		if session.lastRubWorldPos then
+			local speed = (targetSurfacePos - session.lastRubWorldPos).Magnitude / dt
+			dragIntensity = math.clamp((speed / 22), 0.35, 1)
+		end
+		session.lastRubWorldPos = targetSurfacePos
+
+		local pushIn = -normal * (0.07 + (0.05 * dragIntensity))
+		session.rubOffset = session.rubOffset:Lerp(pushIn, 0.42 + (0.22 * dragIntensity))
+
+		local petPrimary = session.pet and session.pet.PrimaryPart
+		if petPrimary then
+			local localHit = petPrimary.CFrame:PointToObjectSpace(targetSurfacePos)
+			local tiltX = math.clamp(-localHit.Z * 0.011, -0.06, 0.06)
+			local tiltZ = math.clamp(localHit.X * 0.011, -0.06, 0.06)
+			session.rubTilt = session.rubTilt:Lerp(Vector3.new(tiltX, 0, tiltZ), 0.36)
+		end
+	else
+		session.lastRubUpdateAt = tick()
+		session.lastRubWorldPos = nil
+		session.rubOffset = session.rubOffset:Lerp(Vector3.zero, 0.22)
+		session.rubTilt = session.rubTilt:Lerp(Vector3.zero, 0.18)
+	end
+
+	local offset = session.rubOffset
+	local tilt = session.rubTilt
+	weld.C0 = baseC0 * CFrame.new(offset.X, offset.Y, offset.Z) * CFrame.Angles(tilt.X, 0, tilt.Z)
+end
 
 function ShowerDryerManager:_moveToolToPosition(toolInstance, worldPos, surfaceNormal)
 	local handle = self:_toToolHandle(toolInstance)
@@ -719,9 +771,8 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		surfaceNormal = Vector3.new(0, 1, 0)
 	end
 
-	local requestedPetHit = payload.hitPet == true
 	local snapDistance = (surfacePos - clampedPos).Magnitude
-	local useSnappedSurface = requestedPetHit and (snapDistance <= 3.4)
+	local useSnappedSurface = (snapDistance <= 2.6)
 	local targetSurfacePos = useSnappedSurface and surfacePos or clampedPos
 	local payloadSurfaceNormal = payload.surfaceNormal
 	local targetSurfaceNormal = useSnappedSurface and surfaceNormal or (session.lastToolNormal or surfaceNormal)
@@ -732,9 +783,9 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		targetSurfaceNormal = Vector3.new(0, 1, 0)
 	end
 
-	local toolOffset = math.clamp(self:_getToolHalfThickness(activeTool) * 0.58, 0.12, 0.34)
+	local toolOffset = math.clamp(self:_getToolHalfThickness(activeTool) * 0.65, 0.18, 0.4)
 	local unsmoothedFinalPos = targetSurfacePos + targetSurfaceNormal.Unit * toolOffset
-	local smoothingAlpha = useSnappedSurface and 0.62 or 0.4
+	local smoothingAlpha = useSnappedSurface and 0.86 or 0.45
 	local finalPos = unsmoothedFinalPos
 	if session.lastToolWorldPos then
 		finalPos = session.lastToolWorldPos:Lerp(unsmoothedFinalPos, smoothingAlpha)
@@ -762,10 +813,12 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if distance > 6 then return end
 
 	local now = tick()
+	local touchedPart = self:_getNearestDirtPart(session, activePart)
+	self:_updateRubPose(session, targetSurfacePos, smoothedNormal, touchedPart)
+
 	if (now - (session.lastProgressTick or 0)) < 0.04 then return end
 	session.lastProgressTick = now
 
-	local touchedPart = self:_getNearestDirtPart(session, activePart)
 	if #(session.dirtParts or {}) > 0 and not touchedPart then
 		return
 	end
@@ -894,7 +947,8 @@ function ShowerDryerManager:_handleRotateFromClient(player, payload)
 
 	local rotationStep = math.rad(90) * direction
 	if weld and weld.Parent then
-		weld.C0 = weld.C0 * CFrame.Angles(0, rotationStep, 0)
+		session.baseWeldC0 = (session.baseWeldC0 or weld.C0) * CFrame.Angles(0, rotationStep, 0)
+		self:_updateRubPose(session)
 	else
 		local pet = session.pet
 		if pet and pet.Parent then
