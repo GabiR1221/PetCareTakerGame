@@ -140,6 +140,9 @@ function SprintRunManager:Initialize(playersService, wildPetManager)
 	self:_connectRemotes()
 	self:_connectPlayers()
 	self:_startHeartbeat()
+	for _, player in ipairs(self.Players:GetPlayers()) do
+		player:SetAttribute("RunnerActive", false)
+	end
 end
 
 function SprintRunManager:_connectPlayers()
@@ -149,6 +152,7 @@ function SprintRunManager:_connectPlayers()
 	end)
 
 	self.Players.PlayerAdded:Connect(function(player)
+		player:SetAttribute("RunnerActive", false)
 		player.CharacterRemoving:Connect(function()
 			self:StopRunning(player, false)
 		end)
@@ -1213,6 +1217,7 @@ function SprintRunManager:StartRunning(player, startLine)
 	state.jumpForwardSpeed = math.max(0, state.runSpeed * JUMP_FORWARD_SPEED_MULTIPLIER)
 	state.defaultFreefallEnabled = hum:GetStateEnabled(Enum.HumanoidStateType.Freefall)
 
+	player:SetAttribute("RunnerActive", true)
 	player:SetAttribute("RunnerJumping", false)
 	hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
 	hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
@@ -1397,6 +1402,7 @@ function SprintRunManager:StopRunning(player, notifyClient)
 	state.stumbleEndAt = nil
 	state.stumbleStartedAt = nil
 	state.stumbleSpeed = nil
+	player:SetAttribute("RunnerActive", false)
 	self:_clearStumbleForce(state)
 	player:SetAttribute("RunnerJumping", false)
 	self:_clearJumpForce(state)
