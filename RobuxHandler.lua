@@ -11,11 +11,19 @@ local PassRewardsConfig = require(ReplicatedStorage.Modules.PassRewardsConfig)
 local PetGrantBridgeName = "PetGamepassGrantBridge"
 local PetGrantBridge = ReplicatedStorage:FindFirstChild(PetGrantBridgeName)
 local NotifyEvent = ReplicatedStorage:FindFirstChild("GameNotificationEvent")
+local GemUpgradePurchaseBridgeName = "GemUpgradePurchaseBridge"
+local GemUpgradePurchaseBridge = ReplicatedStorage:FindFirstChild(GemUpgradePurchaseBridgeName)
 
 if not PetGrantBridge or not PetGrantBridge:IsA("BindableEvent") then
 	PetGrantBridge = Instance.new("BindableEvent")
 	PetGrantBridge.Name = PetGrantBridgeName
 	PetGrantBridge.Parent = ReplicatedStorage
+end
+
+if not GemUpgradePurchaseBridge or not GemUpgradePurchaseBridge:IsA("BindableEvent") then
+	GemUpgradePurchaseBridge = Instance.new("BindableEvent")
+	GemUpgradePurchaseBridge.Name = GemUpgradePurchaseBridgeName
+	GemUpgradePurchaseBridge.Parent = ReplicatedStorage
 end
 
 --[[
@@ -174,6 +182,21 @@ MarketPlaceService.PromptGamePassPurchaseFinished:Connect(function(Player, Gamep
 			PetGrantBridge:Fire(Player, GamepassType.Name, petsToGrant)
 			NotifyEvent:FireClient(Player, "success", "✅ Purchase successful! Pet pack added to your inventory.")
 		end
+		local gemUpgradeTarget = GamepassType:GetAttribute("GemUpgradeTarget")
+		local gemUpgradeAmount = tonumber(GamepassType:GetAttribute("GemUpgradeAmount")) or 10
+		if GemUpgradePurchaseBridge and gemUpgradeTarget and gemUpgradeAmount and gemUpgradeAmount > 0 then
+			local playerData = Player:FindFirstChild("Data") and Player.Data:FindFirstChild("PlayerData")
+			local currentTierValue = playerData and playerData:FindFirstChild("GemUpgrade" .. tostring(gemUpgradeTarget))
+			local currentTier = currentTierValue and currentTierValue.Value or 0
+			local tierStart = tonumber(GamepassType:GetAttribute("GemUpgradeTierStart"))
+			if tierStart == nil then
+				tierStart = tonumber(GamepassType:GetAttribute("GemUpgradeTierMin")) or 0
+			end
+			local tierEndExclusive = tonumber(GamepassType:GetAttribute("GemUpgradeTierMaxExclusive")) or (tierStart + math.floor(gemUpgradeAmount))
+			if currentTier >= tierStart and currentTier < tierEndExclusive then
+				GemUpgradePurchaseBridge:Fire(Player, tostring(gemUpgradeTarget), math.floor(gemUpgradeAmount))
+			end
+		end
 	end
 end)
 
@@ -267,10 +290,13 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 		if tonumber(purchaseEntry.Value) ~= tonumber(ReceiptInfo.ProductId) then continue end
 		local explicitType = getPurchaseType(purchaseEntry)
 		local petsToGrant = getGrantedPetsForGamepass(purchaseEntry)
+		local gemUpgradeTarget = purchaseEntry:GetAttribute("GemUpgradeTarget")
+		local gemUpgradeAmount = tonumber(purchaseEntry:GetAttribute("GemUpgradeAmount")) or 10
+		local hasGemUpgradeGrant = gemUpgradeTarget ~= nil and gemUpgradeAmount > 0
 		local hasPetGrantConfig = #petsToGrant > 0
 		local hasPermanentOwnershipGrant = explicitType == "DeveloperProduct" and (grantsPermanentOwnership(purchaseEntry) or isPremiumPassEntry(purchaseEntry))
-		if explicitType ~= "DeveloperProduct" and not hasPetGrantConfig then continue end
-		if explicitType == "DeveloperProduct" and not hasPetGrantConfig and not hasPermanentOwnershipGrant then continue end
+		if explicitType ~= "DeveloperProduct" and not hasPetGrantConfig and not hasGemUpgradeGrant then continue end
+		if explicitType == "DeveloperProduct" and not hasPetGrantConfig and not hasPermanentOwnershipGrant and not hasGemUpgradeGrant then continue end
 
 		if #petsToGrant > 0 then
 			if not hasInventorySpaceFor(Player, #petsToGrant) then
@@ -282,6 +308,19 @@ MarketPlaceService.ProcessReceipt = function(ReceiptInfo)
 		end
 		if hasPermanentOwnershipGrant then
 			markOwnedInData(Player, purchaseEntry)
+		end
+		if hasGemUpgradeGrant and GemUpgradePurchaseBridge then
+			local playerData = Player:FindFirstChild("Data") and Player.Data:FindFirstChild("PlayerData")
+			local currentTierValue = playerData and playerData:FindFirstChild("GemUpgrade" .. tostring(gemUpgradeTarget))
+			local currentTier = currentTierValue and currentTierValue.Value or 0
+			local tierStart = tonumber(purchaseEntry:GetAttribute("GemUpgradeTierStart"))
+			if tierStart == nil then
+				tierStart = tonumber(purchaseEntry:GetAttribute("GemUpgradeTierMin")) or 0
+			end
+			local tierEndExclusive = tonumber(purchaseEntry:GetAttribute("GemUpgradeTierMaxExclusive")) or (tierStart + math.floor(gemUpgradeAmount))
+			if currentTier >= tierStart and currentTier < tierEndExclusive then
+				GemUpgradePurchaseBridge:Fire(Player, tostring(gemUpgradeTarget), math.floor(gemUpgradeAmount))
+			end
 		end
 
 		return Enum.ProductPurchaseDecision.PurchaseGranted
