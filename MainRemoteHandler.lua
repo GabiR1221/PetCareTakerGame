@@ -1031,25 +1031,122 @@ Remotes.Area.OnServerEvent:Connect(function(Player)
 end)
 
 --// Gemshop
-Remotes.GemUpgrade.OnServerEvent:Connect(function(Player, Upgrade)
-	if not ReplicatedStorage.GemShop:FindFirstChild(Upgrade) then return end
+local GemUpgradePurchaseBridgeName = "GemUpgradePurchaseBridge"
+local GemUpgradePurchaseBridge = ReplicatedStorage:FindFirstChild(GemUpgradePurchaseBridgeName)
+if not GemUpgradePurchaseBridge or not GemUpgradePurchaseBridge:IsA("BindableEvent") then
+	GemUpgradePurchaseBridge = Instance.new("BindableEvent")
+	GemUpgradePurchaseBridge.Name = GemUpgradePurchaseBridgeName
+	GemUpgradePurchaseBridge.Parent = ReplicatedStorage
+end
 
-	local GemUpg = ReplicatedStorage.GemShop[Upgrade]
-	local UpgradeTier = Player.Data.PlayerData["GemUpgrade"..Upgrade]
+local function resolveGemUpgrade(player, upgradeName)
+	local gemShopFolder = ReplicatedStorage:FindFirstChild("GemShop")
+	local playerData = player and player:FindFirstChild("Data") and player.Data:FindFirstChild("PlayerData")
+	if not gemShopFolder or not playerData then return nil, nil end
 
-	if UpgradeTier.Value >= GemUpg.Max.Value then return end -- max
-
-	local Cost = GemUpg.Price
-	local Price
-
-	if Cost.Exponential.Value then
-		Price = Cost.DefaultPrice.Value * Cost.IncreasePer.Value ^ UpgradeTier.Value
-	else
-		Price = Cost.DefaultPrice.Value + Cost.IncreasePer.Value * (UpgradeTier.Value+1)
+	local key = tostring(upgradeName or "")
+	local gemUpgrade = gemShopFolder:FindFirstChild(key)
+	local upgradeTier = playerData:FindFirstChild("GemUpgrade" .. key)
+	if not gemUpgrade or not upgradeTier or not upgradeTier:IsA("IntValue") then
+		return nil, nil
 	end
 
-	if Player.Data.PlayerData.Currency.Value >= Price then
-		Player.Data.PlayerData.Currency.Value -= Price
-		UpgradeTier.Value += 1
+	return gemUpgrade, upgradeTier
+end
+
+local function calculateUpgradePrice(gemUpgrade, currentTier)
+	if not gemUpgrade then return nil end
+	local priceConfig = gemUpgrade:FindFirstChild("Price")
+	if not priceConfig then return nil end
+
+	local defaultPrice = priceConfig:FindFirstChild("DefaultPrice")
+	local increasePer = priceConfig:FindFirstChild("IncreasePer")
+	local exponential = priceConfig:FindFirstChild("Exponential")
+	if not defaultPrice or not increasePer or not exponential then return nil end
+
+	if exponential.Value then
+		return defaultPrice.Value * (increasePer.Value ^ currentTier)
 	end
+	return defaultPrice.Value + increasePer.Value * (currentTier + 1)
+end
+
+local function getBulkPurchaseCost(gemUpgrade, currentTier, purchaseCount)
+	local maxValue = gemUpgrade and gemUpgrade:FindFirstChild("Max")
+	if not maxValue then return nil, 0 end
+
+	local remaining = math.max(maxValue.Value - currentTier, 0)
+	local requested = math.max(math.floor(tonumber(purchaseCount) or 0), 0)
+	if requested <= 0 then
+		return 0, 0
+	end
+	if requested > remaining then
+		return nil, 0
+	end
+	local canBuy = requested
+	if canBuy <= 0 then
+		return 0, 0
+	end
+
+	local totalCost = 0
+	for offset = 0, canBuy - 1 do
+		local cost = calculateUpgradePrice(gemUpgrade, currentTier + offset)
+		if not cost then
+			return nil, 0
+		end
+		totalCost += cost
+	end
+
+	return totalCost, canBuy
+end
+
+local function buyGemUpgrade(player, upgradeName, purchaseCount)
+	local gemUpgrade, upgradeTier = resolveGemUpgrade(player, upgradeName)
+	if not gemUpgrade or not upgradeTier then return false end
+	local allowedCounts = {
+		[1] = true,
+		[5] = true,
+		[10] = true,
+	}
+	local requested = math.floor(tonumber(purchaseCount) or 0)
+	if not allowedCounts[requested] then
+		return false
+	end
+
+	local playerData = player.Data.PlayerData
+	local currency = playerData:FindFirstChild("Currency")
+	if not currency then return false end
+
+	local totalCost, grantedLevels = getBulkPurchaseCost(gemUpgrade, upgradeTier.Value, requested)
+	if not totalCost or grantedLevels <= 0 then return false end
+	if currency.Value < totalCost then return false end
+
+	currency.Value -= totalCost
+	upgradeTier.Value += grantedLevels
+	return true
+end
+
+local function grantGemUpgradeLevels(player, upgradeName, amount)
+	local gemUpgrade, upgradeTier = resolveGemUpgrade(player, upgradeName)
+	if not gemUpgrade or not upgradeTier then return false end
+
+	local maxValue = gemUpgrade:FindFirstChild("Max")
+	if not maxValue then return false end
+
+	local levelsToAdd = math.max(math.floor(tonumber(amount) or 0), 0)
+	if levelsToAdd <= 0 then return false end
+
+	local remaining = math.max(maxValue.Value - upgradeTier.Value, 0)
+	if levelsToAdd > remaining then return false end
+	upgradeTier.Value += levelsToAdd
+	return true
+end
+
+Remotes.GemUpgrade.OnServerEvent:Connect(function(player, upgradeName, purchaseCount)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	buyGemUpgrade(player, upgradeName, purchaseCount or 1)
+end)
+
+GemUpgradePurchaseBridge.Event:Connect(function(player, upgradeName, amount)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	grantGemUpgradeLevels(player, upgradeName, amount)
 end)
