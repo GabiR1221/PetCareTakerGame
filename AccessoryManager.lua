@@ -2,12 +2,15 @@ local AccessoryManager = {}
 local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-function AccessoryManager:Initialize(stateTable, carryingTable, playersService, accessoryEvent, serverStorage)
+function AccessoryManager:Initialize(stateTable, carryingTable, playersService, accessoryEvent, serverStorage, interactionPetResolver, stowPetAsToolCallback, interactionUiCallback)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
 	self.Players = playersService
 	self.accessoryEvent = accessoryEvent
 	self.ServerStorage = serverStorage
+	self.ResolveInteractionPet = interactionPetResolver
+	self.StowPetAsTool = stowPetAsToolCallback
+	self.SetInteractionUiHidden = interactionUiCallback
 
 	self.accessoryConnected = {}
 
@@ -22,7 +25,6 @@ function AccessoryManager:Initialize(stateTable, carryingTable, playersService, 
 		Hat1 = { incomePercent = 5 },
 	}
 end
-
 function AccessoryManager:_getBuffForAccessory(accessoryName)
 	if type(accessoryName) ~= "string" or accessoryName == "" then
 		return nil
@@ -310,13 +312,21 @@ function AccessoryManager:ConnectAccessoryPrompt(tablePart)
 			return
 		end
 
-		-- Must be carrying a pet
+		-- Must be carrying a pet, or holding an equipped pet tool.
 		local pet = self.carryingPetByUserId[player.UserId]
+		if not pet and type(self.ResolveInteractionPet) == "function" then
+			local resolvedPet = self.ResolveInteractionPet(player)
+			pet = resolvedPet
+		end
 		if not pet then
-			print("[PetManager] Accessory: Player not carrying a pet")
+			print("[PetManager] Accessory: Player not carrying/holding a pet")
 			return
 		end
-
+		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			pcall(function() hum:UnequipTools() end)
+		end
+		
 		-- Ensure PrimaryPart
 		self.PetAttachmentManager:SetModelPrimaryIfMissing(pet)
 		if not pet.PrimaryPart then
@@ -344,6 +354,9 @@ function AccessoryManager:ConnectAccessoryPrompt(tablePart)
 		self.petState[pet].accessories = self.petState[pet].accessories or {A = false, B = false}
 		self.petState[pet].accessorySlots = self.petState[pet].accessorySlots or {A = nil, B = nil}
 		self:_syncAccessoryLegacyState(self.petState[pet])
+		if type(self.SetInteractionUiHidden) == "function" then
+			self.SetInteractionUiHidden(player, true)
+		end
 
 		-- Fire client UI (EXACTLY like old script)
 		print(("[PetManager] Accessory: Opening UI for player %s, pet %s"):format(player.Name, pet.Name))
@@ -621,28 +634,22 @@ function AccessoryManager:HandleAccessoryEvent(player, action, data)
 			pet.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
 		end
 
-		-- Try to reattach to owner
-		local owner = self.Players:GetPlayerByUserId(state.ownerUserId)
-		local reattached = false
-
-		if owner and owner.Character and owner.Character.PrimaryPart and not self.carryingPetByUserId[state.ownerUserId] then
-			local ok, attachResult = pcall(function()
-				return self.PetAttachmentManager:AttachPetToPlayer(pet, owner, { resetFlags = false })
+		-- Return to pet tool flow (auto-equip) instead of old carried reattach.
+		local restoredToTool = false
+		if type(self.StowPetAsTool) == "function" then
+			local ok, result = pcall(function()
+				return self.StowPetAsTool(player, pet, true)
 			end)
-
-			if ok and attachResult == true then
-				self.petState[pet].location = "player"
-				self.petState[pet].accessoryTable = nil
-				reattached = true
-				print("[PetManager] Accessory: Successfully reattached pet to player")
-			else
-				warn("[PetManager] Accessory: Reattach on Exit failed:", tostring(attachResult))
+			restoredToTool = (ok and result == true)
+			if not restoredToTool then
+				warn("[PetManager] Accessory: Failed to stow pet as tool on exit:", tostring(result))
 			end
-		else
-			print("[PetManager] Accessory: Owner not available for reattach")
+		end
+		if type(self.SetInteractionUiHidden) == "function" then
+			self.SetInteractionUiHidden(player, false)
 		end
 
-		if not reattached then
+		if not restoredToTool then
 			-- Leave in world at table for pickup
 			local tablePart = state.accessoryTable
 			if tablePart and tablePart:IsA("BasePart") then
@@ -657,8 +664,8 @@ function AccessoryManager:HandleAccessoryEvent(player, action, data)
 			self.petState[pet].accessoryTable = nil
 			print("[PetManager] Accessory: Released pet to world")
 			self.PetRigManager:EnsurePetRig(pet)
+			self.PetStateManager:SendStateToOwner(pet)
 		end
-		self.PetStateManager:SendStateToOwner(pet)
 	end
 end
 
