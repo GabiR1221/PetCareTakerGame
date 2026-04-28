@@ -70,6 +70,12 @@ local attachDropPickupPrompt
 local createPetPickupTool
 local isInsideTycoonBounds
 local stashedPetModelsByUserId = {}
+local petInteractionUiEvent = ReplicatedStorage:FindFirstChild("PetInteractionUIEvent")
+if not petInteractionUiEvent then
+	petInteractionUiEvent = Instance.new("RemoteEvent")
+	petInteractionUiEvent.Name = "PetInteractionUIEvent"
+	petInteractionUiEvent.Parent = ReplicatedStorage
+end
 
 local function getStashedPetBucket(userId)
 	if not stashedPetModelsByUserId[userId] then
@@ -97,6 +103,16 @@ local function clearPetStashedModel(userId, petUid)
 	if next(bucket) == nil then
 		stashedPetModelsByUserId[userId] = nil
 	end
+end
+
+local function setInteractionUiHidden(player, hidden)
+	if not petInteractionUiEvent or not player then return end
+	pcall(function()
+		player:SetAttribute("PetInteractionActive", hidden == true)
+	end)
+	pcall(function()
+		petInteractionUiEvent:FireClient(player, hidden == true)
+	end)
 end
 
 local function getTycoonReturnPartForPlayer(userId)
@@ -175,8 +191,6 @@ local function resolveInventoryPetIdByPetName(player, petName)
 	return nil
 end
 
-
-
 local function dropCarriedPet(player, options)
 	options = options or {}
 	local carriedPet = carryingPetByUserId[player.UserId]
@@ -245,6 +259,18 @@ local function removePetToolInstances(player, petUid)
 	end
 end
 
+local function removePetToolForPlacedPet(player, petModel)
+	if not player or not petModel then return false end
+	local state = petState[petModel]
+	if not state then return false end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then return false end
+	local petUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+	if petUid == "" then return false end
+	removePetToolInstances(player, petUid)
+	clearPetStashedModel(player.UserId, petUid)
+	return true
+end
+
 local function findOwnedPetByUid(userId, petUid)
 	if type(petUid) ~= "string" or petUid == "" then return nil, nil end
 	local stashed = getPetStashedModel(userId, petUid)
@@ -263,10 +289,57 @@ local function findOwnedPetByUid(userId, petUid)
 	return nil, nil
 end
 
-local function deployPetFromTool(player, petUid)
+local function getEquippedPetToolUid(player)
+	if not player then return nil end
+	local character = player.Character
+	if not character then return nil end
+	local equippedTool = character:FindFirstChildOfClass("Tool")
+	if not equippedTool then return nil end
+	if equippedTool:GetAttribute("PetTool") ~= true then return nil end
+	local petUid = tostring(equippedTool:GetAttribute("PetUID") or "")
+	if petUid == "" then return nil end
+	return petUid
+end
+
+local function resolvePlayerInteractionPet(player)
+	if not player then return nil, nil, nil end
+	local carriedPet = carryingPetByUserId[player.UserId]
+	if carriedPet and carriedPet.Parent then
+		return carriedPet, petState[carriedPet], "carried"
+	end
+
+	local equippedPetUid = getEquippedPetToolUid(player)
+	if not equippedPetUid then
+		return nil, nil, nil
+	end
+
+	local petModel, state = findOwnedPetByUid(player.UserId, equippedPetUid)
+	if not petModel or not state then
+		return nil, nil, nil
+	end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return nil, nil, nil
+	end
+	if state.wild == true then
+		return nil, nil, nil
+	end
+
+	if tostring(state.location) ~= "inventory" and tostring(state.location) ~= "player" then
+		return nil, nil, nil
+	end
+
+	return petModel, state, "tool"
+end
+
+local function dropPetFromTool(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then return false end
+
 	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
 	if not petModel or not state then
 		removePetToolInstances(player, petUid)
+		return false
+	end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
 		return false
 	end
 
@@ -279,25 +352,43 @@ local function deployPetFromTool(player, petUid)
 	if tycoonModel and returnPart and not isInsideTycoonBounds(root, tycoonModel, returnPart) then
 		return false
 	end
-	if carryingPetByUserId[player.UserId] == petModel and state.location == "player" then
-		return true
-	end
 
-	local attached = false
-	local ok = pcall(function()
-		attached = PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false }) == true
+	removePetToolInstances(player, petUid)
+	clearPetStashedModel(player.UserId, petUid)
+
+	PetAttachmentManager:DetachPetFromPlayer(petModel)
+	petModel.Parent = workspace
+	pcall(function()
+		PetRigManager:EnsurePetRig(petModel)
+		PetAnimationManager:SetupAnimatorForPet(petModel)
 	end)
-	if not ok or not attached then
-		return false
+
+	if petModel.PrimaryPart then
+		local dropPos = root.Position + (root.CFrame.LookVector * 3)
+		local yOffset = (petModel.PrimaryPart.Size.Y * 0.5) + 0.3
+		petModel:SetPrimaryPartCFrame(CFrame.new(dropPos + Vector3.new(0, yOffset, 0)))
+		pcall(function()
+			petModel.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
+			petModel.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
+		end)
 	end
 
-	state.location = "player"
+	state.location = "free"
 	state.npc = nil
 	state.shower = nil
+	state.accessoryTable = nil
+	state.petstand = nil
+	state.petstandRoot = nil
+	state.petground = nil
+
+	PetMovement.StartWandering(petModel)
+	attachDropPickupPrompt(petModel, state.ownerUserId or player.UserId)
 	PetStateManager:SendStateToOwner(petModel)
-	clearPetStashedModel(player.UserId, petUid)
+	setInteractionUiHidden(player, false)
 	return true
 end
+
+
 
 local function stowCarriedPetAsTool(player)
 	if not player then return false end
@@ -349,6 +440,44 @@ local function equipPetToolByUid(player, petUid)
 			break
 		end
 	end
+end
+
+local function stowPetAsToolForPlayer(player, petModel, autoEquip)
+	if not player or not petModel then return false end
+	local state = petState[petModel]
+	if not state then return false end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then return false end
+	if state.wild == true then return false end
+
+	PetAttachmentManager:DetachPetFromPlayer(petModel)
+	if petModel.PrimaryPart then
+		PetAttachmentManager:ClearWeldsOnPart(petModel.PrimaryPart)
+		pcall(function()
+			petModel.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
+			petModel.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
+		end)
+	end
+	petModel.Parent = ServerStorage
+
+	local petUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+	if petUid == "" then return false end
+
+	state.location = "inventory"
+	state.npc = nil
+	state.shower = nil
+	state.accessoryTable = nil
+	state.petstand = nil
+	state.petstandRoot = nil
+	state.petground = nil
+	setPetStashedModel(player.UserId, petUid, petModel)
+
+	createPetPickupTool(player, petModel, state)
+	if autoEquip ~= false then
+		equipPetToolByUid(player, petUid)
+	end
+	PetStateManager:SendStateToOwner(petModel)
+	setInteractionUiHidden(player, false)
+	return true
 end
 
 local function buildPetToolHandle(petModel)
@@ -423,16 +552,17 @@ createPetPickupTool = function(player, petModel, state)
 	handle.Parent = tool
 
 	tool.Activated:Connect(function()
-		deployPetFromTool(player, petUid)
-	end)
-	tool.Equipped:Connect(function()
-		deployPetFromTool(player, petUid)
+		dropPetFromTool(player, petUid)
 	end)
 
 	tool.Parent = player:WaitForChild("Backpack")
 	local starterGear = player:FindFirstChild("StarterGear")
 	if starterGear then
-		tool:Clone().Parent = starterGear
+		local starterTool = tool:Clone()
+		starterTool.Activated:Connect(function()
+			dropPetFromTool(player, petUid)
+		end)
+		starterTool.Parent = starterGear
 	end
 	return true
 end
@@ -480,7 +610,11 @@ local function tryPickupOwnedPetAsTool(player, petModel)
 	setPetStashedModel(player.UserId, tostring(state.petUid or petModel:GetAttribute("PetUID") or ""), petModel)
 	PetStateManager:SendStateToOwner(petModel)
 
-	return createPetPickupTool(player, petModel, state)
+	local created = createPetPickupTool(player, petModel, state)
+	if created then
+		equipPetToolByUid(player, tostring(state.petUid or petModel:GetAttribute("PetUID") or ""))
+	end
+	return created
 end
 
 local function restoreInventoryPetToolsForPlayer(player)
@@ -700,6 +834,19 @@ end
 
 ensurePlayerPetCollisionGroups()
 
+local function suppressLegacyPetPrompts(instance)
+	if ENABLE_PET_PICKUP_TOOLS ~= true then return end
+	if instance and instance:IsA("ProximityPrompt") and instance.Name == "PetPrompt" then
+		instance.Enabled = false
+	end
+end
+
+for _, desc in ipairs(workspace:GetDescendants()) do
+	suppressLegacyPetPrompts(desc)
+end
+workspace.DescendantAdded:Connect(function(desc)
+	suppressLegacyPetPrompts(desc)
+end)
 
 for _, existingPlayer in ipairs(Players:GetPlayers()) do
 	local char = existingPlayer.Character
@@ -718,12 +865,12 @@ PetAttachmentManager:Initialize(petState, carryingPetByUserId, Players, PetMovem
 PetAttachmentManager:SetCarryRemote(petCarryEvent)
 PetAnimationManager:Initialize(petState)
 NPCManager:Initialize(NPCS_FOLDER, petState, carryingPetByUserId, Players, Config)
-ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovement)
-AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage)
+ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
+AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData89", petState, carryingPetByUserId) ----------------------------------------Changingggggg
-PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config)
+local saveManager = PetSaveManager:Initialize("PetData94", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
 PetMoodVisualManager:Initialize(petState)
@@ -806,6 +953,8 @@ end
 petSellBridge.Event:Connect(function(player, petUid, petName)
 	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
 	if type(petUid) == "string" and petUid ~= "" then
+		removePetToolInstances(player, petUid)
+		clearPetStashedModel(player.UserId, petUid)
 		local removed = WildPetManager:RemoveOwnedPetByUid(player, petUid)
 		if removed then
 			return
