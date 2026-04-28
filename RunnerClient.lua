@@ -11,61 +11,58 @@ local stateRemote = ReplicatedStorage:WaitForChild("RunnerStateEvent")
 local actionRemote = ReplicatedStorage:WaitForChild("RunnerActionEvent")
 local petInteractionUiRemote = ReplicatedStorage:WaitForChild("PetInteractionUIEvent")
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "RunnerGui"
-gui.ResetOnSpawn = false
+local function waitForRunnerGui(timeout)
+	local playerGui = player:WaitForChild("PlayerGui")
+	local gui = playerGui:FindFirstChild("RunnerGui")
+	local startedAt = os.clock()
+	timeout = timeout or 10
+
+	while not gui and (os.clock() - startedAt) < timeout do
+		task.wait(0.25)
+		gui = playerGui:FindFirstChild("RunnerGui")
+	end
+
+	if gui and gui:IsA("ScreenGui") then
+		return gui
+	end
+	return nil
+end
+
+local gui = waitForRunnerGui()
+if not gui then
+	warn("[RunnerClient] Missing PlayerGui.RunnerGui. Create it in Studio before sprinting starts.")
+	return
+end
+
+local jumpButton = gui:FindFirstChild("RunnerJumpButton", true)
+local goBackButton = gui:FindFirstChild("RunnerGoBackButton", true)
+local staminaFrame = gui:FindFirstChild("RunnerStaminaFrame", true)
+local staminaFill = staminaFrame and staminaFrame:FindFirstChild("RunnerStaminaFill", true)
+local staminaLabel = staminaFrame and staminaFrame:FindFirstChild("RunnerStaminaLabel", true)
+
+if not jumpButton or not jumpButton:IsA("GuiButton") then
+	warn("[RunnerClient] Missing RunnerJumpButton (GuiButton) in RunnerGui.")
+	return
+end
+if not goBackButton or not goBackButton:IsA("GuiButton") then
+	warn("[RunnerClient] Missing RunnerGoBackButton (GuiButton) in RunnerGui.")
+	return
+end
+if not staminaFrame or not staminaFrame:IsA("GuiObject") then
+	warn("[RunnerClient] Missing RunnerStaminaFrame in RunnerGui.")
+	return
+end
+if not staminaFill or not staminaFill:IsA("GuiObject") then
+	warn("[RunnerClient] Missing RunnerStaminaFill inside RunnerStaminaFrame.")
+	return
+end
+if not staminaLabel or not staminaLabel:IsA("TextLabel") then
+	warn("[RunnerClient] Missing RunnerStaminaLabel inside RunnerStaminaFrame.")
+	return
+end
+
 gui.Enabled = false
-gui.Parent = player:WaitForChild("PlayerGui")
-
-local jumpButton = Instance.new("TextButton")
-jumpButton.Name = "RunnerJumpButton"
-jumpButton.Size = UDim2.new(0, 140, 0, 46)
-jumpButton.Position = UDim2.new(1, -170, 0.62, 0)
-jumpButton.BackgroundColor3 = Color3.fromRGB(33, 142, 255)
-jumpButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-jumpButton.Font = Enum.Font.SourceSansBold
-jumpButton.TextSize = 22
-jumpButton.Text = "Jump"
-jumpButton.AutoButtonColor = false
-jumpButton.Parent = gui
-
-local goBackButton = Instance.new("TextButton")
-goBackButton.Name = "RunnerGoBackButton"
-goBackButton.Size = UDim2.new(0, 170, 0, 42)
-goBackButton.Position = UDim2.new(0.5, -85, 0.08, 0)
-goBackButton.BackgroundColor3 = Color3.fromRGB(65, 65, 65)
-goBackButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-goBackButton.Font = Enum.Font.SourceSansBold
-goBackButton.TextSize = 20
-goBackButton.Text = "Go Back"
-goBackButton.AutoButtonColor = false
-goBackButton.Parent = gui
-
-local staminaFrame = Instance.new("Frame")
-staminaFrame.Name = "RunnerStaminaFrame"
-staminaFrame.Size = UDim2.new(0, 240, 0, 22)
-staminaFrame.Position = UDim2.new(0.5, -120, 0.15, 0)
-staminaFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-staminaFrame.BorderSizePixel = 0
 staminaFrame.Visible = false
-staminaFrame.Parent = gui
-
-local staminaFill = Instance.new("Frame")
-staminaFill.Name = "RunnerStaminaFill"
-staminaFill.Size = UDim2.new(1, 0, 1, 0)
-staminaFill.BackgroundColor3 = Color3.fromRGB(82, 255, 125)
-staminaFill.BorderSizePixel = 0
-staminaFill.Parent = staminaFrame
-
-local staminaLabel = Instance.new("TextLabel")
-staminaLabel.Name = "RunnerStaminaLabel"
-staminaLabel.Size = UDim2.new(1, 0, 1, 0)
-staminaLabel.BackgroundTransparency = 1
-staminaLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-staminaLabel.Font = Enum.Font.SourceSansBold
-staminaLabel.TextSize = 16
-staminaLabel.Text = "Stamina"
-staminaLabel.Parent = staminaFrame
 
 local runnerActive = false
 local jumpingNow = false
