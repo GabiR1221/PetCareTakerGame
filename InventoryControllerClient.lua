@@ -30,7 +30,7 @@ local backpackAddedConn
 local characterAddedConn
 local reloadInventory
 local function isRunnerActive()
-	return player:GetAttribute("RunnerActive") == true
+	return player:GetAttribute("RunnerActive") == true or player:GetAttribute("PetInteractionActive") == true
 end
 
 local inventoryHandler = require(script.SETTINGS)
@@ -290,7 +290,7 @@ UserInputService.InputChanged:Connect(function(input)
 	end
 end)
 
-player:GetAttributeChangedSignal("RunnerActive"):Connect(function()
+local function refreshInventorySuppressionState()
 	local sprinting = isRunnerActive()
 	CustomInventoryGUI.Enabled = not sprinting
 	if switchTabButton and switchTabButton:IsA("TextButton") then
@@ -306,13 +306,11 @@ player:GetAttributeChangedSignal("RunnerActive"):Connect(function()
 			humanoid:UnequipTools()
 		end
 	end
-end)
+end
+
+player:GetAttributeChangedSignal("RunnerActive"):Connect(refreshInventorySuppressionState)
+player:GetAttributeChangedSignal("PetInteractionActive"):Connect(refreshInventorySuppressionState)
 
 if isRunnerActive() then
-	CustomInventoryGUI.Enabled = false
-	if switchTabButton and switchTabButton:IsA("TextButton") then
-		switchTabButton.Active = false
-		switchTabButton.AutoButtonColor = false
-		switchTabButton.Visible = false
-	end
+	refreshInventorySuppressionState()
 end
