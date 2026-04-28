@@ -8,6 +8,7 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local carryRemote = ReplicatedStorage:WaitForChild("PetCarryEvent")
 local petStateRemote = ReplicatedStorage:WaitForChild("PetStateEvent")
+local feedInteractRemote = ReplicatedStorage:WaitForChild("PetFeedInteractEvent")
 
 local isCarrying = false
 local carriedPetName = nil
@@ -15,10 +16,17 @@ local canDropCarriedPet = false
 local ownedPetModels = {}
 local nearestPickablePet = nil
 local pickupHelpers = {}
+local isFeedModeActive
 
 local MAX_PICKUP_DISTANCE = 7.5
+local FEED_HOLD_DURATION = 1.2
+local POST_FEED_PICKUP_BLOCK_SECONDS = 1.0
 
-
+local feedHoldActive = false
+local feedHoldCompleted = false
+local feedHoldPet = nil
+local feedHoldStart = 0
+local postFeedPickupBlockedUntil = 0
 local function disablePickupPrompt(instance)
 	if instance and instance:IsA("ProximityPrompt") and instance.Name == "PetPrompt" then
 		instance.Enabled = false
@@ -193,6 +201,12 @@ local function setPickupBeamTarget(petModel)
 end
 
 local function performCurrentAction()
+	if isFeedModeActive() then
+		return
+	end
+	if os.clock() < postFeedPickupBlockedUntil then
+		return
+	end
 	if isCarrying then
 		carryRemote:FireServer("DropPet")
 		return
@@ -204,13 +218,72 @@ end
 
 actionButton.Activated:Connect(performCurrentAction)
 
+local function getEquippedFoodTool()
+	local character = player.Character
+	if not character then return nil end
+	for _, child in ipairs(character:GetChildren()) do
+		if child:IsA("Tool") and (child:GetAttribute("IsPetFood") == true or child:GetAttribute("HungerGain") ~= nil or child:FindFirstChild("HungerGain")) then
+			return child
+		end
+	end
+	return nil
+end
+
+local function hasFoodEquipped()
+	return getEquippedFoodTool() ~= nil
+end
+
+
+
+isFeedModeActive = function()
+	return (not isCarrying) and nearestPickablePet ~= nil and hasFoodEquipped()
+end
+
+local function beginFeedHold()
+	if not isFeedModeActive() then return end
+	if feedHoldActive then return end
+	feedHoldActive = true
+	feedHoldCompleted = false
+	feedHoldPet = nearestPickablePet
+	feedHoldStart = os.clock()
+	feedInteractRemote:FireServer("start", feedHoldPet)
+end
+
+local function endFeedHold()
+	if not feedHoldActive then return end
+	local completed = feedHoldCompleted
+	feedHoldActive = false
+	feedHoldCompleted = false
+	feedHoldPet = nil
+	feedHoldStart = 0
+	if not completed then
+		feedInteractRemote:FireServer("cancel")
+	end
+end
+
+actionButton.MouseButton1Down:Connect(function()
+	beginFeedHold()
+end)
+actionButton.MouseButton1Up:Connect(function()
+	endFeedHold()
+end)
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	if input.KeyCode == Enum.KeyCode.E and actionButton.Visible then
-		performCurrentAction()
+		if isFeedModeActive() then
+			beginFeedHold()
+		else
+			performCurrentAction()
+		end
 	end
 end)
-
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == Enum.KeyCode.E then
+		endFeedHold()
+	end
+end)
 
 carryRemote.OnClientEvent:Connect(function(action, value, petName, canDrop)
 	if action == "CarryState" then
@@ -227,6 +300,19 @@ petStateRemote.OnClientEvent:Connect(function(action, petModel)
 end)
 
 RunService.RenderStepped:Connect(function()
+	if feedHoldActive then
+		if (not isFeedModeActive()) or nearestPickablePet ~= feedHoldPet or not feedHoldPet or not feedHoldPet.Parent then
+			endFeedHold()
+		else
+			local elapsed = os.clock() - feedHoldStart
+			if (not feedHoldCompleted) and elapsed >= FEED_HOLD_DURATION then
+				feedHoldCompleted = true
+				postFeedPickupBlockedUntil = os.clock() + POST_FEED_PICKUP_BLOCK_SECONDS
+				feedInteractRemote:FireServer("complete", feedHoldPet)
+			end
+		end
+	end
+
 	if isCarrying then
 		nearestPickablePet = nil
 		setPickupBeamTarget(nil)
@@ -250,9 +336,27 @@ RunService.RenderStepped:Connect(function()
 	if nearestPickablePet then
 		actionButton.Visible = true
 		hintLabel.Visible = true
-		actionButton.Text = ("Pick up %s"):format(tostring(nearestPickablePet.Name))
-		actionButton.BackgroundColor3 = Color3.fromRGB(66, 132, 201)
-		hintLabel.Text = "Press E or tap button"
+		if os.clock() < postFeedPickupBlockedUntil then
+			actionButton.Text = "..."
+			actionButton.BackgroundColor3 = Color3.fromRGB(95, 95, 95)
+			hintLabel.Text = "Please wait"
+			return
+		end
+		if isFeedModeActive() then
+			actionButton.BackgroundColor3 = Color3.fromRGB(95, 166, 94)
+			if feedHoldActive then
+				local progress = math.clamp((os.clock() - feedHoldStart) / FEED_HOLD_DURATION, 0, 1)
+				actionButton.Text = ("Feed %s (%d%%)"):format(tostring(nearestPickablePet.Name), math.floor(progress * 100))
+				hintLabel.Text = "Hold to feed"
+			else
+				actionButton.Text = ("Feed %s"):format(tostring(nearestPickablePet.Name))
+				hintLabel.Text = "Hold E or hold button"
+			end
+		else
+			actionButton.Text = ("Pick up %s"):format(tostring(nearestPickablePet.Name))
+			actionButton.BackgroundColor3 = Color3.fromRGB(66, 132, 201)
+			hintLabel.Text = "Press E or tap button"
+		end
 	else
 		actionButton.Visible = false
 		hintLabel.Visible = false
