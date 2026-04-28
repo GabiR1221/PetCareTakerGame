@@ -3,11 +3,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
-function ShowerDryerManager:Initialize(stateTable, carryingTable, playersService, petMovement)
+function ShowerDryerManager:Initialize(stateTable, carryingTable, playersService, petMovement, interactionPetResolver, stowPetAsToolCallback, interactionUiCallback)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
 	self.Players = playersService
 	self.PetMovement = petMovement
+	self.ResolveInteractionPet = interactionPetResolver
+	self.StowPetAsTool = stowPetAsToolCallback
+	self.SetInteractionUiHidden = interactionUiCallback
 
 	self.showerConnected = {}
 	self.dryConnected = {}
@@ -852,22 +855,24 @@ function ShowerDryerManager:_handleExitFromClient(player)
 	self.petState[pet] = self.petState[pet] or {}
 	local state = self.petState[pet]
 	local ownerId = state.ownerUserId
-	local reattached = false
+	local restoredToTool = false
 	if ownerId then
 		local owner = self.Players:GetPlayerByUserId(ownerId)
-		if owner and owner.Character and owner.Character.PrimaryPart and not self.carryingPetByUserId[ownerId] then
-			local ok2 = pcall(function()
-				self.PetAttachmentManager:AttachPetToPlayer(pet, owner)
+		if owner and type(self.StowPetAsTool) == "function" then
+			local ok2, result = pcall(function()
+				return self.StowPetAsTool(owner, pet, true)
 			end)
-			if ok2 then
-				state.location = "player"
+			if ok2 and result == true then
 				state.shower = nil
-				reattached = true
+				restoredToTool = true
 			end
 		end
 	end
+	if type(self.SetInteractionUiHidden) == "function" then
+		self.SetInteractionUiHidden(player, false)
+	end
 
-	if not reattached then
+	if not restoredToTool then
 		if pet.PrimaryPart and showerPart and showerPart:IsA("BasePart") then
 			pet:SetPrimaryPartCFrame(showerPart.CFrame * CFrame.new(0, showerPart.Size.Y/2 + 2, 0))
 			pet.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
@@ -876,8 +881,8 @@ function ShowerDryerManager:_handleExitFromClient(player)
 		pet.Parent = workspace
 		state.location = "free"
 		state.shower = showerPart
+		self.PetStateManager:SendStateToOwner(pet)
 	end
-	self.PetStateManager:SendStateToOwner(pet)
 
 	self:_cleanupShowerSession(player, true)
 end
@@ -1039,11 +1044,19 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 			return
 		end
 
-		-- Ensure player is carrying a pet
+		-- Ensure player is carrying a pet or has an equipped pet tool
 		local pet = self.carryingPetByUserId[player.UserId]
+		if not pet and type(self.ResolveInteractionPet) == "function" then
+			local resolvedPet = self.ResolveInteractionPet(player)
+			pet = resolvedPet
+		end
 		if not pet then
-			print("[PetManager] Shower: player triggered while not carrying a pet.")
+			print("[PetManager] Shower: player triggered while not carrying/holding a pet.")
 			return
+		end
+		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			pcall(function() hum:UnequipTools() end)
 		end
 
 		self.PetAttachmentManager:SetModelPrimaryIfMissing(pet)
@@ -1082,6 +1095,9 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 		self.petState[pet] = self.petState[pet] or {}
 		self.petState[pet].location = "shower"
 		self.petState[pet].shower = showerPart
+		if type(self.SetInteractionUiHidden) == "function" then
+			self.SetInteractionUiHidden(player, true)
+		end
 		self.PetStateManager:SendStateToOwner(pet)
 		
 		self:_startShowerMinigame(player, pet, showerPart)
@@ -1305,30 +1321,31 @@ function ShowerDryerManager:_finishShowerForPet(player, pet, showerPart)
 	self.petState[pet].showered = true
 	self.petState[pet].dried = true
 
-	-- Try to reattach to owner
+	-- Return to pet tool flow (auto-equip) instead of old carried reattach
 	local state = self.petState[pet] or {}
 	local ownerId = state.ownerUserId
-	local reattached = false
+	local restoredToTool = false
 
 	if ownerId then
 		local owner = self.Players:GetPlayerByUserId(ownerId)
-		if owner and owner.Character and owner.Character.PrimaryPart and not self.carryingPetByUserId[ownerId] then
-			local ok2, err = pcall(function()
-				self.PetAttachmentManager:AttachPetToPlayer(pet, owner)
+		if owner and type(self.StowPetAsTool) == "function" then
+			local ok2, result = pcall(function()
+				return self.StowPetAsTool(owner, pet, true)
 			end)
-			if ok2 then
-				self.petState[pet].location = "player"
-				self.petState[pet].shower = showerPart
-				reattached = true
-				self.PetStateManager:SendStateToOwner(pet)
+			if ok2 and result == true then
+				self.petState[pet].shower = nil
+				restoredToTool = true
 			else
-				warn(("[PetManager] Shower: reattach attempt failed: %s"):format(tostring(err)))
+				warn(("[PetManager] Shower: stow-to-tool attempt failed: %s"):format(tostring(result)))
 			end
 		end
 	end
+	if type(self.SetInteractionUiHidden) == "function" then
+		self.SetInteractionUiHidden(player, false)
+	end
 
 	-- Fallback: release to world
-	if not reattached then
+	if not restoredToTool then
 		pet:SetPrimaryPartCFrame(showerPart.CFrame * CFrame.new(0, showerPart.Size.Y/2 + 1, 0))
 		pet.Parent = workspace
 		self.petState[pet] = self.petState[pet] or {}
