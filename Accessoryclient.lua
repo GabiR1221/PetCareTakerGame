@@ -12,11 +12,167 @@ local accessoryEvent = ReplicatedStorage:WaitForChild("PetAccessoryEvent")
 	PlayerGui
 	└─ AccessoryServiceGui (ScreenGui)
 	   └─ Main (Frame)
-	      ├─ Close (GuiButton)
+	      ├─ Close (Frame)
+	      │  └─ Button (GuiButton)
 	      ├─ AccessoriesList (Frame or ScrollingFrame)
-	      │  └─ AccessoryTemplate (GuiButton, hidden template)
+	      │  └─ UIListLayout (optional, recommended)
 	      └─ (optional) EmptyLabel (TextLabel)
 ]]
+
+local function getPrimaryPartForDisplay(instance)
+	if not instance then return nil end
+	if instance:IsA("Model") then
+		return instance:FindFirstChild("MainPart") or instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+	end
+	if instance:IsA("BasePart") then
+		return instance
+	end
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getDisplaySize(instance)
+	if not instance then return Vector3.new(2, 2, 2) end
+	if instance:IsA("Model") then
+		return instance:GetExtentsSize()
+	end
+	if instance:IsA("BasePart") then
+		return instance.Size
+	end
+	local part = instance:FindFirstChildWhichIsA("BasePart", true)
+	return part and part.Size or Vector3.new(2, 2, 2)
+end
+
+local function tryClonePetInventoryTemplate(listParent)
+	local gameUi = PlayerGui:FindFirstChild("GameUI")
+	local petsHolder = gameUi
+		and gameUi:FindFirstChild("Frames")
+		and gameUi.Frames:FindFirstChild("Pets")
+		and gameUi.Frames.Pets:FindFirstChild("MainFrame")
+		and gameUi.Frames.Pets.MainFrame:FindFirstChild("ObjectHolder")
+	if not petsHolder then
+		return nil
+	end
+
+	local source
+	for _, child in ipairs(petsHolder:GetChildren()) do
+		local display = child:FindFirstChild("Display")
+		local button = child:FindFirstChild("Button")
+		if display and display:IsA("ViewportFrame") and button and button:IsA("GuiButton") then
+			source = child
+			break
+		end
+	end
+	if not source then
+		return nil
+	end
+
+	local template = source:Clone()
+	template.Name = "AccessoryTemplate"
+	template.Visible = false
+	template.Parent = listParent
+
+	local display = template:FindFirstChild("Display")
+	if display and display:IsA("ViewportFrame") then
+		for _, item in ipairs(display:GetChildren()) do
+			item:Destroy()
+		end
+		display.CurrentCamera = nil
+	end
+
+	local sellFrame = template:FindFirstChild("SellFrame")
+	if sellFrame then
+		sellFrame:Destroy()
+	end
+
+	return template
+end
+
+local function createAccessoryTemplate(listParent)
+	local clonedTemplate = tryClonePetInventoryTemplate(listParent)
+	if clonedTemplate then
+		return clonedTemplate
+	end
+
+	local template = Instance.new("Frame")
+	template.Name = "AccessoryTemplate"
+	template.Size = UDim2.new(1, 0, 0, 46)
+	template.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	template.Visible = false
+	template.Parent = listParent
+
+	local display = Instance.new("ViewportFrame")
+	display.Name = "Display"
+	display.BackgroundTransparency = 1
+	display.Size = UDim2.new(0, 44, 0, 44)
+	display.Position = UDim2.fromOffset(1, 1)
+	display.Parent = template
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Name"
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, -56, 1, 0)
+	title.Position = UDim2.fromOffset(52, 0)
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.TextSize = 16
+	title.Font = Enum.Font.SourceSansSemibold
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Text = "Accessory"
+	title.Parent = template
+
+	local button = Instance.new("TextButton")
+	button.Name = "Button"
+	button.BackgroundTransparency = 1
+	button.Size = UDim2.fromScale(1, 1)
+	button.Text = ""
+	button.Parent = template
+
+	local equipped = Instance.new("TextLabel")
+	equipped.Name = "Equipped"
+	equipped.BackgroundTransparency = 1
+	equipped.Size = UDim2.fromOffset(18, 18)
+	equipped.Position = UDim2.new(1, -21, 0, 2)
+	equipped.Font = Enum.Font.GothamBold
+	equipped.TextScaled = true
+	equipped.Text = "✓"
+	equipped.TextColor3 = Color3.fromRGB(85, 255, 127)
+	equipped.Visible = false
+	equipped.Parent = template
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 12)
+	padding.PaddingRight = UDim.new(0, 12)
+	padding.Parent = template
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = template
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 1
+	stroke.Color = Color3.fromRGB(82, 82, 82)
+	stroke.Transparency = 0.3
+	stroke.Parent = template
+
+	return template
+end
+
+local function resolveCloseButton(main)
+	local close = main:FindFirstChild("Close")
+	if not close then
+		return nil
+	end
+
+	if close:IsA("GuiButton") then
+		return close
+	end
+
+	local nestedButton = close:FindFirstChildWhichIsA("GuiButton", true)
+	if nestedButton then
+		return nestedButton
+	end
+
+	return nil
+end
 
 local function resolveAccessoryGui()
 	local screen = PlayerGui:WaitForChild("AccessoryServiceGui")
@@ -31,9 +187,9 @@ local function resolveAccessoryGui()
 		return nil
 	end
 
-	local closeButton = main:FindFirstChild("Close")
-	if not closeButton or not closeButton:IsA("GuiButton") then
-		warn("[AccessoryClient] Missing Main.Close (GuiButton)")
+	local closeButton = resolveCloseButton(main)
+	if not closeButton then
+		warn("[AccessoryClient] Missing Main.Close button. Add Close frame with a child GuiButton.")
 		return nil
 	end
 
@@ -44,9 +200,8 @@ local function resolveAccessoryGui()
 	end
 
 	local template = accessoriesList:FindFirstChild("AccessoryTemplate")
-	if not template or not template:IsA("GuiButton") then
-		warn("[AccessoryClient] Missing AccessoriesList.AccessoryTemplate (GuiButton template)")
-		return nil
+	if not template or not template:IsA("GuiObject") then
+		template = createAccessoryTemplate(accessoriesList)
 	end
 
 	return {
@@ -70,7 +225,9 @@ local accessoryButtonsByName = {}
 local guiConnections = {
 	close = nil,
 	dynamic = {},
+	listLayout = nil,
 }
+
 
 local function enableCameraAtPart(part)
 	if not part then return end
@@ -115,6 +272,11 @@ local function disconnectGuiConnections()
 		guiConnections.close = nil
 	end
 
+	if guiConnections.listLayout then
+		pcall(function() guiConnections.listLayout:Disconnect() end)
+		guiConnections.listLayout = nil
+	end
+
 	petRef = nil
 	accessoryButtonsByName = {}
 end
@@ -122,21 +284,28 @@ end
 local function clearAccessoryButtons()
 	if not guiRefs then return end
 	for _, child in ipairs(guiRefs.list:GetChildren()) do
-		if child:IsA("GuiButton") and child ~= guiRefs.template then
+		if child:IsA("GuiObject") and child ~= guiRefs.template then
 			child:Destroy()
 		end
 	end
 end
 
 local function setAccessoryButtonVisual(accessoryName)
-	local button = accessoryButtonsByName[accessoryName]
-	if not button then return end
+	local entry = accessoryButtonsByName[accessoryName]
+	if not entry then return end
+	local slot = entry.slot
 	if equippedByName[accessoryName] then
-		button:SetAttribute("IsEquipped", true)
-		button.Text = tostring(accessoryName) .. " ✓"
+		slot:SetAttribute("IsEquipped", true)
+		local equippedMark = slot:FindFirstChild("Equipped")
+		if equippedMark and equippedMark:IsA("GuiObject") then
+			equippedMark.Visible = true
+		end
 	else
-		button:SetAttribute("IsEquipped", false)
-		button.Text = tostring(accessoryName)
+		slot:SetAttribute("IsEquipped", false)
+		local equippedMark = slot:FindFirstChild("Equipped")
+		if equippedMark and equippedMark:IsA("GuiObject") then
+			equippedMark.Visible = false
+		end
 	end
 end
 
@@ -168,18 +337,61 @@ local function buildAccessoryButtons(ownedAccessories)
 				local button = guiRefs.template:Clone()
 				button.Name = "Accessory_" .. accessoryName
 				button.Visible = true
-				button.Text = accessoryName
 				button.Parent = guiRefs.list
-				accessoryButtonsByName[accessoryName] = button
+
+				local titleLabel = button:FindFirstChild("Name") or button:FindFirstChild("Title")
+				if titleLabel and titleLabel:IsA("TextLabel") then
+					titleLabel.Text = accessoryName
+				elseif button:IsA("GuiButton") then
+					button.Text = accessoryName
+				end
+
+				local display = button:FindFirstChild("Display")
+				if display and display:IsA("ViewportFrame") then
+					for _, child in ipairs(display:GetChildren()) do
+						child:Destroy()
+					end
+					local template = ReplicatedStorage:FindFirstChild("Accessories")
+						and ReplicatedStorage.Accessories:FindFirstChild(accessoryName)
+					if template then
+						local model = template:Clone()
+						model.Parent = display
+						local mainPart = getPrimaryPartForDisplay(model)
+						if mainPart then
+							local pos = mainPart.Position
+							local camera = Instance.new("Camera")
+							camera.Parent = display
+							display.CurrentCamera = camera
+							if model:IsA("Model") then
+								model:PivotTo(model:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
+							elseif model:IsA("BasePart") then
+								model.CFrame = model.CFrame * CFrame.Angles(0, math.rad(180), 0)
+							end
+							camera.CFrame = CFrame.new(Vector3.new(pos.X + getDisplaySize(model).X * 1.5, pos.Y, pos.Z + 1), pos)
+						else
+							model:Destroy()
+						end
+					end
+				end
+
+				local clickButton = button:FindFirstChild("Button")
+				if not (clickButton and clickButton:IsA("GuiButton")) and button:IsA("GuiButton") then
+					clickButton = button
+				end
+				if not (clickButton and clickButton:IsA("GuiButton")) then
+					continue
+				end
+
+				accessoryButtonsByName[accessoryName] = { slot = button, click = clickButton }
 				count += 1
 
-				table.insert(guiConnections.dynamic, button.MouseButton1Click:Connect(function()
+				table.insert(guiConnections.dynamic, clickButton.MouseButton1Click:Connect(function()
 					if not petRef then return end
-					button.Active = false
+					clickButton.Active = false
 					accessoryEvent:FireServer("ToggleAccessory", { pet = petRef, accessoryName = accessoryName })
 					task.delay(0.2, function()
-						if button and button.Parent then
-							button.Active = true
+						if clickButton and clickButton.Parent then
+							clickButton.Active = true
 						end
 					end)
 				end))
@@ -190,8 +402,20 @@ local function buildAccessoryButtons(ownedAccessories)
 	guiRefs.template.Visible = false
 
 	if guiRefs.list:IsA("ScrollingFrame") then
-		local cellWidth = guiRefs.template.AbsoluteSize.X > 0 and guiRefs.template.AbsoluteSize.X or 120
-		guiRefs.list.CanvasSize = UDim2.new(0, math.max(0, count * (cellWidth + 8)), 0, 0)
+		local listLayout = guiRefs.list:FindFirstChildOfClass("UIListLayout")
+		if listLayout then
+			if guiConnections.listLayout then
+				pcall(function() guiConnections.listLayout:Disconnect() end)
+			end
+			local function refreshCanvasFromLayout()
+				guiRefs.list.CanvasSize = UDim2.fromOffset(0, math.max(0, listLayout.AbsoluteContentSize.Y + 4))
+			end
+			refreshCanvasFromLayout()
+			guiConnections.listLayout = listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshCanvasFromLayout)
+		else
+			local rowHeight = guiRefs.template.AbsoluteSize.Y > 0 and guiRefs.template.AbsoluteSize.Y or 46
+			guiRefs.list.CanvasSize = UDim2.fromOffset(0, math.max(0, count * (rowHeight + 8)))
+		end
 	end
 
 	local emptyLabel = guiRefs.main:FindFirstChild("EmptyLabel")
@@ -199,6 +423,7 @@ local function buildAccessoryButtons(ownedAccessories)
 		emptyLabel.Visible = count == 0
 	end
 end
+
 
 local function wireCloseButton()
 	if not guiRefs then return end
