@@ -1,6 +1,9 @@
 -- PetFeedingClient (LocalScript)
 -- Put this LocalScript in StarterPlayerScripts.
-
+-- Feeding interaction has been migrated to PetCarryClient action-button hold UI.
+if true then
+	return
+end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
