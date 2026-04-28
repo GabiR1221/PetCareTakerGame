@@ -3,13 +3,17 @@ local PetStandManager = {}
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
-function PetStandManager:Initialize(stateTable, carryingTable, playersService, petMovement, saveManager, config)
+function PetStandManager:Initialize(stateTable, carryingTable, playersService, petMovement, saveManager, config, interactionPetResolver, stowPetAsToolCallback, interactionUiCallback, consumePetToolCallback)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
 	self.Players = playersService
 	self.PetMovement = petMovement
 	self.SaveManager = saveManager
 	self.Config = config or {}
+	self.ResolveInteractionPet = interactionPetResolver
+	self.StowPetAsTool = stowPetAsToolCallback
+	self.SetInteractionUiHidden = interactionUiCallback
+	self.ConsumePetTool = consumePetToolCallback
 
 	self.standConnected = {}           -- [standRoot] = true
 	self.standData = {}                -- [standRoot] = data table
@@ -585,24 +589,41 @@ function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standP
 			self.PetAttachmentManager:ClearWeldsOnPart(petModel.PrimaryPart)
 		end
 
-		if player.Character and player.Character.PrimaryPart and not self.carryingPetByUserId[player.UserId] then
-			local ok, err = pcall(function()
-				self.PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false })
+		local restoredToTool = false
+		if type(self.StowPetAsTool) == "function" then
+			local ok, result = pcall(function()
+				return self.StowPetAsTool(player, petModel, true)
 			end)
+			restoredToTool = (ok and result == true)
+		end
 
-			if ok then
-				self.petState[petModel].location = "player"
-				self.petState[petModel].petstand = nil
-				self.petState[petModel].petstandRoot = nil
-
-				pcall(function() helper:Destroy() end)
-
-				if self.standPickupPromptConns[petModel] then
-					pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
-					self.standPickupPromptConns[petModel] = nil
+		if restoredToTool then
+			self.petState[petModel].petstand = nil
+			self.petState[petModel].petstandRoot = nil
+			pcall(function() helper:Destroy() end)
+			if self.standPickupPromptConns[petModel] then
+				pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
+				self.standPickupPromptConns[petModel] = nil
+			end
+		else
+			if player.Character and player.Character.PrimaryPart and not self.carryingPetByUserId[player.UserId] then
+				local ok, err = pcall(function()
+					self.PetAttachmentManager:AttachPetToPlayer(petModel, player, { resetFlags = false })
+				end)
+				if ok then
+					self.petState[petModel].location = "player"
+					self.petState[petModel].petstand = nil
+					self.petState[petModel].petstandRoot = nil
+					pcall(function() helper:Destroy() end)
+					if self.standPickupPromptConns[petModel] then
+						pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
+						self.standPickupPromptConns[petModel] = nil
+					end
+				else
+					warn("[PetStandManager] Failed to pick pet back up:", err)
 				end
 			else
-				warn("[PetStandManager] Failed to pick pet back up:", err)
+				warn("[PetStandManager] Failed to return stand pet as tool.")
 			end
 		end
 	end)
@@ -673,8 +694,16 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		end
 
 		local pet = self.carryingPetByUserId[player.UserId]
+		if not pet and type(self.ResolveInteractionPet) == "function" then
+			local resolvedPet = self.ResolveInteractionPet(player)
+			pet = resolvedPet
+		end
 		if not pet then
 			return
+		end
+		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			pcall(function() hum:UnequipTools() end)
 		end
 
 		-- allow only one pet per stand
@@ -704,6 +733,9 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		self.petState[pet].location = "petstand"
 		self.petState[pet].petstand = standPart
 		self.petState[pet].petstandRoot = standRoot
+		if type(self.ConsumePetTool) == "function" then
+			self.ConsumePetTool(player, pet)
+		end
 
 		self.PetMovement.StopWandering(pet)
 		self:CreatePlacedPetPickupPrompt(pet, standRoot, standPart)
