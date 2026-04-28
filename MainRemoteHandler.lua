@@ -738,7 +738,7 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 	end
 
 	if type(Parameter) ~= "table" then -- so if this condition is true, then Parameter should be the id of the pet
-		local Pet = Player.Data.Pets[Parameter]
+		local Pet = Player.Data.Pets:FindFirstChild(tostring(Parameter))
 		if not Pet then return end
 
 		if Action == "Equip" then
@@ -747,8 +747,7 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 			if not canDeleteFromSellRing(Player) then return end
 			DeleteAction(Player, Pet)
 		elseif Action == "Sell" then
-			if not canDeleteFromSellRing(Player) then return end
-			SellAction(Player, Pet)
+			SellAction(Player, Pet, { allowOffRing = true, source = "SellUI" })
 		end
 
 		disableAllEquipsForPlayer(Player)
@@ -759,7 +758,7 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 		elseif Action == "Delete" then -- delete all pets
 			if not canDeleteFromSellRing(Player) then return end
 			for _,PetId in Parameter do
-				local Pet = Player.Data.Pets[PetId]
+				local Pet = Player.Data.Pets:FindFirstChild(tostring(PetId))
 				if not Pet then continue end
 				DeleteAction(Player, Pet)				
 			end
