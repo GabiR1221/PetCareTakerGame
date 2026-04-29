@@ -600,6 +600,13 @@ local function isValidShopCard(card)
 	return inner and button and hasPrice
 end
 
+local function isSectionNavigableShopCard(card)
+	if not card then return false end
+	local inner = card:FindFirstChild("InnerPart")
+	local button = inner and inner:FindFirstChild("Button")
+	return inner and button
+end
+
 local function trimText(value)
 	local asString = tostring(value or "")
 	return string.match(asString, "^%s*(.-)%s*$") or ""
@@ -794,24 +801,32 @@ local function setupShopSectionLayoutAndButtons()
 		return
 	end
 
-	local sectionMap = {}
-	local sectionMeta = {}
-	for _, card in ipairs(gamepassContainer:GetDescendants()) do
-		if card:IsA("Frame") and isValidShopCard(card) then
-			local sectionName = normalizeSectionName(card:GetAttribute("ShopSection"))
-			local key = sectionToKey(sectionName)
-			if not sectionMap[key] then
-				sectionMap[key] = card
-				sectionMeta[key] = {Name = sectionName, Card = card}
-			else
-				local current = sectionMap[key]
-				if card.AbsolutePosition.Y < current.AbsolutePosition.Y then
+	local function collectSections()
+		local sectionMap = {}
+		local sectionMeta = {}
+		for _, card in ipairs(gamepassContainer:GetDescendants()) do
+			if card:IsA("Frame") and isSectionNavigableShopCard(card) then
+				local sectionName = normalizeSectionName(card:GetAttribute("ShopSection"))
+				if card.Name == "Codes" and (card:GetAttribute("ShopSection") == nil or trimText(card:GetAttribute("ShopSection")) == "") then
+					sectionName = "Codes"
+				end
+				local key = sectionToKey(sectionName)
+				if not sectionMap[key] then
 					sectionMap[key] = card
 					sectionMeta[key] = {Name = sectionName, Card = card}
+				else
+					local current = sectionMap[key]
+					if card.AbsolutePosition.Y < current.AbsolutePosition.Y then
+						sectionMap[key] = card
+						sectionMeta[key] = {Name = sectionName, Card = card}
+					end
 				end
 			end
 		end
+		return sectionMap, sectionMeta
 	end
+
+	local sectionMap, sectionMeta = collectSections()
 
 	for _, child in ipairs(gamepassContainer:GetChildren()) do
 		if child:IsA("TextLabel") and string.sub(child.Name, 1, #"__SectionHeader_") == "__SectionHeader_" then
@@ -831,13 +846,13 @@ local function setupShopSectionLayoutAndButtons()
 			header.Font = Enum.Font.GothamBold
 			header.TextSize = 20
 			header.TextColor3 = Color3.fromRGB(255, 255, 255)
-			header.ZIndex = targetCard.ZIndex + 1
+			header.ZIndex = math.max(targetCard.ZIndex + 1, 10)
 			header.Active = false
 			header.Selectable = false
 
 			local headerHeight = 28
-			local yPos = math.max(0, targetCard.Position.Y.Offset - headerHeight - 6)
-			header.Position = UDim2.new(0, targetCard.Position.X.Offset, 0, yPos)
+			local yPos = math.max(0, targetCard.AbsolutePosition.Y - gamepassContainer.AbsolutePosition.Y + gamepassContainer.CanvasPosition.Y - headerHeight - 6)
+			header.Position = UDim2.new(0, 12, 0, yPos)
 			header.Size = UDim2.new(targetCard.Size.X.Scale, targetCard.Size.X.Offset, 0, headerHeight)
 			header.Parent = gamepassContainer
 		end
@@ -848,6 +863,7 @@ local function setupShopSectionLayoutAndButtons()
 		if button:GetAttribute("ShopSectionBound") ~= true then
 			button:SetAttribute("ShopSectionBound", true)
 			button.MouseButton1Click:Connect(function()
+				sectionMap = collectSections()
 				local targetCard = sectionMap[key]
 				if targetCard then
 					scrollShopToSection(gamepassContainer, targetCard)
@@ -3453,9 +3469,47 @@ initGemShopUpgrades()
 --// Codes
 local CodesFrame = Frames.Codes
 
-CodesFrame.Redeem.MouseButton1Click:Connect(function()
-	Remotes.RedeemCode:FireServer()
-end)
+
+local function getCodeInputAndRedeemButton()
+	local fallbackInput = CodesFrame and CodesFrame:FindFirstChild("CodesBox")
+	local fallbackRedeem = CodesFrame and CodesFrame:FindFirstChild("Redeem")
+	local shopContainer = getGamepassContainer()
+	local shopCodesCard = shopContainer and shopContainer:FindFirstChild("Codes")
+	local inner = shopCodesCard and shopCodesCard:FindFirstChild("InnerPart")
+	local shopInput = inner and inner:FindFirstChild("CodesBox")
+	local shopRedeem = inner and inner:FindFirstChild("Redeem")
+
+	if shopInput and shopRedeem then
+		return shopInput, shopRedeem
+	end
+	return fallbackInput, fallbackRedeem
+end
+
+local function redeemCodeFromInput(codeInput)
+	if not (codeInput and codeInput:IsA("TextBox")) then return end
+	local code = trimText(codeInput.Text)
+	if code == "" then
+		notifyPlayer("error", "❌ Enter a valid code first.")
+		return
+	end
+	Remotes.RedeemCode:FireServer(string.upper(code))
+end
+
+do
+	local codeInput, redeemButton = getCodeInputAndRedeemButton()
+	if redeemButton then
+		redeemButton.MouseButton1Click:Connect(function()
+			redeemCodeFromInput(codeInput)
+		end)
+	end
+	if codeInput and codeInput:IsA("TextBox") then
+		codeInput.FocusLost:Connect(function(enterPressed)
+			if enterPressed then
+				redeemCodeFromInput(codeInput)
+			end
+		end)
+	end
+end
 
 --// Stats
 local StatsFrame = Frames.Stats
