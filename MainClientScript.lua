@@ -546,6 +546,12 @@ local function getExistingShopCard(entry)
 		return cardByEntryName
 	end
 
+	for _, descendant in ipairs(container:GetDescendants()) do
+		if descendant:IsA("Frame") and descendant.Name == entry.Name then
+			return descendant
+		end
+	end
+
 	return nil
 end
 
@@ -594,12 +600,65 @@ local function isValidShopCard(card)
 	return inner and button and hasPrice
 end
 
+local function trimText(value)
+	local asString = tostring(value or "")
+	return string.match(asString, "^%s*(.-)%s*$") or ""
+end
+
+local function normalizeSectionName(value)
+	local sectionName = trimText(value)
+	if sectionName == "" then
+		sectionName = "Gamepasses"
+	end
+	return sectionName
+end
+
+local function sectionToKey(value)
+	local normalized = string.lower(normalizeSectionName(value))
+	normalized = string.gsub(normalized, "%s+", "")
+	return normalized
+end
+
+local function getShopSectionsButtonMap(shopFrame)
+	local result = {}
+	local buttonsFrame = shopFrame and shopFrame:FindFirstChild("Buttons")
+	if not buttonsFrame then
+		return result
+	end
+
+	for _, button in ipairs(buttonsFrame:GetChildren()) do
+		if button:IsA("GuiButton") then
+			local sectionName = button.Name:gsub("Button$", "")
+			local sectionKey = sectionToKey(sectionName)
+			result[sectionKey] = button
+		end
+	end
+
+	return result
+end
+
+local function scrollShopToSection(container, targetFrame)
+	if not (container and container:IsA("ScrollingFrame")) then
+		return
+	end
+	if not (targetFrame and targetFrame:IsA("GuiObject")) then
+		return
+	end
+
+	local targetY = targetFrame.AbsolutePosition.Y - container.AbsolutePosition.Y + container.CanvasPosition.Y
+	local maxY = math.max(0, container.AbsoluteCanvasSize.Y - container.AbsoluteWindowSize.Y)
+	targetY = math.clamp(targetY, 0, maxY)
+	TweenService:Create(container, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		CanvasPosition = Vector2.new(container.CanvasPosition.X, targetY)
+	}):Play()
+end
+
 local function getProductInfoWithType(productId)
 	local info
 	local success, err = pcall(function()
 		info = MarketPlaceService:GetProductInfo(productId, Enum.InfoType.GamePass)
 	end)
-	
+
 	if success and info then
 		return info, "GamePass"
 	end
@@ -615,6 +674,8 @@ local function getProductInfoWithType(productId)
 	return nil, nil, err or fallbackErr
 end
 
+local usedExistingShopCards = {}
+
 for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 	local gamepassContainer = getGamepassContainer()
 	if not gamepassContainer then
@@ -623,8 +684,12 @@ for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 	end
 
 	local ExistingCard = getExistingShopCard(Gamepass)
+	if ExistingCard and usedExistingShopCards[ExistingCard] then
+		ExistingCard = nil
+	end
 	local isCustomCard = ExistingCard ~= nil
 	local NewGamepass = ExistingCard or getGamepassTemplate(Gamepass):Clone()
+	local sectionName = normalizeSectionName(Gamepass:GetAttribute("ShopSection"))
 	if not isValidShopCard(NewGamepass) then
 		warn(("[ShopClient] Invalid shop card for '%s'. Card must include InnerPart > Button and InnerPart > Price."):format(Gamepass.Name))
 		if not isCustomCard and NewGamepass then
@@ -634,7 +699,10 @@ for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 	end
 	if not isCustomCard then
 		NewGamepass.Parent = gamepassContainer
+	else
+		usedExistingShopCards[ExistingCard] = true
 	end
+	NewGamepass:SetAttribute("ShopSection", sectionName)
 
 	local GamepassInfo
 	local purchaseType
@@ -642,13 +710,19 @@ for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 	GamepassInfo, purchaseType, Error = getProductInfoWithType(Gamepass.Value)
 
 
-	if Error then 
-		warn("An error as occured while gathering gamepass data: "..Error) 
-		if not isCustomCard then
-			NewGamepass:Destroy()
-		end
-		continue 
-	else
+	if Error then
+		warn(("[ShopClient] Product info failed for '%s' (id=%s): %s. Using fallback UI values.")
+			:format(Gamepass.Name, tostring(Gamepass.Value), tostring(Error)))
+		GamepassInfo = {
+			Name = tostring(Gamepass:GetAttribute("DisplayName") or Gamepass.Name),
+			Description = tostring(Gamepass:GetAttribute("Description") or "Premium purchase"),
+			PriceInRobux = tonumber(Gamepass:GetAttribute("PriceInRobux")) or 0,
+			IconImageAssetId = tonumber(Gamepass:GetAttribute("ImageAssetId")) or nil,
+		}
+		purchaseType = tostring(Gamepass:GetAttribute("PurchaseType")) == "DeveloperProduct" and "DeveloperProduct" or "GamePass"
+	end
+
+	do
 		local autoFillInfo = Gamepass:GetAttribute("AutoFillInfo")
 		if autoFillInfo == nil then
 			autoFillInfo = not isCustomCard
@@ -712,6 +786,78 @@ for _,Gamepass in ReplicatedStorage.Gamepasses:GetChildren() do
 		end)
 	end
 end
+
+local function setupShopSectionLayoutAndButtons()
+	local shopFrame = Frames and Frames:FindFirstChild("Shop")
+	local gamepassContainer = getGamepassContainer()
+	if not shopFrame or not gamepassContainer then
+		return
+	end
+
+	local sectionMap = {}
+	local sectionMeta = {}
+	for _, card in ipairs(gamepassContainer:GetDescendants()) do
+		if card:IsA("Frame") and isValidShopCard(card) then
+			local sectionName = normalizeSectionName(card:GetAttribute("ShopSection"))
+			local key = sectionToKey(sectionName)
+			if not sectionMap[key] then
+				sectionMap[key] = card
+				sectionMeta[key] = {Name = sectionName, Card = card}
+			else
+				local current = sectionMap[key]
+				if card.AbsolutePosition.Y < current.AbsolutePosition.Y then
+					sectionMap[key] = card
+					sectionMeta[key] = {Name = sectionName, Card = card}
+				end
+			end
+		end
+	end
+
+	for _, child in ipairs(gamepassContainer:GetChildren()) do
+		if child:IsA("TextLabel") and string.sub(child.Name, 1, #"__SectionHeader_") == "__SectionHeader_" then
+			child:Destroy()
+		end
+	end
+
+	for key, meta in pairs(sectionMeta) do
+		local targetCard = meta.Card
+		if targetCard then
+			local header = Instance.new("TextLabel")
+			header.Name = "__SectionHeader_" .. key
+			header.BackgroundTransparency = 1
+			header.Text = meta.Name
+			header.TextXAlignment = Enum.TextXAlignment.Left
+			header.TextYAlignment = Enum.TextYAlignment.Center
+			header.Font = Enum.Font.GothamBold
+			header.TextSize = 20
+			header.TextColor3 = Color3.fromRGB(255, 255, 255)
+			header.ZIndex = targetCard.ZIndex + 1
+			header.Active = false
+			header.Selectable = false
+
+			local headerHeight = 28
+			local yPos = math.max(0, targetCard.Position.Y.Offset - headerHeight - 6)
+			header.Position = UDim2.new(0, targetCard.Position.X.Offset, 0, yPos)
+			header.Size = UDim2.new(targetCard.Size.X.Scale, targetCard.Size.X.Offset, 0, headerHeight)
+			header.Parent = gamepassContainer
+		end
+	end
+
+	local sectionButtons = getShopSectionsButtonMap(shopFrame)
+	for key, button in pairs(sectionButtons) do
+		if button:GetAttribute("ShopSectionBound") ~= true then
+			button:SetAttribute("ShopSectionBound", true)
+			button.MouseButton1Click:Connect(function()
+				local targetCard = sectionMap[key]
+				if targetCard then
+					scrollShopToSection(gamepassContainer, targetCard)
+				end
+			end)
+		end
+	end
+end
+
+setupShopSectionLayoutAndButtons()
 
 --// Pet Inventory
 local PetInventory = {} -- all pets will be added in this table
