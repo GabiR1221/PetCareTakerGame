@@ -529,6 +529,91 @@ local function buildPetToolHandle(petModel)
 	return handle
 end
 
+local function normalizeImageAssetId(assetValue)
+	if type(assetValue) == "number" then
+		if assetValue <= 0 then return nil end
+		return "rbxassetid://" .. math.floor(assetValue)
+	end
+	if type(assetValue) ~= "string" then
+		return nil
+	end
+	local trimmed = string.match(assetValue, "^%s*(.-)%s*$")
+	if not trimmed or trimmed == "" then
+		return nil
+	end
+	if string.find(trimmed, "rbxassetid://", 1, true) then
+		return trimmed
+	end
+	local digits = string.match(trimmed, "(%d+)")
+	if digits then
+		return "rbxassetid://" .. digits
+	end
+	return nil
+end
+
+local function resolvePetTemplateImage(template)
+	if not template then return nil end
+
+	for _, attrName in ipairs({"InventoryImage", "IconImageId", "PetImageId", "ImageAssetId", "ThumbnailId", "ImageId"}) do
+		local image = normalizeImageAssetId(template:GetAttribute(attrName))
+		if image then return image end
+	end
+
+	local settings = template:FindFirstChild("Settings")
+	if settings then
+		for _, valueName in ipairs({"InventoryImage", "IconImageId", "ImageId", "ThumbnailId"}) do
+			local valueObject = settings:FindFirstChild(valueName)
+			if valueObject and valueObject:IsA("ValueBase") then
+				local image = normalizeImageAssetId(valueObject.Value)
+				if image then return image end
+			end
+		end
+	end
+
+	local decal = template:FindFirstChildWhichIsA("Decal", true)
+	if decal then
+		local image = normalizeImageAssetId(decal.Texture)
+		if image then return image end
+	end
+	local texture = template:FindFirstChildWhichIsA("Texture", true)
+	if texture then
+		local image = normalizeImageAssetId(texture.Texture)
+		if image then return image end
+	end
+
+	return nil
+end
+
+local function resolvePetToolTextureId(petModel, petName)
+	local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+	if not petsFolder then
+		return nil
+	end
+
+	local templateName = tostring((petModel and petModel:GetAttribute("TemplateName")) or petName or "")
+	if templateName == "" then
+		templateName = tostring(petName or "")
+	end
+	if templateName == "" then
+		return nil
+	end
+
+	local template = petsFolder:FindFirstChild(templateName)
+	if not template then
+		for _, candidate in ipairs(petsFolder:GetChildren()) do
+			if string.lower(candidate.Name) == string.lower(templateName) then
+				template = candidate
+				break
+			end
+		end
+	end
+	local image = resolvePetTemplateImage(template)
+	if image then
+		return image
+	end
+	return nil
+end
+
 createPetPickupTool = function(player, petModel, state)
 	local petUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
 	if petUid == "" then
@@ -547,6 +632,12 @@ createPetPickupTool = function(player, petModel, state)
 	tool:SetAttribute("PetUID", petUid)
 	tool:SetAttribute("TemplateName", petName)
 	tool:SetAttribute("SkipToolSave", true)
+	local toolTextureId = resolvePetToolTextureId(petModel, petName)
+	if toolTextureId then
+		tool.TextureId = toolTextureId
+		tool:SetAttribute("IconImageId", toolTextureId)
+		tool:SetAttribute("InventoryImage", toolTextureId)
+	end
 
 	local handle = buildPetToolHandle(petModel)
 	handle.Parent = tool
@@ -869,7 +960,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData94", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData96", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
