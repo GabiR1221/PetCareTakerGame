@@ -21,41 +21,12 @@ SETTINGS.ALWAYS_SHOW_TOOL_NAME = true
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 -- services
 local ContextActionService = game:GetService("ContextActionService")
 local TextService = game:GetService("TextService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 --// PLAYER
 local player = game:GetService("Players").LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -81,6 +52,110 @@ local EnumKeys = {
 -- tool object methods
 local toolObjectMetatable = {}
 toolObjectMetatable.__index = toolObjectMetatable
+
+local function normalizeImageAsset(assetValue)
+	if type(assetValue) == "number" then
+		if assetValue <= 0 then
+			return nil
+		end
+		return "rbxassetid://" .. math.floor(assetValue)
+	end
+	if type(assetValue) ~= "string" then
+		return nil
+	end
+
+	local trimmed = string.match(assetValue, "^%s*(.-)%s*$")
+	if not trimmed or trimmed == "" then
+		return nil
+	end
+	if string.find(trimmed, "rbxassetid://", 1, true) then
+		return trimmed
+	end
+
+	local digits = string.match(trimmed, "(%d+)")
+	if digits then
+		return "rbxassetid://" .. digits
+	end
+
+	return nil
+end
+
+local function getImageFromPetTemplate(template)
+	if not template then
+		return nil
+	end
+
+	local attributeCandidates = {
+		"InventoryImage",
+		"IconImageId",
+		"PetImageId",
+		"ImageAssetId",
+		"ThumbnailId",
+		"ImageId",
+	}
+	for _, attrName in ipairs(attributeCandidates) do
+		local image = normalizeImageAsset(template:GetAttribute(attrName))
+		if image then
+			return image
+		end
+	end
+
+	local settings = template:FindFirstChild("Settings")
+	if settings then
+		for _, valueName in ipairs({"InventoryImage", "IconImageId", "ImageId", "ThumbnailId"}) do
+			local valueObject = settings:FindFirstChild(valueName)
+			if valueObject and valueObject:IsA("ValueBase") then
+				local image = normalizeImageAsset(valueObject.Value)
+				if image then
+					return image
+				end
+			end
+		end
+	end
+
+	local decal = template:FindFirstChildWhichIsA("Decal", true)
+	if decal then
+		local image = normalizeImageAsset(decal.Texture)
+		if image then
+			return image
+		end
+	end
+
+	local texture = template:FindFirstChildWhichIsA("Texture", true)
+	if texture then
+		local image = normalizeImageAsset(texture.Texture)
+		if image then
+			return image
+		end
+	end
+
+	return nil
+end
+
+local function resolvePetToolImage(tool)
+	if not tool then
+		return nil
+	end
+
+	for _, attrName in ipairs({"InventoryImage", "IconImageId", "PetImageId", "ImageAssetId", "ThumbnailId"}) do
+		local image = normalizeImageAsset(tool:GetAttribute(attrName))
+		if image then
+			return image
+		end
+	end
+
+	local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+	local templateName = tostring(tool:GetAttribute("TemplateName") or tool.Name or "")
+	if petsFolder and templateName ~= "" then
+		local template = petsFolder:FindFirstChild(templateName)
+		local templateImage = getImageFromPetTemplate(template)
+		if templateImage then
+			return templateImage
+		end
+	end
+
+	return nil
+end
 
 function toolObjectMetatable:isEquipped() -- Checks if the current object.Tool is equipped
 	local character = player.Character
@@ -127,7 +202,11 @@ end
 function toolObjectMetatable:updateIcon() -- Updates the tool Texture
 	local tool = self.Tool
 	local frame = self.Frame
-	local textureId = tool.TextureId
+	local textureId = normalizeImageAsset(tool.TextureId)
+
+	if not textureId and (tool:GetAttribute("PetTool") == true or tool:GetAttribute("PetUID") ~= nil) then
+		textureId = resolvePetToolImage(tool)
+	end
 
 	if textureId == "" or textureId == nil then
 		frame.toolName.Visible = true
