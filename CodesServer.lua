@@ -29,12 +29,15 @@ local CodeStore = DataStoreService:GetDataStore("CodesStore")
 
 --// Main
 ReplicatedStorage.Remotes.RedeemCode.OnServerEvent:Connect(function(Player, Code)
+	Code = string.upper(string.match(tostring(Code or ""), "^%s*(.-)%s*$") or "")
+	if Code == "" then return end
 	if not Codes[Code] then return end -- code doesnt exist
 
-	local isRedeemed = CodeStore:GetAsync(Code.."_"..tostring(Player.UserId))
-	
+	local codeKey = Code.."_"..tostring(Player.UserId)
+	local isRedeemed = CodeStore:GetAsync(codeKey)
+
 	if isRedeemed then return end -- Already redeemed
-	
+
 	if type(Codes[Code][1]) == "number" then -- Stat
 		if Codes[Code][2] == "Diamonds" then
 			Player.Data.PlayerData.Currency2.Value += Codes[Code][1]
@@ -53,5 +56,5 @@ ReplicatedStorage.Remotes.RedeemCode.OnServerEvent:Connect(function(Player, Code
 		NewPet.PetName.Value = Codes[Code][1]
 		NewPet.Parent = Player.Data.Pets
 	end
-	CodeStore:UpdateAsync(Code.."_"..tostring(Player.UserId), true)
+	CodeStore:SetAsync(codeKey, true)
 end)
