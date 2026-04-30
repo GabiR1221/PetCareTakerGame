@@ -62,6 +62,10 @@ if GameSettings.GameType.Value == "Clicker" then
 	UI.Clicker.Click.MouseButton1Click:Connect(function()
 		Remotes.Clicker:FireServer()
 		Utilities.Audio.PlayAudio("Click")
+	end, function(itemFolder, template)
+		local info = template and template:GetAttribute("Info")
+		if type(info) ~= "string" or info == "" then info = itemFolder and itemFolder:GetAttribute("Info") end
+		return (type(info) == "string" and info ~= "") and info or "Info unavailable"
 	end)
 
 	if GameSettings.ClickingAnywhere.Value then
@@ -638,6 +642,9 @@ local function getShopSectionsButtonMap(shopFrame)
 			local sectionName = button.Name:gsub("Button$", "")
 			local sectionKey = sectionToKey(sectionName)
 			result[sectionKey] = button
+			if sectionKey == "codesbutton" then
+				result["codes"] = button
+			end
 		end
 	end
 
@@ -892,6 +899,282 @@ local CanDeletePets = false
 local CachedPetStateByKey = {}
 local SellSlotByPetId = {}
 local OpenSellFramePetId = nil
+
+local function getPetTemplate(petInstance)
+	if not petInstance then return nil end
+	local petNameValue = petInstance:FindFirstChild("PetName")
+	if not petNameValue then return nil end
+	return ReplicatedStorage.Pets:FindFirstChild(petNameValue.Value)
+end
+
+local HoverGuiController = (function()
+	local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+	local hoverScreenGui = playerGui and playerGui:FindFirstChild("HoverGui")
+	local hoverFrame = hoverScreenGui and hoverScreenGui:FindFirstChild("Hover1")
+	local nameLabel = hoverFrame and hoverFrame:FindFirstChild("NameFrame") and hoverFrame.NameFrame:FindFirstChild("Name")
+	local powerLabel = hoverFrame and hoverFrame:FindFirstChild("PowerFrame") and hoverFrame.PowerFrame:FindFirstChild("Power")
+
+	if hoverFrame then
+		hoverFrame.Visible = false
+	end
+
+	local activeHoverFrame = nil
+	local activeTouchInput = nil
+	local activePointerPosition = nil
+	local currentHoverFrame = hoverFrame
+
+	local function getPetDisplayName(petInstance)
+		if not petInstance then
+			return "Unknown Pet"
+		end
+
+		local templateName = tostring(petInstance:GetAttribute("TemplateName") or "")
+		if templateName ~= "" then
+			return templateName
+		end
+
+		local folderName = tostring(petInstance.Name or "")
+		local asNumber = tonumber(folderName)
+		if asNumber ~= nil then
+			local nickValue = petInstance:FindFirstChild("PetName")
+			if nickValue and nickValue:IsA("StringValue") and nickValue.Value ~= "" then
+				return nickValue.Value
+			end
+			local petTemplate = getPetTemplate(petInstance)
+			if petTemplate and petTemplate.Name ~= "" then
+				return petTemplate.Name
+			end
+		end
+
+		return folderName ~= "" and folderName or "Unknown Pet"
+	end
+
+	local function getPetPowerText(petInstance)
+		if not petInstance then
+			return "Power: ?"
+		end
+
+		local powerFromValue = petInstance:FindFirstChild("Power")
+		local power = powerFromValue and powerFromValue:IsA("NumberValue") and powerFromValue.Value
+		if power == nil then
+			power = petInstance:GetAttribute("Power")
+		end
+		if power == nil then
+			local petTemplate = getPetTemplate(petInstance)
+			power = petTemplate and petTemplate:GetAttribute("Power")
+		end
+		power = tonumber(power) or 0
+		return ("Power: %s"):format(Utilities.Short.en(power))
+	end
+
+	local function updateHoverPosition(inputObject)
+		if not currentHoverFrame or not currentHoverFrame.Visible then return end
+		local mousePos = inputObject
+		if typeof(inputObject) == "InputObject" then
+			mousePos = inputObject.Position
+		end
+		if not mousePos then return end
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+
+		local x = math.clamp(mousePos.X + 16, 0, camera.ViewportSize.X - currentHoverFrame.AbsoluteSize.X)
+		local y = math.clamp(mousePos.Y + 16, 0, camera.ViewportSize.Y - currentHoverFrame.AbsoluteSize.Y)
+		currentHoverFrame.Position = UDim2.fromOffset(x, y)
+	end
+
+	UserInputService.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement then
+			activePointerPosition = input.Position
+			updateHoverPosition(input)
+		elseif input.UserInputType == Enum.UserInputType.Touch and activeTouchInput == input then
+			activePointerPosition = input.Position
+			updateHoverPosition(input)
+		end
+	end)
+	RunService.RenderStepped:Connect(function()
+		if currentHoverFrame and currentHoverFrame.Visible then
+			if activePointerPosition then
+				updateHoverPosition(activePointerPosition)
+			else
+				updateHoverPosition(UserInputService:GetMouseLocation())
+			end
+		end
+	end)
+
+	local function bind(guiObject, petInstance, hoverFrameName, customNameResolver)
+		if not guiObject or not guiObject:IsA("GuiObject") then return end
+		local function showHover()
+			local frameToUse = hoverFrame
+			if hoverFrameName and hoverScreenGui then
+				frameToUse = hoverScreenGui:FindFirstChild(hoverFrameName) or hoverFrame
+			end
+			if not frameToUse then return end
+			activeHoverFrame = guiObject
+			local localNameLabel = frameToUse:FindFirstChild("NameFrame") and frameToUse.NameFrame:FindFirstChild("Name")
+			local localPowerLabel = frameToUse:FindFirstChild("PowerFrame") and frameToUse.PowerFrame:FindFirstChild("Power")
+			if localNameLabel then
+				localNameLabel.Text = customNameResolver and customNameResolver(petInstance, getPetTemplate(petInstance)) or getPetDisplayName(petInstance)
+			end
+			if localPowerLabel then
+				localPowerLabel.Text = getPetPowerText(petInstance)
+			end
+			frameToUse.Visible = true
+			currentHoverFrame = frameToUse
+			activePointerPosition = UserInputService:GetMouseLocation()
+			updateHoverPosition(activePointerPosition)
+		end
+
+		local function hideHover()
+			if activeHoverFrame ~= guiObject then return end
+			activeHoverFrame = nil
+			activeTouchInput = nil
+			activePointerPosition = nil
+			currentHoverFrame = hoverFrame
+			if hoverScreenGui then
+				for _, child in ipairs(hoverScreenGui:GetChildren()) do
+					if child:IsA("GuiObject") and child.Name:match("^Hover") then
+						child.Visible = false
+					end
+				end
+			end
+		end
+
+		guiObject.MouseEnter:Connect(function()
+			showHover()
+		end)
+
+		guiObject.MouseLeave:Connect(function()
+			hideHover()
+		end)
+
+		guiObject.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch then
+				activeTouchInput = input
+				activePointerPosition = input.Position
+				showHover()
+			end
+		end)
+
+		guiObject.InputChanged:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch and activeTouchInput == input and currentHoverFrame and currentHoverFrame.Visible then
+				activePointerPosition = input.Position
+				updateHoverPosition(input)
+			end
+		end)
+
+		guiObject.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch and activeTouchInput == input then
+				hideHover()
+			end
+		end)
+	end
+
+	return {
+		bind = bind,
+	}
+end)()
+
+local function bindPetHoverByResolver(container, hoverFrameName, resolvePetName, followPointer)
+	if not container then return end
+	local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+	local hoverRoot = playerGui and playerGui:FindFirstChild("HoverGui")
+	local hoverFrame = hoverRoot and hoverRoot:FindFirstChild(hoverFrameName)
+	if not hoverFrame then return end
+
+	local nameLabel = hoverFrame:FindFirstChild("NameFrame") and hoverFrame.NameFrame:FindFirstChild("Name")
+	local powerLabel = hoverFrame:FindFirstChild("PowerFrame") and hoverFrame.PowerFrame:FindFirstChild("Power")
+	local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+	hoverFrame.Visible = false
+
+	local activeTouch = nil
+	local activePointerPosition = nil
+
+	local function setHoverPosition(gui, pointerPos)
+		if followPointer then
+			local pos = pointerPos or UserInputService:GetMouseLocation()
+			local camera = workspace.CurrentCamera
+			if not pos or not camera then return end
+			local x = math.clamp(pos.X + 16, 0, camera.ViewportSize.X - hoverFrame.AbsoluteSize.X)
+			local y = math.clamp(pos.Y + 16, 0, camera.ViewportSize.Y - hoverFrame.AbsoluteSize.Y)
+			hoverFrame.Position = UDim2.fromOffset(x, y)
+		else
+			hoverFrame.Position = UDim2.fromOffset(gui.AbsolutePosition.X, gui.AbsolutePosition.Y - hoverFrame.AbsoluteSize.Y - 6)
+		end
+	end
+
+
+	local function tryBind(gui)
+		if not (gui:IsA("ImageLabel") or gui:IsA("ImageButton")) then return end
+		local petName = resolvePetName(gui)
+		if not petName or petName == "" then return end
+		local function show()
+			local template = petsFolder and petsFolder:FindFirstChild(petName) or nil
+			if nameLabel then nameLabel.Text = template and template.Name or petName end
+			if powerLabel then powerLabel.Text = ("Power: %s"):format(Utilities.Short.en(tonumber(template and template:GetAttribute("Power")) or 0)) end
+			setHoverPosition(gui, activePointerPosition)
+			hoverFrame.Visible = true
+		end
+		local function hide() activeTouch=nil activePointerPosition=nil hoverFrame.Visible=false end
+		gui.MouseEnter:Connect(function() activePointerPosition=UserInputService:GetMouseLocation() show() end)
+		gui.MouseLeave:Connect(hide)
+		gui.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.Touch then activeTouch=input activePointerPosition=input.Position show() end end)
+		gui.InputChanged:Connect(function(input) if followPointer and input.UserInputType==Enum.UserInputType.Touch and activeTouch==input and hoverFrame.Visible then activePointerPosition=input.Position setHoverPosition(gui,activePointerPosition) end end)
+		gui.InputEnded:Connect(function(input) if input.UserInputType==Enum.UserInputType.Touch and activeTouch==input then hide() end end)
+	end
+
+	for _, gui in ipairs(container:GetDescendants()) do
+		tryBind(gui)
+	end
+	container.DescendantAdded:Connect(tryBind)
+	if followPointer then
+		UserInputService.InputChanged:Connect(function(input)
+			if not hoverFrame.Visible then return end
+			if input.UserInputType == Enum.UserInputType.MouseMovement then
+				activePointerPosition = input.Position
+				local hovered = UserInputService:GetMouseLocation()
+				setHoverPosition(container, hovered)
+			end
+		end)
+	end
+end
+
+local function bindStaticPetHoverByAttribute(container, hoverFrameName, followPointer)
+	bindPetHoverByResolver(container, hoverFrameName, function(gui)
+		return tostring(gui:GetAttribute("HoverPet") or gui:GetAttribute("HoverPetName") or gui:GetAttribute("HoverPetTemplate") or "")
+	end, followPointer)
+end
+
+local function bindPassRewardHoverFromConfig(passFrame)
+	local passConfig = require(ReplicatedStorage:WaitForChild("PassRewardsConfig"))
+	local rewardPetByLevelAndTier = {}
+	for _, reward in ipairs(passConfig.Rewards or {}) do
+		if reward.Type == "Pet" and reward.PetName and reward.Level and reward.Tier then
+			rewardPetByLevelAndTier[tostring(reward.Level)..":"..tostring(reward.Tier)] = reward.PetName
+		end
+	end
+	bindPetHoverByResolver(passFrame, "Hover4", function(gui)
+		local direct = tostring(gui:GetAttribute("HoverPet") or "")
+		if direct ~= "" then return direct end
+		local rewardFrame = gui:FindFirstAncestorWhichIsA("Frame")
+		local level = rewardFrame and (rewardFrame:GetAttribute("Level") or rewardFrame:GetAttribute("RewardLevel") or tonumber(rewardFrame.Name:match("%d+")))
+		local tier = rewardFrame and (rewardFrame:GetAttribute("Tier") or rewardFrame:GetAttribute("RewardTier"))
+		if level and tier then
+			return rewardPetByLevelAndTier[tostring(level)..":"..tostring(tier)]
+		end
+		return tostring(gui:GetAttribute("PetName") or "")
+	end, false)
+end
+
+task.defer(function()
+	local shopFrame = Frames and Frames:FindFirstChild("Shop")
+	local passFrame = Frames and (Frames:FindFirstChild("PassFrame") or Frames:FindFirstChild("PassRewards") or Frames:FindFirstChild("Pass"))
+	if shopFrame then
+		bindStaticPetHoverByAttribute(shopFrame, "Hover3", true)
+	end
+	if passFrame then
+		bindPassRewardHoverFromConfig(passFrame)
+	end
+end)
 local SideFramePetBarsVisible = true
 
 local function setSideFrameOpen(isOpen)
@@ -922,12 +1205,7 @@ PetFrame:GetPropertyChangedSignal("Visible"):Connect(function()
 	end
 end)
 
-local function getPetTemplate(petInstance)
-	if not petInstance then return nil end
-	local petNameValue = petInstance:FindFirstChild("PetName")
-	if not petNameValue then return nil end
-	return ReplicatedStorage.Pets:FindFirstChild(petNameValue.Value)
-end
+
 
 local function getPetMultiplier(petInstance)
 	local template = getPetTemplate(petInstance)
@@ -1223,6 +1501,7 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 			Utilities.Audio.PlayAudio("Click")
 		end)
 	end
+	HoverGuiController.bind(NewPet.Button, PetInstance)
 	NewPet.Name = PetInstance.Name
 	NewPet.Parent = Parent == nil and PetFrame.MainFrame.ObjectHolder or Parent
 	
@@ -1704,6 +1983,13 @@ local function createToySlot(toyFolder)
 			showInventoryItemSideFrame(toyName, toyTemplate, getItemInfoText(toyFolder, toyTemplate))
 			Utilities.Audio.PlayAudio("Click")
 		end)
+		HoverGuiController.bind(newSlot.Button, toyFolder, "Hover5", function(itemFolder, template)
+			local name = template and template:GetAttribute("Info")
+			if type(name) ~= "string" or name == "" then
+				name = itemFolder and itemFolder:GetAttribute("Info")
+			end
+			return (type(name) == "string" and name ~= "") and name or getToyNameFromFolder(itemFolder)
+		end)
 	end
 end
 
@@ -1806,6 +2092,13 @@ local function createAccessorySlot(accessoryFolder)
 		newSlot.Button.MouseButton1Click:Connect(function()
 			showInventoryItemSideFrame(itemName, template, getItemInfoText(accessoryFolder, template))
 			Utilities.Audio.PlayAudio("Click")
+		end)
+		HoverGuiController.bind(newSlot.Button, accessoryFolder, "Hover5", function(itemFolder, template)
+			local name = template and template:GetAttribute("Info")
+			if type(name) ~= "string" or name == "" then
+				name = itemFolder and itemFolder:GetAttribute("Info")
+			end
+			return (type(name) == "string" and name ~= "") and name or itemName
 		end)
 	end
 end
