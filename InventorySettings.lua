@@ -32,6 +32,14 @@ local player = game:GetService("Players").LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local mouse = player:GetMouse()
 
+local hoverScreenGui = playerGui:FindFirstChild("HoverGui")
+local hover2Frame = hoverScreenGui and hoverScreenGui:FindFirstChild("Hover2")
+local hover2Name = hover2Frame and hover2Frame:FindFirstChild("NameFrame") and hover2Frame.NameFrame:FindFirstChild("Name")
+local hover2Power = hover2Frame and hover2Frame:FindFirstChild("PowerFrame") and hover2Frame.PowerFrame:FindFirstChild("Power")
+
+if hover2Frame then
+	hover2Frame.Visible = false
+end
 --// INVENTORY_SYSTEM \\--
 local inventoryGui = script.Parent.Parent
 local hotbar = inventoryGui.hotBar
@@ -155,6 +163,41 @@ local function resolvePetToolImage(tool)
 	end
 
 	return nil
+end
+
+local function resolveToolPower(tool)
+	local power = tool and tool:GetAttribute("Power")
+	if power == nil then
+		local handle = tool and tool:FindFirstChild("Handle")
+		power = handle and handle:GetAttribute("Power")
+	end
+	if power == nil and tool then
+		local templateName = tostring(tool:GetAttribute("TemplateName") or tool.Name or "")
+		local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+		local template = petsFolder and templateName ~= "" and petsFolder:FindFirstChild(templateName) or nil
+		power = template and template:GetAttribute("Power")
+	end
+	return tonumber(power) or 0
+end
+
+local function showHover2ForFrame(frame, tool)
+	if not hover2Frame or not frame or not tool then return end
+	if hover2Name then
+		hover2Name.Text = tostring(tool:GetAttribute("TemplateName") or tool.Name or "Tool")
+	end
+	if hover2Power then
+		hover2Power.Text = ("Power: %d"):format(math.floor(resolveToolPower(tool)))
+	end
+	local x = frame.AbsolutePosition.X + (frame.AbsoluteSize.X * 0.5) - (hover2Frame.AbsoluteSize.X * 0.5)
+	local y = frame.AbsolutePosition.Y - hover2Frame.AbsoluteSize.Y - 6
+	hover2Frame.Position = UDim2.fromOffset(x, y)
+	hover2Frame.Visible = true
+end
+
+local function hideHover2()
+	if hover2Frame then
+		hover2Frame.Visible = false
+	end
 end
 
 function toolObjectMetatable:isEquipped() -- Checks if the current object.Tool is equipped
@@ -481,9 +524,20 @@ function module:addTool(tool: Tool, parent: string, position: number)
 			return
 		end
 		object:showDescription()
+		showHover2ForFrame(frame, tool)
 	end)
 	object.CONNECTIONS.MouseLeave = frame.MouseLeave:Connect(function()
 		object:removeDescription()
+		hideHover2()
+	end)
+	object.CONNECTIONS.TouchBegan = frame.InputBegan:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.Touch then return end
+		if object.isGrabbed then return end
+		showHover2ForFrame(frame, tool)
+	end)
+	object.CONNECTIONS.TouchEnded = frame.InputEnded:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.Touch then return end
+		hideHover2()
 	end)
 	object.CONNECTIONS.GrabConn = frame.MouseButton1Down:Connect(function()
 		if self.slotsPositionLocked then
