@@ -1001,7 +1001,7 @@ local HoverGuiController = (function()
 		end
 	end)
 
-	local function bind(guiObject, petInstance, hoverFrameName, customNameResolver)
+	local function bind(guiObject, petInstance, hoverFrameName, customNameResolver, customDetailResolver)
 		if not guiObject or not guiObject:IsA("GuiObject") then return end
 		local function showHover()
 			local frameToUse = hoverFrame
@@ -1016,7 +1016,7 @@ local HoverGuiController = (function()
 				localNameLabel.Text = customNameResolver and customNameResolver(petInstance, getPetTemplate(petInstance)) or getPetDisplayName(petInstance)
 			end
 			if localPowerLabel then
-				localPowerLabel.Text = getPetPowerText(petInstance)
+				localPowerLabel.Text = customDetailResolver and customDetailResolver(petInstance, getPetTemplate(petInstance)) or getPetPowerText(petInstance)
 			end
 			frameToUse.Visible = true
 			currentHoverFrame = frameToUse
@@ -1145,21 +1145,34 @@ local function bindStaticPetHoverByAttribute(container, hoverFrameName, followPo
 end
 
 local function bindPassRewardHoverFromConfig(passFrame)
-	local passConfig = require(ReplicatedStorage:WaitForChild("PassRewardsConfig"))
+	local modulesFolder = ReplicatedStorage:FindFirstChild("Modules")
+	local passConfigModule = (modulesFolder and modulesFolder:FindFirstChild("PassRewardsConfig")) or ReplicatedStorage:FindFirstChild("PassRewardsConfig")
+	if not passConfigModule then return end
+	local passConfig = require(passConfigModule)
 	local rewardPetByLevelAndTier = {}
 	for _, reward in ipairs(passConfig.Rewards or {}) do
 		if reward.Type == "Pet" and reward.PetName and reward.Level and reward.Tier then
 			rewardPetByLevelAndTier[tostring(reward.Level)..":"..tostring(reward.Tier)] = reward.PetName
 		end
 	end
-	bindPetHoverByResolver(passFrame, "Hover4", function(gui)
+	bindPetHoverByResolver(passFrame, "Hover5", function(gui)
 		local direct = tostring(gui:GetAttribute("HoverPet") or "")
 		if direct ~= "" then return direct end
+		local level = gui:GetAttribute("Level") or gui:GetAttribute("RewardLevel")
+		local tier = gui:GetAttribute("Tier") or gui:GetAttribute("RewardTier")
 		local rewardFrame = gui:FindFirstAncestorWhichIsA("Frame")
-		local level = rewardFrame and (rewardFrame:GetAttribute("Level") or rewardFrame:GetAttribute("RewardLevel") or tonumber(rewardFrame.Name:match("%d+")))
-		local tier = rewardFrame and (rewardFrame:GetAttribute("Tier") or rewardFrame:GetAttribute("RewardTier"))
+		while rewardFrame do
+			if level == nil then
+				level = rewardFrame:GetAttribute("Level") or rewardFrame:GetAttribute("RewardLevel") or tonumber(rewardFrame.Name:match("%d+"))
+			end
+			if tier == nil then
+				tier = rewardFrame:GetAttribute("Tier") or rewardFrame:GetAttribute("RewardTier")
+			end
+			if level and tier then break end
+			rewardFrame = rewardFrame.Parent and rewardFrame.Parent:IsA("Frame") and rewardFrame.Parent or nil
+		end
 		if level and tier then
-			return rewardPetByLevelAndTier[tostring(level)..":"..tostring(tier)]
+			return rewardPetByLevelAndTier[tostring(level)..":"..tostring(tier)] or tostring(gui:GetAttribute("PetName") or "")
 		end
 		return tostring(gui:GetAttribute("PetName") or "")
 	end, false)
@@ -1983,12 +1996,10 @@ local function createToySlot(toyFolder)
 			showInventoryItemSideFrame(toyName, toyTemplate, getItemInfoText(toyFolder, toyTemplate))
 			Utilities.Audio.PlayAudio("Click")
 		end)
-		HoverGuiController.bind(newSlot.Button, toyFolder, "Hover5", function(itemFolder, template)
-			local name = template and template:GetAttribute("Info")
-			if type(name) ~= "string" or name == "" then
-				name = itemFolder and itemFolder:GetAttribute("Info")
-			end
-			return (type(name) == "string" and name ~= "") and name or getToyNameFromFolder(itemFolder)
+		HoverGuiController.bind(newSlot.Button, toyFolder, "Hover5", function(itemFolder)
+			return getToyNameFromFolder(itemFolder)
+		end, function(itemFolder, template)
+			return getItemInfoText(itemFolder, template)
 		end)
 	end
 end
@@ -2093,12 +2104,10 @@ local function createAccessorySlot(accessoryFolder)
 			showInventoryItemSideFrame(itemName, template, getItemInfoText(accessoryFolder, template))
 			Utilities.Audio.PlayAudio("Click")
 		end)
-		HoverGuiController.bind(newSlot.Button, accessoryFolder, "Hover5", function(itemFolder, template)
-			local name = template and template:GetAttribute("Info")
-			if type(name) ~= "string" or name == "" then
-				name = itemFolder and itemFolder:GetAttribute("Info")
-			end
-			return (type(name) == "string" and name ~= "") and name or itemName
+		HoverGuiController.bind(newSlot.Button, accessoryFolder, "Hover5", function()
+			return itemName
+		end, function(itemFolder, template)
+			return getItemInfoText(itemFolder, template)
 		end)
 	end
 end
