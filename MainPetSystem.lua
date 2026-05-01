@@ -57,6 +57,8 @@ local SHOWER_XP = 20
 local DRY_XP = 12
 local PETGROUND_XP_PER_SEC = 5
 local ENABLE_PET_PICKUP_TOOLS = true -- Set to false to restore weld/carry pickup behavior.
+local MAX_ACTIVE_WANDERING_PETS = 3
+local GAME_NOTIFICATION_EVENT_NAME = "GameNotificationEvent"
 
 -- Initialize state trackers (these could be moved to their respective managers)
 local carryingPetByUserId = {}
@@ -191,6 +193,32 @@ local function resolveInventoryPetIdByPetName(player, petName)
 	return nil
 end
 
+local function getNotificationEvent()
+	local ev = ReplicatedStorage:FindFirstChild(GAME_NOTIFICATION_EVENT_NAME)
+	if ev and ev:IsA("RemoteEvent") then
+		return ev
+	end
+	return nil
+end
+
+local function notifyWanderingLimitReached(player)
+	local ev = getNotificationEvent()
+	if not ev or not player then return end
+	ev:FireClient(player, "error", "❌ You can only have 3 wandering pets active at a time.")
+end
+
+local function countActiveOwnedWanderingPets(userId)
+	local count = 0
+	for petModel, state in pairs(petState) do
+		if petModel and petModel.Parent and state and tostring(state.ownerUserId) == tostring(userId) then
+			if state.wild ~= true and tostring(state.location) == "free" then
+				count += 1
+			end
+		end
+	end
+	return count
+end
+
 local function dropCarriedPet(player, options)
 	options = options or {}
 	local carriedPet = carryingPetByUserId[player.UserId]
@@ -199,6 +227,11 @@ local function dropCarriedPet(player, options)
 	if not state then return false end
 	if state.ownerUserId and tostring(state.ownerUserId) ~= tostring(player.UserId) then return false end
 	if options.blockWildDrop and state.wild then return false end
+
+	if countActiveOwnedWanderingPets(player.UserId) >= MAX_ACTIVE_WANDERING_PETS then
+		notifyWanderingLimitReached(player)
+		return false
+	end
 
 	local character = player.Character
 	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
@@ -340,6 +373,11 @@ local function dropPetFromTool(player, petUid)
 		return false
 	end
 	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return false
+	end
+
+	if countActiveOwnedWanderingPets(player.UserId) >= MAX_ACTIVE_WANDERING_PETS then
+		notifyWanderingLimitReached(player)
 		return false
 	end
 
@@ -960,7 +998,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData96", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData99", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
