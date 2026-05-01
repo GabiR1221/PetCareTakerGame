@@ -145,8 +145,7 @@ function WildPetManager:CanGrantPetToInventory(player)
 	local petsFolder = data and data:FindFirstChild("Pets")
 	if not petsFolder then return false end
 
-	local maxStorage = self.Multipliers.GetMaxPetsStorage(player)
-	return #petsFolder:GetChildren() < maxStorage
+	return true
 end
 
 function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
@@ -214,15 +213,8 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 	self.PetRigManager:EnsurePetRig(pet)
 	self.PetAnimationManager:SetupAnimatorForPet(pet)
 	restorePetScaleAndHipHeight(self.PetStateManager, pet, self.petState[pet])
-	if player:GetAttribute("RunnerActive") == true then
-		self.petState[pet].location = "inventory"
-		pet.Parent = ServerStorage
-	else
-		self:PlacePetOnGround(pet, adoptionMat.Position)
-		local wanderZone = self:GetOwnerWanderZonePart(player.UserId)
-		self.PetMovement.StartWandering(pet, adoptionMat.Position, 20, player.UserId, wanderZone)
-		self:AddOwnedPetPickupPrompt(pet, player.UserId)
-	end
+	self.petState[pet].location = "inventory"
+	pet.Parent = ServerStorage
 
 	grantAdoptedPetToInventory(player, pet)
 	self:UpdateOwnedPetRegistryForPlayer(player)
@@ -747,7 +739,7 @@ function WildPetManager:LooksLikeZoneFolder(folder)
 	end
 	local hasZoneAttr = folder:GetAttribute("ZoneId") ~= nil or folder:GetAttribute("WildPetZone") ~= nil
 	if hasZoneAttr then
-		return true
+	return true	
 	end
 	return string.match(string.lower(folder.Name), "^zone%d*$") ~= nil
 end
@@ -913,7 +905,7 @@ function WildPetManager:_pickupWildPetForPlayer(pet, player, helper)
 		end
 
 		print(("[WildPetManager] Player %s picked up wild pet %s"):format(player.Name, pet.Name))
-		return true
+	return true
 	else
 		warn("[WildPetManager] Failed to attach wild pet:", err)
 	end
