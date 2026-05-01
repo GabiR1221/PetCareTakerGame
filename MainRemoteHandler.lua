@@ -7,6 +7,7 @@ local ServerStorage = game:GetService("ServerStorage")
 --// Variables
 local GameSettings = ReplicatedStorage["Game Settings"]
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local GameNotificationEvent = ReplicatedStorage:FindFirstChild("GameNotificationEvent")
 local Modules = ReplicatedStorage.Modules
 local TycoonUtils
 do
@@ -24,6 +25,7 @@ local PetMultipliers = require(Modules.PetMultipliers)
 local Cooldowns = {}
 local SELL_RING_MAX_DISTANCE = 12
 local PetSellRequestBridgeName = "PetSellRequestBridge"
+local PetRuntimeStateBridgeName = "PetRuntimeStateBridge"
 local PetSellQuoteRemote = Remotes:FindFirstChild("PetSellQuote")
 if not PetSellQuoteRemote or not PetSellQuoteRemote:IsA("RemoteFunction") then
 	PetSellQuoteRemote = Instance.new("RemoteFunction")
@@ -91,6 +93,30 @@ local function canSellPetFromSource(player, options)
 		return true
 	end
 	return canDeleteFromSellRing(player)
+end
+
+local function isPetCurrentlySpawnedForPlayer(player, petFolder)
+	if not player or not petFolder then return false end
+
+
+	local uidValue = petFolder:FindFirstChild("PetUID")
+	local uid = uidValue and tostring(uidValue.Value) or ""
+	if uid == "" then return false end
+
+	local runtimeBridge = ReplicatedStorage:FindFirstChild(PetRuntimeStateBridgeName)
+	if runtimeBridge and runtimeBridge:IsA("BindableFunction") then
+		local ok, state = pcall(function()
+			return runtimeBridge:Invoke(player, uid)
+		end)
+		if ok and type(state) == "table" then
+			local location = tostring(state.location or "")
+			if state.wild == true then
+				return true
+			end
+			return (location == "free" or location == "petground" or location == "player_wild" or location == "player")
+		end
+	end
+	return false
 end
 
 local function getToysFolder(player)
@@ -478,6 +504,7 @@ end
 local function calculatePetSellPrice(player, petFolder, options)
 	if not player or not petFolder then return 0 end
 	if not canSellPetFromSource(player, options) then return 0 end
+	if isPetCurrentlySpawnedForPlayer(player, petFolder) then return 0 end
 
 	local petTemplate = resolvePetTemplate(petFolder)
 	local basePrice = resolveSellBasePrice(petFolder, petTemplate)
@@ -747,7 +774,10 @@ Remotes.Pet.OnServerEvent:Connect(function(Player, Action, Parameter)
 			if not canDeleteFromSellRing(Player) then return end
 			DeleteAction(Player, Pet)
 		elseif Action == "Sell" then
-			SellAction(Player, Pet, { allowOffRing = true, source = "SellUI" })
+			local payout = SellAction(Player, Pet, { allowOffRing = true, source = "SellUI" })
+			if (not payout or payout <= 0) and GameNotificationEvent and GameNotificationEvent:IsA("RemoteEvent") then
+				GameNotificationEvent:FireClient(Player, "error", "❌ You can't sell wandering pets.")
+			end
 		end
 
 		disableAllEquipsForPlayer(Player)
@@ -1141,7 +1171,7 @@ local function grantGemUpgradeLevels(player, upgradeName, amount)
 end
 
 Remotes.GemUpgrade.OnServerEvent:Connect(function(player, upgradeName, purchaseCount)
-	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end	
 	buyGemUpgrade(player, upgradeName, purchaseCount or 1)
 end)
 
