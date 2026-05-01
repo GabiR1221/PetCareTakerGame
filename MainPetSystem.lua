@@ -49,6 +49,7 @@ local PetGamepassGrantBridgeName = "PetGamepassGrantBridge"
 local PetSellBridgeName = "PetSellBridge"
 local PetSellRequestBridgeName = "PetSellRequestBridge"
 local PetInventoryAdoptionBridgeName = "PetInventoryAdoptionBridge"
+local PetRuntimeStateBridgeName = "PetRuntimeStateBridge"
 -- Configuration
 local SHOWER_HOLD_TIME = 3
 local PICKUP_PROMPT_MAX_DISTANCE = 6
@@ -998,7 +999,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData99", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData100", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1104,6 +1105,33 @@ workspace.DescendantAdded:Connect(function(descendant)
 		connectSellPrompt(descendant, petSellRequestBridge)
 	end
 end)
+
+local petRuntimeStateBridge = ReplicatedStorage:FindFirstChild(PetRuntimeStateBridgeName)
+if not petRuntimeStateBridge or not petRuntimeStateBridge:IsA("BindableFunction") then
+	petRuntimeStateBridge = Instance.new("BindableFunction")
+	petRuntimeStateBridge.Name = PetRuntimeStateBridgeName
+	petRuntimeStateBridge.Parent = ReplicatedStorage
+end
+
+petRuntimeStateBridge.OnInvoke = function(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then
+		return nil
+	end
+
+	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
+	if not petModel or not state then
+		return nil
+	end
+	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
+		return nil
+	end
+
+	return {
+		location = tostring(state.location or ""),
+		wild = state.wild == true,
+	}
+end
+
 task.spawn(function()
 	while not (petSellRequestBridge and petSellRequestBridge:IsA("BindableFunction")) do
 		petSellRequestBridge = ReplicatedStorage:FindFirstChild(PetSellRequestBridgeName)
