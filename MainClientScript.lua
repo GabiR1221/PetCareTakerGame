@@ -899,6 +899,11 @@ local CanDeletePets = false
 local CachedPetStateByKey = {}
 local SellSlotByPetId = {}
 local OpenSellFramePetId = nil
+local InventorySlotByPetId = {}
+local SellUiState = {
+	multiSelling = false,
+	selected = {},
+}
 
 local function getPetTemplate(petInstance)
 	if not petInstance then return nil end
@@ -1236,12 +1241,24 @@ local function getPetUidFromFolder(petFolder)
 	return uid
 end
 
+local getCachedStateForPetFolder
 
 function SortInventory(SortTable, ObjectHolder)
 	local TableToSort = SortTable ~= nil and SortTable or PetInventory -- so it can differentiate between trade and normal inventories
 
 	table.sort(TableToSort, function(a,b)
 		if not a or not b then return end
+		local aPet = Data.Pets:FindFirstChild(tostring(a.ID))
+		local bPet = Data.Pets:FindFirstChild(tostring(b.ID))
+		local aState = aPet and getCachedStateForPetFolder(aPet) or nil
+		local bState = bPet and getCachedStateForPetFolder(bPet) or nil
+		local aLocation = aState and tostring(aState.location or "") or ""
+		local bLocation = bState and tostring(bState.location or "") or ""
+		local aWandering = (aLocation == "free" or aLocation == "petground" or aLocation == "player" or aLocation == "player_wild")
+		local bWandering = (bLocation == "free" or bLocation == "petground" or bLocation == "player" or bLocation == "player_wild")
+		if aWandering ~= bWandering then
+			return aWandering == true
+		end
 
 		if a.Multiplier ~= b.Multiplier then
 			return a.Multiplier > b.Multiplier
@@ -1378,7 +1395,7 @@ findSideFrameObject = function(name)
 	return SideFrame:FindFirstChild(name) or findDescendantByNameInsensitive(SideFrame, name)
 end
 
-local function getCachedStateForPetFolder(petFolder)
+getCachedStateForPetFolder = function(petFolder)
 	if not petFolder then return nil end
 	local petId = tostring(petFolder.Name)
 	local petName = petFolder:FindFirstChild("PetName") and petFolder.PetName.Value or nil
@@ -1468,6 +1485,47 @@ local function closeAllSellFrames(exceptPetId)
 	end
 end
 
+local function setMultiSellMark(slotFrame, selected)
+	if not slotFrame then return end
+	local marker = slotFrame:FindFirstChild("MultiSellMark")
+	if not marker then
+		marker = Instance.new("TextLabel")
+		marker.Name = "MultiSellMark"
+		marker.AnchorPoint = Vector2.new(1, 0)
+		marker.Position = UDim2.new(1, -6, 0, 6)
+		marker.Size = UDim2.new(0, 24, 0, 24)
+		marker.BackgroundColor3 = Color3.fromRGB(206, 47, 47)
+		marker.BackgroundTransparency = 0.1
+		marker.TextScaled = true
+		marker.Font = Enum.Font.GothamBlack
+		marker.TextColor3 = Color3.fromRGB(255, 255, 255)
+		marker.Text = "X"
+		marker.Visible = false
+		marker.Parent = slotFrame
+	end
+	marker.Visible = selected == true
+end
+
+local function updateSellBlockedVisual(petFolder, slotFrame)
+	if not petFolder or not slotFrame then return end
+	local cachedState = getCachedStateForPetFolder(petFolder)
+	local location = cachedState and tostring(cachedState.location or "") or ""
+	local isBlocked = (location == "free" or location == "petground" or location == "player" or location == "player_wild")
+
+	local overlay = slotFrame:FindFirstChild("SellBlockedOverlay")
+	if not overlay then
+		overlay = Instance.new("Frame")
+		overlay.Name = "SellBlockedOverlay"
+		overlay.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		overlay.BackgroundTransparency = 0.35
+		overlay.BorderSizePixel = 0
+		overlay.Size = UDim2.fromScale(1, 1)
+		overlay.ZIndex = 7
+		overlay.Visible = false
+		overlay.Parent = slotFrame
+	end
+	overlay.Visible = isBlocked == true
+end
 
 function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 	task.wait(0.1)
@@ -1518,7 +1576,10 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 	NewPet.Name = PetInstance.Name
 	NewPet.Parent = Parent == nil and PetFrame.MainFrame.ObjectHolder or Parent
 	
-	if Parent == SellObjectHolder then
+	if Parent == nil then
+		InventorySlotByPetId[PetInstance.Name] = NewPet
+		updateSellBlockedVisual(PetInstance, NewPet)
+	elseif Parent == SellObjectHolder then
 		SellSlotByPetId[PetInstance.Name] = NewPet
 		closeAllSellFrames()
 
@@ -1527,8 +1588,23 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 			sellFrame.Visible = false
 		end
 		updateSellSlotText(PetInstance, NewPet)
+		updateSellBlockedVisual(PetInstance, NewPet)
+		setMultiSellMark(NewPet, false)
 
 		NewPet.Button.MouseButton1Click:Connect(function()
+			if SellUiState.multiSelling then
+				local petId = tostring(PetInstance.Name)
+				if SellUiState.selected[petId] then
+					SellUiState.selected[petId] = nil
+					setMultiSellMark(NewPet, false)
+				else
+					SellUiState.selected[petId] = true
+					setMultiSellMark(NewPet, true)
+				end
+				Utilities.Audio.PlayAudio("Click")
+				return
+			end
+			
 			local myPetId = tostring(PetInstance.Name)
 			local shouldOpen = OpenSellFramePetId ~= myPetId
 			closeAllSellFrames(myPetId)
@@ -1543,6 +1619,12 @@ function AddPet(PetInstance, SortTable, Parent) -- Creates a pet slot
 
 		if sellButton and sellButton:IsA("GuiButton") then
 			sellButton.MouseButton1Click:Connect(function()
+				local quotedPrice = requestSellPriceFromServer(tostring(PetInstance.Name))
+				if quotedPrice <= 0 then
+					notifyPlayer("error", "❌ You can't sell wandering/dropped pets. Pick them up first.")
+					Utilities.Audio.PlayAudio("Click")
+					return
+				end
 				Remotes.Pet:FireServer("Sell", tonumber(PetInstance.Name))
 				Utilities.Audio.PlayAudio("Click")
 			end)
@@ -1742,6 +1824,7 @@ function OnPetRemoved(Child)
 		SellObjectHolder[Child.Name]:Destroy()
 	end
 	SellSlotByPetId[Child.Name] = nil
+	InventorySlotByPetId[Child.Name] = nil
 	if OpenSellFramePetId == tostring(Child.Name) then
 		OpenSellFramePetId = nil
 	end
@@ -1766,6 +1849,52 @@ if SellObjectHolder then
 	end)()
 end
 
+do
+	local multipleSellButton = SellShopFrame and SellShopFrame:FindFirstChild("MultipleSell")
+	local sellSelectedPetsButton = SellShopFrame and SellShopFrame:FindFirstChild("SellSelectedPets")
+
+	if multipleSellButton and multipleSellButton:IsA("GuiButton") then
+		multipleSellButton.MouseButton1Click:Connect(function()
+			SellUiState.multiSelling = not SellUiState.multiSelling
+			SellUiState.selected = {}
+			multipleSellButton.Text = SellUiState.multiSelling and "Undo" or "Multiple Sell"
+			if sellSelectedPetsButton then
+				sellSelectedPetsButton.Visible = SellUiState.multiSelling
+			end
+			for _, slot in pairs(SellSlotByPetId) do
+				setMultiSellMark(slot, false)
+			end
+			Utilities.Audio.PlayAudio("Click")
+		end)
+	end
+
+	if sellSelectedPetsButton and sellSelectedPetsButton:IsA("GuiButton") then
+		sellSelectedPetsButton.Visible = false
+		sellSelectedPetsButton.MouseButton1Click:Connect(function()
+			local soldAny = false
+			for petId, _ in pairs(SellUiState.selected) do
+				local quotedPrice = requestSellPriceFromServer(petId)
+				if quotedPrice > 0 then
+					Remotes.Pet:FireServer("Sell", tonumber(petId))
+					soldAny = true
+				end
+			end
+			if not soldAny then
+				notifyPlayer("error", "❌ No sellable pets selected.")
+			end
+			SellUiState.multiSelling = false
+			SellUiState.selected = {}
+			if multipleSellButton then
+				multipleSellButton.Text = "Multiple Sell"
+			end
+			sellSelectedPetsButton.Visible = false
+			for _, slot in pairs(SellSlotByPetId) do
+				setMultiSellMark(slot, false)
+			end
+			Utilities.Audio.PlayAudio("Click")
+		end)
+	end
+end
 
 Player.NonSaveValues.PetsEquipped.Changed:Connect(UpdateCounters) -- if player equips a pet
 
@@ -1811,9 +1940,18 @@ if PetStateEvent then
 			local sellSlot = SellSlotByPetId[payloadInventoryId]
 			if petFolder and sellSlot then
 				updateSellSlotText(petFolder, sellSlot)
+				updateSellBlockedVisual(petFolder, sellSlot)
+			end
+			local inventorySlot = InventorySlotByPetId[payloadInventoryId]
+			if petFolder and inventorySlot then
+				updateSellBlockedVisual(petFolder, inventorySlot)
 			end
 		end
 
+		SortInventory()
+		if SellObjectHolder then
+			SortInventory(nil, SellObjectHolder)
+		end
 		local selectedPetId, selectedPetName, selectedPetUid = getSelectedPetKeys()
 		if not selectedPetId then return end
 		
