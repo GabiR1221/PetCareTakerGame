@@ -98,10 +98,21 @@ end
 local function isPetCurrentlySpawnedForPlayer(player, petFolder)
 	if not player or not petFolder then return false end
 
+	local mirroredLocation = petFolder:FindFirstChild("RuntimeLocation")
+	local mirroredLocationName = mirroredLocation and tostring(mirroredLocation.Value or "") or ""
+	if mirroredLocationName == "free" or mirroredLocationName == "petground" or mirroredLocationName == "player_wild" or mirroredLocationName == "player" then
+		return true
+	end
 
 	local uidValue = petFolder:FindFirstChild("PetUID")
 	local uid = uidValue and tostring(uidValue.Value) or ""
-	if uid == "" then return false end
+	if uid == "" then
+		if player:GetAttribute("OwnedPetsRuntimeReady") ~= true then
+			return true
+		end
+		return false
+	end
+
 
 	local runtimeBridge = ReplicatedStorage:FindFirstChild(PetRuntimeStateBridgeName)
 	if runtimeBridge and runtimeBridge:IsA("BindableFunction") then
@@ -115,6 +126,10 @@ local function isPetCurrentlySpawnedForPlayer(player, petFolder)
 			end
 			return (location == "free" or location == "petground" or location == "player_wild" or location == "player")
 		end
+	end
+
+	if player:GetAttribute("OwnedPetsRuntimeReady") ~= true then
+		return true
 	end
 	return false
 end
