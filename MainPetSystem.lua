@@ -194,6 +194,22 @@ local function resolveInventoryPetIdByPetName(player, petName)
 	return nil
 end
 
+local function setInventoryRuntimeLocation(player, inventoryPetId, location)
+	if not player or not inventoryPetId then return end
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	local inventoryPet = petsFolder and petsFolder:FindFirstChild(tostring(inventoryPetId))
+	if not inventoryPet then return end
+
+	local runtimeLocation = inventoryPet:FindFirstChild("RuntimeLocation")
+	if not runtimeLocation then
+		runtimeLocation = Instance.new("StringValue")
+		runtimeLocation.Name = "RuntimeLocation"
+		runtimeLocation.Parent = inventoryPet
+	end
+	runtimeLocation.Value = tostring(location or "")
+end
+
 local function getNotificationEvent()
 	local ev = ReplicatedStorage:FindFirstChild(GAME_NOTIFICATION_EVENT_NAME)
 	if ev and ev:IsA("RemoteEvent") then
@@ -999,7 +1015,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData100", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData102", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1240,6 +1256,7 @@ task.spawn(function()
 end)
 
 Players.PlayerAdded:Connect(function(player)
+	player:SetAttribute("OwnedPetsRuntimeReady", false)
 	player.CharacterAdded:Connect(function(character)
 		setCharacterCollisionGroup(character, "Players")
 		character.DescendantAdded:Connect(function(desc)
@@ -1264,12 +1281,45 @@ Players.PlayerAdded:Connect(function(player)
 			end
 		end
 		WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
+		local data = player:FindFirstChild("Data")
+		local petsFolder = data and data:FindFirstChild("Pets")
+		local inventoryIdsByName = {}
+		if petsFolder then
+			for _, petFolder in ipairs(petsFolder:GetChildren()) do
+				local petNameValue = petFolder:FindFirstChild("PetName")
+				local petName = petNameValue and tostring(petNameValue.Value) or ""
+				if petName ~= "" then
+					inventoryIdsByName[petName] = inventoryIdsByName[petName] or {}
+					table.insert(inventoryIdsByName[petName], tostring(petFolder.Name))
+				end
+			end
+		end
+		for _, petInfo in ipairs(petData) do
+			if type(petInfo) == "table" then
+				local petUid = tostring(petInfo.petUid or "")
+				local inventoryPetId = petUid ~= "" and resolveInventoryPetIdByUid(player, petUid) or nil
+				if not inventoryPetId then
+					local modelName = tostring(petInfo.modelName or "")
+					local idsForName = inventoryIdsByName[modelName]
+					if idsForName and #idsForName > 0 then
+						inventoryPetId = table.remove(idsForName, 1)
+					end
+				end
+				if inventoryPetId then
+					setInventoryRuntimeLocation(player, inventoryPetId, petInfo.location)
+				end
+			end
+		end
+		player:SetAttribute("OwnedPetsRuntimeReady", true)
 		if ENABLE_PET_PICKUP_TOOLS then
 			restoreInventoryPetToolsForPlayer(player)
 		end
 		task.defer(function()
 			AccessoryManager:RestoreAccessoriesForPlayer(player.UserId)
 		end)
+	end
+	if player:GetAttribute("OwnedPetsRuntimeReady") ~= true then
+		player:SetAttribute("OwnedPetsRuntimeReady", true)
 	end
 end)
 
