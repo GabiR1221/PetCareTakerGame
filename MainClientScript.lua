@@ -642,8 +642,8 @@ local function getShopSectionsButtonMap(shopFrame)
 			local sectionName = button.Name:gsub("Button$", "")
 			local sectionKey = sectionToKey(sectionName)
 			result[sectionKey] = button
-			if sectionKey == "codesbutton" then
-				result["codes"] = button
+			if sectionKey == "Codes" then
+				result["Codes"] = button
 			end
 		end
 	end
@@ -1509,20 +1509,40 @@ end
 local function updateSellBlockedVisual(petFolder, slotFrame)
 	if not petFolder or not slotFrame then return end
 	local cachedState = getCachedStateForPetFolder(petFolder)
-	local location = cachedState and tostring(cachedState.location or "") or ""
-	local isBlocked = (location == "free" or location == "petground" or location == "player" or location == "player_wild")
+	local runtimeLocationValue = petFolder:FindFirstChild("RuntimeLocation")
+	local cachedLocation = (cachedState and cachedState.location ~= nil) and tostring(cachedState.location) or ""
+	local location = cachedLocation ~= ""
+		and cachedLocation
+		or ((runtimeLocationValue and tostring(runtimeLocationValue.Value or "")) or "")
+	local blockedLocations = {free = true, petground = true, player = true, player_wild = true, wandering = true}
+	local isBlocked = blockedLocations[location] == true
 
 	local overlay = slotFrame:FindFirstChild("SellBlockedOverlay")
 	if not overlay then
 		overlay = Instance.new("Frame")
 		overlay.Name = "SellBlockedOverlay"
-		overlay.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-		overlay.BackgroundTransparency = 0.35
+		overlay.BackgroundColor3 = Color3.fromRGB(20, 24, 35)
+		overlay.BackgroundTransparency = 0.2
 		overlay.BorderSizePixel = 0
 		overlay.Size = UDim2.fromScale(1, 1)
-		overlay.ZIndex = 7
+		overlay.ZIndex = 50
 		overlay.Visible = false
 		overlay.Parent = slotFrame
+		
+		local badge = Instance.new("TextLabel")
+		badge.Name = "StateBadge"
+		badge.AnchorPoint = Vector2.new(0.5, 1)
+		badge.Position = UDim2.fromScale(0.5, 0.98)
+		badge.Size = UDim2.fromOffset(110, 20)
+		badge.BackgroundColor3 = Color3.fromRGB(236, 120, 64)
+		badge.BackgroundTransparency = 0.05
+		badge.BorderSizePixel = 0
+		badge.Text = "WANDERING"
+		badge.Font = Enum.Font.GothamBold
+		badge.TextSize = 12
+		badge.TextColor3 = Color3.fromRGB(255, 255, 255)
+		badge.ZIndex = 51
+		badge.Parent = overlay
 	end
 	overlay.Visible = isBlocked == true
 end
