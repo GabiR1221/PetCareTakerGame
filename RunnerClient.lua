@@ -208,6 +208,21 @@ local function setGameUiSprinting(active)
 	local playerGui = player:FindFirstChild("PlayerGui")
 	local gameUi = playerGui and playerGui:FindFirstChild("GameUI")
 	if not gameUi then return end
+	
+	local blur = gameUi:FindFirstChild("Blur")
+	if active then
+		hiddenUiState.__blurVisible = blur and blur:IsA("GuiObject") and blur.Visible or false
+		hiddenUiState.__blurTransparency = blur and blur:IsA("GuiObject") and blur.BackgroundTransparency or nil
+		if blur and blur:IsA("GuiObject") then
+			blur.Visible = false
+			blur.BackgroundTransparency = 1
+		end
+	elseif blur and blur:IsA("GuiObject") then
+		blur.Visible = false
+		blur.BackgroundTransparency = 1
+		hiddenUiState.__blurVisible = nil
+		hiddenUiState.__blurTransparency = nil
+	end
 
 	local function setContainerVisible(containerName)
 		local container = gameUi:FindFirstChild(containerName)
@@ -218,16 +233,25 @@ local function setGameUiSprinting(active)
 			for _, child in ipairs(container:GetChildren()) do
 				if child:IsA("GuiObject") and child.Visible then
 					hiddenUiState[containerName][child] = true
+					if containerName == "Frames" and child:IsA("Frame") then
+						local closeSize = child.Size - UDim2.fromScale(0.15, 0.15)
+						child:TweenSize(closeSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.1, true)
+						task.wait(0.04)
+					end
 					child.Visible = false
 				end
 			end
 		else
-			for child in pairs(hiddenUiState[containerName] or {}) do
-				if child and child.Parent == container then
-					child.Visible = true
+			if containerName == "Frames" then
+				hiddenUiState[containerName] = {}
+			else
+				for child in pairs(hiddenUiState[containerName] or {}) do
+					if child and child.Parent == container then
+						child.Visible = true
+					end
 				end
+				hiddenUiState[containerName] = {}
 			end
-			hiddenUiState[containerName] = {}
 		end
 	end
 
