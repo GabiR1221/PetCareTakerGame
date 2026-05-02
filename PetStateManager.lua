@@ -24,6 +24,24 @@ local function resolveInventoryPetIdByUid(player, petUid)
 	return nil
 end
 
+local function resolveInventoryPetIdByNameUnique(player, petName)
+	if not player or type(petName) ~= "string" or petName == "" then return nil end
+	local data = player:FindFirstChild("Data")
+	local pets = data and data:FindFirstChild("Pets")
+	if not pets then return nil end
+
+	local foundId = nil
+	for _, petFolder in ipairs(pets:GetChildren()) do
+		local petNameValue = petFolder:FindFirstChild("PetName")
+		if petNameValue and tostring(petNameValue.Value) == petName then
+			if foundId ~= nil then
+				return nil
+			end
+			foundId = tostring(petFolder.Name)
+		end
+	end
+	return foundId
+end
 
 function PetStateManager:Initialize(stateTable, petStateEvent, carryingTable)
 	self.petState = stateTable or {}
@@ -173,6 +191,7 @@ function PetStateManager:SendStateToOwner(petModel)
 		happinessMax = self:GetPetStatMax(petModel, "happiness", st),
 		hunger = tonumber(st.hunger) or 100,
 		happiness = tonumber(st.happiness) or 100,
+		location = tostring(st.location or ""),
 		petName = tostring(petModel.Name),
 		petUid = tostring(st.petUid or petModel:GetAttribute("PetUID") or ""),
 		inventoryPetId = nil,
@@ -187,6 +206,9 @@ function PetStateManager:SendStateToOwner(petModel)
 		st.petUid = payload.petUid
 	end
 	payload.inventoryPetId = resolveInventoryPetIdByUid(player, payload.petUid)
+	if not payload.inventoryPetId then
+		payload.inventoryPetId = resolveInventoryPetIdByNameUnique(player, payload.petName)
+	end
 	if payload.inventoryPetId then
 		local data = player:FindFirstChild("Data")
 		local petsFolder = data and data:FindFirstChild("Pets")
@@ -207,6 +229,24 @@ function PetStateManager:SendStateToOwner(petModel)
 				xpValue.Parent = inventoryPet
 			end
 			xpValue.Value = xp
+			
+			local uidValue = inventoryPet:FindFirstChild("PetUID")
+			if not uidValue then
+				uidValue = Instance.new("StringValue")
+				uidValue.Name = "PetUID"
+				uidValue.Parent = inventoryPet
+			end
+			if payload.petUid ~= "" then
+				uidValue.Value = payload.petUid
+			end
+			
+			local runtimeLocation = inventoryPet:FindFirstChild("RuntimeLocation")
+			if not runtimeLocation then
+				runtimeLocation = Instance.new("StringValue")
+				runtimeLocation.Name = "RuntimeLocation"
+				runtimeLocation.Parent = inventoryPet
+			end
+			runtimeLocation.Value = payload.location
 		end
 	end
 
