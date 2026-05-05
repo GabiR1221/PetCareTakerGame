@@ -40,6 +40,13 @@ local staminaFrame = gui:FindFirstChild("RunnerStaminaFrame", true)
 local staminaFill = staminaFrame and staminaFrame:FindFirstChild("RunnerStaminaFill", true)
 local staminaLabel = staminaFrame and staminaFrame:FindFirstChild("RunnerStaminaLabel", true)
 
+local gameUi = player:WaitForChild("PlayerGui"):FindFirstChild("GameUI")
+local framesRoot = gameUi and gameUi:FindFirstChild("Frames")
+local pendingCasesFrame = (gameUi and gameUi:FindFirstChild("PendingCases")) or (framesRoot and framesRoot:FindFirstChild("PendingCases"))
+local pendingTemplate = pendingCasesFrame and pendingCasesFrame:FindFirstChild("Template")
+local caseHatchRemote = ReplicatedStorage:FindFirstChild("CaseHatchEvent")
+local pendingCasesDefaultSize = pendingCasesFrame and pendingCasesFrame.Size or nil
+
 if not jumpButton or not jumpButton:IsA("GuiButton") then
 	warn("[RunnerClient] Missing RunnerJumpButton (GuiButton) in RunnerGui.")
 	return
@@ -63,6 +70,7 @@ end
 
 gui.Enabled = false
 staminaFrame.Visible = false
+if pendingCasesFrame then pendingCasesFrame.Visible = false end
 
 local runnerActive = false
 local jumpingNow = false
@@ -358,8 +366,52 @@ goBackButton.Activated:Connect(function()
 	actionRemote:FireServer("GoBack")
 end)
 
+local pendingEntries = {}
+
+local function renderPendingCases()
+	if not pendingCasesFrame or not pendingTemplate then return end
+	for _, child in ipairs(pendingCasesFrame:GetChildren()) do
+		if child:IsA("Frame") and child ~= pendingTemplate then child:Destroy() end
+	end
+	pendingTemplate.Visible = false
+	pendingCasesFrame.Visible = (#pendingEntries > 0)
+	for _, entry in ipairs(pendingEntries) do
+		local card = pendingTemplate:Clone()
+		card.Name = entry.id
+		card.Visible = true
+		card.Parent = pendingCasesFrame
+		local image = card:FindFirstChildWhichIsA("ImageLabel", true)
+		if image and entry.image and entry.image ~= "" then image.Image = entry.image end
+		local btn = card:FindFirstChild("ClaimButton", true)
+		if btn and btn:IsA("GuiButton") then
+			btn.MouseButton1Click:Connect(function()
+				actionRemote:FireServer("ClaimPendingCase", entry.id)
+			end)
+		end
+	end
+end
+
+local function refreshPendingCasesVisibility()
+	if not pendingCasesFrame then return end
+	if pendingCasesDefaultSize then
+		pendingCasesFrame.Size = pendingCasesDefaultSize
+	end
+	-- Keep hidden during sprint HUD state changes; the pending list is for out-of-run claiming.
+	if runnerActive then
+		pendingCasesFrame.Visible = false
+		return
+	end
+	pendingCasesFrame.Visible = (#pendingEntries > 0)
+end
+
 stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
-	if action == "RunnerState" then
+	if action == "PendingCasesUpdate" then
+		pendingEntries = (typeof(enabled) == "table" and enabled) or ((typeof(payload) == "table" and payload) or {})
+		renderPendingCases()
+		refreshPendingCasesVisibility()
+	elseif action == "CaseClaimResult" then
+		-- animation is handled by MainClientScript via CaseHatchEvent
+	elseif action == "RunnerState" then
 		runnerActive = enabled == true
 		gui.Enabled = runnerActive
 		staminaFrame.Visible = runnerActive
@@ -378,9 +430,9 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 			renderStamina(false)
 			updateControlsLocked()
 			restoreRunnerCamera()
+			refreshPendingCasesVisibility()
 			return
 		end
-
 		staminaCurrent = (payload and payload.currentStamina) or staminaMax
 		staminaMax = (payload and payload.maxStamina) or staminaMax
 		exhaustedNow = false
@@ -618,6 +670,15 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 	end
 end)
 
+if pendingCasesFrame then
+	pendingCasesFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+		-- If another UI flow hides this frame, restore it when it should be visible.
+		if not runnerActive and #pendingEntries > 0 and pendingCasesFrame.Visible == false then
+			task.defer(refreshPendingCasesVisibility)
+		end
+	end)
+end
+
 petInteractionUiRemote.OnClientEvent:Connect(function(hidden)
 	petInteractionUiHidden = hidden == true
 	refreshGameUiSuppression()
@@ -628,3 +689,9 @@ player.CharacterAdded:Connect(function()
 		task.defer(setRunnerCameraToHead)
 	end
 end)
+
+-- In case server sent PendingCasesUpdate before this LocalScript bound events, request a fresh sync.
+task.defer(function()
+	actionRemote:FireServer("RequestPendingCasesSync")
+end)
+
