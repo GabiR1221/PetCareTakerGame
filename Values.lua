@@ -31,6 +31,7 @@ return {
 			{Name = "GemUpgrade3", Value = 0, ID = 7, Type = "IntValue"},
 			{Name = "GemUpgrade4", Value = 0, ID = 8, Type = "IntValue"},
 			{Name = "ToyInventoryJson", Value = "", ID = 11, Type = "StringValue"},
+			{Name = "PendingCasesJson", Value = "", ID = 16, Type = "StringValue"},
 		},
 		
 		["Gamepasses"] = {
@@ -43,6 +44,9 @@ return {
 			{Name = "AutoEgg", Value = false, ID = 7, Type = "BoolValue"},
 			{Name = "Cameleon", Value = false, ID = 8, Type = "BoolValue"},
 			{Name = "PremiumPass", Value = false, ID = 9, Type = "BoolValue"},
+			{Name = "StaminaBuy", Value = false, ID = 10, Type = "BoolValue"},
+			{Name = "StaminaBuy2", Value = false, ID = 11, Type = "BoolValue"},
+			{Name = "ODIN", Value = false, ID = 12, Type = "BoolValue"},
 		}
 	},
 	
