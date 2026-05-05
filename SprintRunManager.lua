@@ -3,6 +3,8 @@ local SprintRunManager = {}
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
+local ServerStorage = game:GetService("ServerStorage")
+local HttpService = game:GetService("HttpService")
 
 local START_LINE_TAG = "PetRunStartLine"
 local START_LINE_NAME = "PetRunStartLine"
@@ -10,6 +12,8 @@ local OBSTACLE_ZONE_TAG = "WildPetZone"
 local OBSTACLE_ZONE_NAME = "WildPetZonePart"
 local BREAK_WALL_TAG = "RunnerBreakWall"
 local BREAK_WALL_NAME = "RunnerBreakWall"
+local WILD_PET_SPAWN_AREA_TAG = "WildPetSpawnArea"
+local LEGACY_WILD_PET_ZONE_TAG = "WildPetZone"
 
 local RUN_SPEED = 28
 local DEFAULT_WALK_SPEED = 16
@@ -40,6 +44,109 @@ local WALL_BREAK_DEFAULT_STOP_DISTANCE = 1.8
 local WALL_BREAK_APPROACH_SPEED_MULTIPLIER = 1
 local WALL_BREAK_KNOCKBACK_SPEED = 34
 local WALL_BREAK_COOLDOWN = 0.4
+
+local WILD_CASES_FOLDER_NAME = "WildCases"
+local DEFAULT_CASE_EGG = "Starter"
+local MAX_PENDING_CASES = 40
+local CASE_RESPAWN_INTERVAL = 15
+local MAX_LIVE_CASES = 24
+
+local function chooseRandomCaseReward(eggName, luckMultiplier)
+	luckMultiplier = tonumber(luckMultiplier) or 1
+	local eggs = ReplicatedStorage:FindFirstChild("Eggs")
+	local eggInfo = eggs and eggs:FindFirstChild(tostring(eggName or ""))
+	if not eggInfo then return nil, nil end
+	local dropsFolder = eggInfo:FindFirstChild("Pets") or eggInfo:FindFirstChild("Items")
+	if not dropsFolder then return nil, nil end
+
+	local entries, total = {}, 0
+	for _, drop in ipairs(dropsFolder:GetChildren()) do
+		local weight = tonumber(drop.Value) or 0
+		if weight > 0 then
+			local itemType = drop:GetAttribute("ItemType") or ((drop:FindFirstChild("ItemType") and drop.ItemType.Value) or "Toy")
+			local adjusted = weight * luckMultiplier
+			table.insert(entries, {name = drop.Name, weight = adjusted, itemType = tostring(itemType)})
+			total += adjusted
+		end
+	end
+	if total <= 0 then return nil, nil end
+	local pick = Random.new():NextNumber(0, total)
+	local run = 0
+	for _, e in ipairs(entries) do
+		run += e.weight
+		if run >= pick then return e.name, e.itemType end
+	end
+	local last = entries[#entries]
+	return last and last.name, last and last.itemType
+end
+
+local function resolveInventoryItemType(itemName, hintedType)
+	local hint = tostring(hintedType or "")
+	if string.lower(hint) == "accessory" then hint = "Accessory" end
+	if string.lower(hint) == "toy" then hint = "Toy" end
+	if hint == "Toy" or hint == "Accessory" then
+		return hint
+	end
+
+	local accessoriesRoot = ReplicatedStorage:FindFirstChild("Accessories")
+	if accessoriesRoot and itemName and accessoriesRoot:FindFirstChild(tostring(itemName)) then
+		return "Accessory"
+	end
+
+	local toysRoot = ReplicatedStorage:FindFirstChild("Toys")
+	if toysRoot and itemName and toysRoot:FindFirstChild(tostring(itemName)) then
+		return "Toy"
+	end
+
+	return "Toy"
+end
+
+local function createInventoryItemLocal(player, itemNameText, itemTypeRaw)
+	if not player or type(itemNameText) ~= "string" or itemNameText == "" then return false end
+	local data = player:FindFirstChild("Data")
+	if not data then return false end
+	local folderName = tostring(itemTypeRaw) == "Accessory" and "Accessories" or "Toys"
+	local target = data:FindFirstChild(folderName)
+	if not target then
+		target = Instance.new("Folder")
+		target.Name = folderName
+		target.Parent = data
+	end
+
+	local newItem = Instance.new("Folder")
+	newItem.Name = tostring(os.time()) .. "_" .. tostring(math.random(1000, 999999))
+	newItem.Parent = target
+
+	local itemName = Instance.new("StringValue")
+	itemName.Name = "ItemName"
+	itemName.Value = itemNameText
+	itemName.Parent = newItem
+
+	local itemTypeValue = Instance.new("StringValue")
+	itemTypeValue.Name = "ItemType"
+	itemTypeValue.Value = tostring(itemTypeRaw or "Toy")
+	itemTypeValue.Parent = newItem
+
+	local equipped = Instance.new("BoolValue")
+	equipped.Name = "Equipped"
+	equipped.Value = false
+	equipped.Parent = newItem
+	return true
+end
+
+local function getPendingCasesJsonValue(player)
+	local data = player and player:FindFirstChild("Data")
+	local pd = data and data:FindFirstChild("PlayerData")
+	if not pd then return nil end
+	local v = pd:FindFirstChild("PendingCasesJson")
+	if not v then
+		v = Instance.new("StringValue")
+		v.Name = "PendingCasesJson"
+		v.Value = ""
+		v.Parent = pd
+	end
+	return v
+end
 
 local function getOrCreateRemote(name)
 	local remote = ReplicatedStorage:FindFirstChild(name)
@@ -130,9 +237,13 @@ function SprintRunManager:Initialize(playersService, wildPetManager)
 	self.liveObstacleFolder.Parent = workspace
 	self.gemShopFolder = ReplicatedStorage:FindFirstChild("GemShop")
 	self.obstacleTemplatesRoot = game:GetService("ServerStorage"):FindFirstChild("RunnerObstacleModels")
+	self.wildCaseTemplatesRoot = ServerStorage:FindFirstChild(WILD_CASES_FOLDER_NAME)
 
 	self.stateRemote = getOrCreateRemote("RunnerStateEvent")
 	self.actionRemote = getOrCreateRemote("RunnerActionEvent")
+	self.pendingCasesByUserId = {}
+	self.liveCasesByPart = {}
+	self.caseHatchRemote = getOrCreateRemote("CaseHatchEvent")
 
 	self:ScanStartLines()
 	self:ScanObstacleZones()
@@ -140,19 +251,49 @@ function SprintRunManager:Initialize(playersService, wildPetManager)
 	self:_connectRemotes()
 	self:_connectPlayers()
 	self:_startHeartbeat()
+	self:_startCaseSpawnLoop()
 	for _, player in ipairs(self.Players:GetPlayers()) do
 		player:SetAttribute("RunnerActive", false)
 	end
 end
 
+function SprintRunManager:_startCaseSpawnLoop()
+	task.spawn(function()
+		while true do
+			task.wait(CASE_RESPAWN_INTERVAL)
+			local liveCount = 0
+			for _, rec in pairs(self.liveCasesByPart) do
+				if rec and rec.instance and rec.instance.Parent then
+					liveCount += 1
+				end
+			end
+			if liveCount >= MAX_LIVE_CASES then
+				continue
+			end
+			self:SpawnRunnerCasesForPlayer(nil, math.max(1, math.min(3, MAX_LIVE_CASES - liveCount)))
+		end
+	end)
+end
+
 function SprintRunManager:_connectPlayers()
 	self.Players.PlayerRemoving:Connect(function(player)
 		self:StopRunning(player, false)
+		self:PersistPendingCases(player)
 		self.playerState[player] = nil
 	end)
 
 	self.Players.PlayerAdded:Connect(function(player)
 		player:SetAttribute("RunnerActive", false)
+		task.defer(function()
+			-- Data can still be hydrating from datastore; load pending cases after it settles.
+			local data = player:WaitForChild("Data", 15)
+			local playerData = data and data:WaitForChild("PlayerData", 15)
+			if playerData then
+				playerData:WaitForChild("PendingCasesJson", 15)
+			end
+			task.wait(2)
+			self:LoadPendingCases(player)
+		end)
 		player.CharacterRemoving:Connect(function()
 			self:StopRunning(player, false)
 		end)
@@ -160,7 +301,7 @@ function SprintRunManager:_connectPlayers()
 end
 
 function SprintRunManager:_connectRemotes()
-	self.actionRemote.OnServerEvent:Connect(function(player, action)
+	self.actionRemote.OnServerEvent:Connect(function(player, action, payload)
 		if action == "Jump" then
 			self:RequestJump(player)
 		elseif action == "GoBack" then
@@ -171,6 +312,13 @@ function SprintRunManager:_connectRemotes()
 			self:OnWallBreakAnimationEnded(player)
 		elseif action == "WallBreakFailMarker" then
 			self:OnWallBreakFailMarker(player)
+		elseif action == "ClaimPendingCase" then
+			self:ClaimPendingCase(player, tostring(payload))
+		elseif action == "RequestPendingCasesSync" then
+			if self.pendingCasesByUserId[player.UserId] == nil then
+				self:LoadPendingCases(player)
+			end
+			self.stateRemote:FireClient(player, "PendingCasesUpdate", self.pendingCasesByUserId[player.UserId] or {})
 		end
 	end)
 end
@@ -1226,6 +1374,7 @@ function SprintRunManager:StartRunning(player, startLine)
 	hum.WalkSpeed = state.runSpeed
 	hum.AutoRotate = true
 	self:_createCatchHitbox(player)
+	self:SpawnRunnerCasesForPlayer(player, 4)
 
 	self.stateRemote:FireClient(player, "RunnerState", true, {
 		runAnimationId = startLine and startLine:GetAttribute("RunAnimationId") or nil,
@@ -1319,6 +1468,197 @@ function SprintRunManager:RequestJump(player)
 	})
 end
 
+function SprintRunManager:PersistPendingCases(player)
+	local list = self.pendingCasesByUserId[player.UserId] or {}
+	local jsonValue = getPendingCasesJsonValue(player)
+	if not jsonValue then return end
+	local ok, encoded = pcall(function() return HttpService:JSONEncode(list) end)
+	jsonValue.Value = ok and encoded or "[]"
+end
+
+function SprintRunManager:LoadPendingCases(player)
+	local jsonValue = getPendingCasesJsonValue(player)
+	if not jsonValue then return end
+	local decoded = {}
+	if jsonValue.Value ~= "" then
+		local ok, data = pcall(function() return HttpService:JSONDecode(jsonValue.Value) end)
+		if ok and type(data) == "table" then decoded = data end
+	end
+	self.pendingCasesByUserId[player.UserId] = decoded
+	self.stateRemote:FireClient(player, "PendingCasesUpdate", decoded)
+end
+
+function SprintRunManager:_extractZoneIdFromName(zoneFolderName)
+	local num = tostring(zoneFolderName or ""):match("%d+")
+	return tonumber(num)
+end
+
+function SprintRunManager:_resolveZoneIdFromValue(raw)
+	if raw == nil then return nil end
+	if type(raw) == "number" then
+		return tonumber(raw)
+	end
+	local asText = tostring(raw)
+	return tonumber(asText) or tonumber(asText:match("%d+"))
+end
+
+function SprintRunManager:_getCaseTemplatesForZoneId(zoneId)
+	if not self.wildCaseTemplatesRoot then return {} end
+	local candidates = {}
+	local rootLevelFallback = {}
+	local allZoned = {}
+	for _, child in ipairs(self.wildCaseTemplatesRoot:GetChildren()) do
+		if child:IsA("Folder") then
+			local folderZone = self:_extractZoneIdFromName(child.Name)
+			for _, template in ipairs(child:GetChildren()) do
+				if template:IsA("BasePart") or template:IsA("Model") then
+					table.insert(allZoned, template)
+					if folderZone == zoneId then
+						table.insert(candidates, template)
+					end
+				end
+			end
+		elseif child:IsA("BasePart") or child:IsA("Model") then
+			table.insert(rootLevelFallback, child)
+		end
+	end
+	if zoneId == nil then
+		if #allZoned > 0 then
+			return allZoned
+		end
+		return rootLevelFallback
+	end
+	if #candidates == 0 then
+		-- Fallback only to root-level generic templates, never to other ZoneX folders.
+		return rootLevelFallback
+	end
+	return candidates
+end
+
+function SprintRunManager:_getRunnerCaseSpawnAreas()
+	local all = CollectionService:GetTagged(WILD_PET_SPAWN_AREA_TAG)
+	local legacy = CollectionService:GetTagged(LEGACY_WILD_PET_ZONE_TAG)
+	local valid = {}
+	for _, area in ipairs(all) do
+		if area and area:IsA("BasePart") and area.Parent then
+			table.insert(valid, area)
+		end
+	end
+	for _, area in ipairs(legacy) do
+		if area and area:IsA("BasePart") and area.Parent then
+			table.insert(valid, area)
+		end
+	end
+
+	-- Fallback 1: WildPetManager-discovered spawn areas
+	if #valid == 0 and self.WildPetManager and type(self.WildPetManager.spawnAreas) == "table" then
+		for _, area in ipairs(self.WildPetManager.spawnAreas) do
+			if area and area:IsA("BasePart") and area.Parent then
+				table.insert(valid, area)
+			end
+		end
+	end
+
+	-- Fallback 2: runner obstacle zones, if no wild-pet spawn areas were found
+	if #valid == 0 and type(self.obstacleZones) == "table" then
+		for _, area in ipairs(self.obstacleZones) do
+			if area and area:IsA("BasePart") and area.Parent then
+				table.insert(valid, area)
+			end
+		end
+	end
+
+	return valid
+end
+
+
+function SprintRunManager:_addPendingCase(player, caseTemplate)
+	if not player or not caseTemplate then return end
+	local userId = player.UserId
+	self.pendingCasesByUserId[userId] = self.pendingCasesByUserId[userId] or {}
+	local list = self.pendingCasesByUserId[userId]
+	if #list >= MAX_PENDING_CASES then return end
+	local id = HttpService:GenerateGUID(false)
+	list[#list+1] = {
+		id = id,
+		name = caseTemplate.Name,
+		image = tostring(caseTemplate:GetAttribute("ImageId") or ""),
+		egg = tostring(caseTemplate:GetAttribute("EggName") or DEFAULT_CASE_EGG),
+		itemTypeHint = tostring(caseTemplate:GetAttribute("RewardItemType") or caseTemplate:GetAttribute("ItemType") or ""),
+	}
+	self:PersistPendingCases(player)
+end
+
+function SprintRunManager:ClaimPendingCase(player, caseId)
+	local list = self.pendingCasesByUserId[player.UserId] or {}
+	for i, c in ipairs(list) do
+		if c.id == caseId then
+			table.remove(list, i)
+			local itemName, rolledType = chooseRandomCaseReward(c.egg, 1)
+			local itemType = resolveInventoryItemType(itemName, c.itemTypeHint ~= "" and c.itemTypeHint or rolledType)
+			if itemName then
+				local granted = false
+				if _G.createInventoryItem then
+					granted = pcall(function()
+						_G.createInventoryItem(player, itemName, itemType)
+					end)
+				end
+				if not granted then
+					createInventoryItemLocal(player, itemName, itemType)
+				end
+			end
+			self.stateRemote:FireClient(player, "CaseClaimResult", {id = caseId, itemName = itemName, itemType = itemType, sourceEgg = c.egg})
+			if itemName then
+				self.caseHatchRemote:FireClient(player, "PlayHatch", c.egg, itemName)
+			end
+			self:PersistPendingCases(player)
+			self.stateRemote:FireClient(player, "PendingCasesUpdate", list)
+			return
+		end
+	end
+end
+
+function SprintRunManager:_spawnRunnerCaseForZone(zonePart)
+	if not self.wildCaseTemplatesRoot or not zonePart then return end
+	local zoneId = self:_resolveZoneIdFromValue(zonePart:GetAttribute("ZoneId"))
+	local templates = self:_getCaseTemplatesForZoneId(zoneId)
+	if #templates == 0 then return end
+	local totalWeight = 0
+	for _, t in ipairs(templates) do
+		totalWeight += math.max(0, tonumber(t:GetAttribute("SpawnWeight")) or 1)
+	end
+	local pick = Random.new():NextNumber(0, math.max(1, totalWeight))
+	local run = 0
+	local template = templates[1]
+	for _, t in ipairs(templates) do
+		run += math.max(0, tonumber(t:GetAttribute("SpawnWeight")) or 1)
+		if pick <= run then
+			template = t
+			break
+		end
+	end
+	if not template:IsA("BasePart") and not template:IsA("Model") then return end
+	local case = template:Clone()
+	case.Parent = self.liveObstacleFolder
+	local base = case:IsA("Model") and (case.PrimaryPart or case:FindFirstChildWhichIsA("BasePart")) or case
+	if not base then case:Destroy() return end
+	if case:IsA("Model") and not case.PrimaryPart then case.PrimaryPart = base end
+	local size = zonePart.Size
+	local pos = zonePart.Position + Vector3.new((math.random()-0.5)*size.X*0.8, 3, (math.random()-0.5)*size.Z*0.8)
+	if case:IsA("Model") then case:PivotTo(CFrame.new(pos)) else case.CFrame = CFrame.new(pos) end
+	self.liveCasesByPart[base] = {instance = case, template = template}
+	base.Touched:Connect(function(hit)
+		local ch = hit and hit.Parent
+		local plr = ch and self.Players:GetPlayerFromCharacter(ch)
+		if not plr or plr:GetAttribute("RunnerActive") ~= true then return end
+		local rec = self.liveCasesByPart[base]
+		if not rec then return end
+		self:_addPendingCase(plr, rec.template)
+		self.liveCasesByPart[base] = nil
+		rec.instance:Destroy()
+	end)
+end
+
 function SprintRunManager:GoBackToPlot(player)
 	local state = self.playerState[player]
 	if not state or not state.active then return end
@@ -1364,6 +1704,29 @@ function SprintRunManager:GoBackToPlot(player)
 	end
 
 	state.isReturning = false
+	self.stateRemote:FireClient(player, "PendingCasesUpdate", self.pendingCasesByUserId[player.UserId] or {})
+end
+
+function SprintRunManager:SpawnRunnerCasesForPlayer(player, maxPerRun)
+	maxPerRun = tonumber(maxPerRun) or 4
+	local areas = self:_getRunnerCaseSpawnAreas()
+	if #areas == 0 then
+		warn("[SprintRunManager] No valid areas found for runner cases. Tag spawn parts with WildPetSpawnArea or configure WildPetManager areas.")
+		return
+	end
+	local spawned = 0
+	for _, area in ipairs(areas) do
+		if spawned >= maxPerRun then break end
+		local before = #self.liveObstacleFolder:GetChildren()
+		self:_spawnRunnerCaseForZone(area)
+		local after = #self.liveObstacleFolder:GetChildren()
+		if after > before then
+			spawned += 1
+		end
+	end
+	if spawned == 0 then
+		warn("[SprintRunManager] 0 runner cases spawned. Check WildCases/ZoneX folder names and ZoneId attributes on spawn parts.")
+	end
 end
 
 function SprintRunManager:StopRunning(player, notifyClient)
