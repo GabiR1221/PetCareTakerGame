@@ -2787,6 +2787,7 @@ function HatchEgg(Egg: string, Result: string, Offset:number)
 end
 
 Remotes.Egg.OnClientInvoke = HatchEgg
+_G.HatchEgg = HatchEgg
 
 function SingleEgg()
 	local Egg = CurrentTarget.Value
