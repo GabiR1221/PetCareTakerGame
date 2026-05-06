@@ -606,6 +606,22 @@ local function normalizeImageAssetId(assetValue)
 	return nil
 end
 
+local function attachToolBillboardFromPet(tool, handle, petModel)
+	if not tool or not handle or not petModel then return end
+	local src = petModel:FindFirstChild("MainBillboard", true)
+	if not src or not src:IsA("BillboardGui") then return end
+	local existing = handle:FindFirstChild("MainBillboard")
+	if existing then
+		existing:Destroy()
+	end
+	local clone = src:Clone()
+	clone.Name = "MainBillboard"
+	clone.Enabled = true
+	clone.AlwaysOnTop = true
+	clone.Adornee = handle
+	clone.Parent = handle
+end
+
 local function resolvePetTemplateImage(template)
 	if not template then return nil end
 
@@ -696,6 +712,7 @@ createPetPickupTool = function(player, petModel, state)
 
 	local handle = buildPetToolHandle(petModel)
 	handle.Parent = tool
+	attachToolBillboardFromPet(tool, handle, petModel)
 
 	tool.Activated:Connect(function()
 		dropPetFromTool(player, petUid)
@@ -1015,7 +1032,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData102", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData103", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
