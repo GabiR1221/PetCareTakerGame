@@ -2,6 +2,34 @@ local PetStandManager = {}
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local ServerStorage = game:GetService("ServerStorage")
+
+local DEFAULT_FAME_CONFIG = {
+	initial = 50,
+	min = 0,
+	max = 100,
+	offStandDecayPerSecond = 0.2,
+	defaultMood = {
+		targetDelta = 0,
+		minSeconds = 50,
+		maxSeconds = 90,
+	},
+	moods = {
+		Happy = { targetDelta = 18, minSeconds = 20, maxSeconds = 35 },
+		Neutral = { targetDelta = 0, minSeconds = 40, maxSeconds = 70 },
+		Sad = { targetDelta = -12, minSeconds = 25, maxSeconds = 45 },
+		Nasty = { targetDelta = -22, minSeconds = 20, maxSeconds = 35 },
+	}
+}
+
+StandMultiplierVisuals = {
+	levelImage = "rbxassetid://4614401544",
+	levelLabel = "Level",
+	fameImage = "rbxassetid://4321867290",
+	fameLabel = "Fame",
+	accessoryImage = "rbxassetid://10164183611",
+	accessoryLabel = "Accessory",
+}
 
 function PetStandManager:Initialize(stateTable, carryingTable, playersService, petMovement, saveManager, config, interactionPetResolver, stowPetAsToolCallback, interactionUiCallback, consumePetToolCallback)
 	self.petState = stateTable or {}
@@ -22,6 +50,7 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.collectorTouchDebounces = {}  -- [collectorPart] = {[userId] = true}
 	self.collectorAnimState = {}       -- [collectorPart] = true while tweening
 	self.surfacePulseState = {}        -- [standRoot] = true while pulsing
+	self.fameTasks = {}                -- [petModel] = true while fame loop runs
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
@@ -30,8 +59,81 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.TycoonUtils:Initialize(self.Config)
 
 	self:WatchPurchaseContainers()
+	self:StartFameLoop()
 
 	return self
+end
+
+function PetStandManager:GetMoodFromState(state)
+	local dirtiness = math.clamp(tonumber(state and state.dirtiness) or 0, 0, 100)
+	local hunger = math.clamp(tonumber(state and state.hunger) or 100, 0, 100)
+	local cleanliness = 100 - dirtiness
+	local fullness = hunger
+
+	if dirtiness >= 80 then return "Nasty" end
+	if cleanliness >= 80 and fullness >= 80 then return "Happy" end
+	if cleanliness < 40 or fullness < 40 then return "Sad" end
+	return "Neutral"
+end
+
+function PetStandManager:GetFameConfig()
+	local cfg = self.Config and self.Config.PetFame or {}
+	local moodCfg = cfg.moods or {}
+	return {
+		initial = tonumber(cfg.initial) or DEFAULT_FAME_CONFIG.initial,
+		min = tonumber(cfg.min) or DEFAULT_FAME_CONFIG.min,
+		max = tonumber(cfg.max) or DEFAULT_FAME_CONFIG.max,
+		offStandDecayPerSecond = tonumber(cfg.offStandDecayPerSecond) or DEFAULT_FAME_CONFIG.offStandDecayPerSecond,
+		defaultMood = cfg.defaultMood or DEFAULT_FAME_CONFIG.defaultMood,
+		moods = {
+			Happy = moodCfg.Happy or DEFAULT_FAME_CONFIG.moods.Happy,
+			Neutral = moodCfg.Neutral or DEFAULT_FAME_CONFIG.moods.Neutral,
+			Sad = moodCfg.Sad or DEFAULT_FAME_CONFIG.moods.Sad,
+			Nasty = moodCfg.Nasty or DEFAULT_FAME_CONFIG.moods.Nasty,
+		}
+	}
+end
+
+function PetStandManager:EnsureFameState(petModel)
+	if not petModel then return nil end
+	self.petState[petModel] = self.petState[petModel] or {}
+	local state = self.petState[petModel]
+	local fameCfg = self:GetFameConfig()
+	state.fame = math.clamp(tonumber(state.fame) or fameCfg.initial, fameCfg.min, fameCfg.max)
+	return state
+end
+
+function PetStandManager:GetFameIncomeMultiplier(fame)
+	local clamped = math.clamp(tonumber(fame) or 50, 0, 100)
+	return 0.5 + (1.5 * (clamped / 100))
+end
+
+function PetStandManager:GetStandIncomeBreakdown(petModel)
+	local state = self.petState[petModel] or {}
+	local power = tonumber(state.power) or tonumber(petModel and petModel:GetAttribute("Power")) or 1
+	local level = tonumber(state.level) or 1
+	self:EnsureFameState(petModel)
+
+	local levelMultiplier = self:GetLevelIncomeMultiplier(level)
+	local fameMultiplier = self:GetFameIncomeMultiplier(self.petState[petModel].fame)
+	local accessoryPercent = tonumber(state.accessoryBuffs and state.accessoryBuffs.incomePercent) or 0
+	local accessoryMultiplier = 1 + accessoryPercent
+
+	return {
+		basePower = math.max(1, power),
+		levelMultiplier = levelMultiplier,
+		fameMultiplier = fameMultiplier,
+		accessoryMultiplier = accessoryMultiplier,
+	}
+end
+
+function PetStandManager:GetStandMultiplierVisualConfig()
+	local cfg = self.Config and self.Config.StandMultiplierVisuals or {}
+	return {
+		level = { image = tostring(cfg.levelImage or ""), label = tostring(cfg.levelLabel or "Level") },
+		fame = { image = tostring(cfg.fameImage or ""), label = tostring(cfg.fameLabel or "Fame") },
+		accessory = { image = tostring(cfg.accessoryImage or ""), label = tostring(cfg.accessoryLabel or "Accessory") },
+	}
 end
 
 function PetStandManager:GetStandRootFromInstance(inst)
@@ -351,18 +453,232 @@ end
 function PetStandManager:GetPetIncomePerSecond(petModel)
 	if not petModel then return 1 end
 
-	local state = self.petState[petModel] or {}
-	local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
-	local level = tonumber(state.level) or 1
-
-	local multiplier = self:GetLevelIncomeMultiplier(level)
-	local income = power * multiplier
-	local accessoryIncomePercent = tonumber(state.accessoryBuffs and state.accessoryBuffs.incomePercent) or 0
-	if accessoryIncomePercent ~= 0 then
-		income *= (1 + accessoryIncomePercent)
-	end
+	local breakdown = self:GetStandIncomeBreakdown(petModel)
+	local income = breakdown.basePower * breakdown.levelMultiplier * breakdown.fameMultiplier * breakdown.accessoryMultiplier
 
 	return math.max(1, math.floor(income + 0.5))
+end
+
+function PetStandManager:DestroyFameBillboard(petModel)
+	if not petModel then return end
+	local existing = petModel:FindFirstChild("PetFameBillboard", true)
+	if existing then
+		pcall(function() existing:Destroy() end)
+	end
+end
+
+function PetStandManager:DestroyStandMultipliersBillboard(petModel)
+	if not petModel then return end
+	local existing = petModel:FindFirstChild("StandMultipliersRuntime", true)
+	if existing then
+		pcall(function() existing:Destroy() end)
+	end
+end
+
+function PetStandManager:DestroyStandBillboards(petModel)
+	self:DestroyFameBillboard(petModel)
+	self:DestroyStandMultipliersBillboard(petModel)
+end
+
+function PetStandManager:EnsureFameBillboard(petModel)
+	if not petModel then return nil end
+	local adornee = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+	if not adornee then return nil end
+
+	local billboard = petModel:FindFirstChild("PetFameBillboard", true)
+	if not billboard then
+		billboard = Instance.new("BillboardGui")
+		billboard.Name = "PetFameBillboard"
+		billboard.Size = UDim2.new(0, 130, 0, 26)
+		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.8, 0)
+		billboard.AlwaysOnTop = true
+		billboard.Parent = adornee
+
+		local bg = Instance.new("Frame")
+		bg.Name = "BarBackground"
+		bg.Size = UDim2.new(1, 0, 1, 0)
+		bg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		bg.BorderSizePixel = 0
+		bg.Parent = billboard
+
+		local fill = Instance.new("Frame")
+		fill.Name = "BarFill"
+		fill.Size = UDim2.fromScale(0.5, 1)
+		fill.BackgroundColor3 = Color3.fromRGB(248, 198, 57)
+		fill.BorderSizePixel = 0
+		fill.Parent = bg
+	end
+
+	billboard.Adornee = adornee
+	if billboard.Parent ~= adornee then
+		billboard.Parent = adornee
+	end
+	return billboard
+end
+
+
+function PetStandManager:UpdateFameBillboard(petModel)
+	local state = self:EnsureFameState(petModel)
+	if not state then return end
+	if state.location ~= "petstand" then return end
+	local fameCfg = self:GetFameConfig()
+	local billboard = self:EnsureFameBillboard(petModel)
+	if not billboard then return end
+	local bg = billboard:FindFirstChild("BarBackground")
+	local fill = bg and bg:FindFirstChild("BarFill")
+	if fill then
+		local alpha = (state.fame - fameCfg.min) / math.max(1, (fameCfg.max - fameCfg.min))
+		fill.Size = UDim2.fromScale(math.clamp(alpha, 0, 1), 1)
+	end
+end
+
+function PetStandManager:UpdateIncomeBillboard(petModel)
+	if not petModel then return end
+	local mainBillboard = petModel:FindFirstChild("MainBillboard", true)
+	if not mainBillboard then
+		local templateName = tostring(petModel:GetAttribute("TemplateName") or petModel.Name or "")
+		local template = nil
+		local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+		if petsFolder and templateName ~= "" then
+			template = petsFolder:FindFirstChild(templateName)
+		end
+		if not template and templateName ~= "" then
+			local wildFolder = ServerStorage:FindFirstChild("WildPetModels") or ServerStorage:FindFirstChild("PetModels")
+			template = wildFolder and wildFolder:FindFirstChild(templateName)
+		end
+		local templateBillboard = template and template:FindFirstChild("MainBillboard", true)
+		if templateBillboard and templateBillboard:IsA("BillboardGui") then
+			mainBillboard = templateBillboard:Clone()
+			local adornee = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+			mainBillboard.Parent = adornee or petModel
+		end
+	end
+
+	local incomeLabel = mainBillboard and mainBillboard:FindFirstChild("Income", true)
+	if mainBillboard and mainBillboard:IsA("BillboardGui") then
+		mainBillboard.Enabled = true
+		mainBillboard.AlwaysOnTop = true
+		local adornee = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+		if adornee then
+			mainBillboard.Adornee = adornee
+			if mainBillboard.Parent ~= adornee then
+				mainBillboard.Parent = adornee
+			end
+		end
+	end
+	if incomeLabel and incomeLabel:IsA("TextLabel") then
+		local state = self.petState[petModel] or {}
+		local incomePerSecond = nil
+		if state.location == "petstand" then
+			incomePerSecond = self:GetPetIncomePerSecond(petModel)
+		else
+			local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
+			incomePerSecond = math.max(1, math.floor(power + 0.5))
+		end
+		incomeLabel.Text = ("$%d/s"):format(incomePerSecond)
+	end
+end
+
+function PetStandManager:UpdateStandMultipliersBillboard(petModel)
+	if not petModel then return end
+	local state = self.petState[petModel]
+	if not state or state.location ~= "petstand" then return end
+
+	local templateGui = ReplicatedStorage:FindFirstChild("StandMultipliers")
+	if not templateGui or not templateGui:IsA("BillboardGui") then return end
+
+	local adornee = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
+	local runtimeGui = petModel:FindFirstChild("StandMultipliersRuntime")
+	if not runtimeGui then
+		runtimeGui = templateGui:Clone()
+		runtimeGui.Name = "StandMultipliersRuntime"
+		runtimeGui.Parent = adornee or petModel
+	end
+	runtimeGui.Enabled = true
+	runtimeGui.AlwaysOnTop = true
+
+	if adornee then
+		runtimeGui.Adornee = adornee
+		if runtimeGui.Parent ~= adornee then
+			runtimeGui.Parent = adornee
+		end
+	end
+
+	local template = runtimeGui:FindFirstChild("Template")
+	local layout = runtimeGui:FindFirstChildWhichIsA("UIListLayout")
+	if not template or not template:IsA("Frame") or not layout then return end
+
+	for _, child in ipairs(runtimeGui:GetChildren()) do
+		if child:IsA("Frame") and child.Name ~= "Template" then
+			child:Destroy()
+		end
+	end
+	template.Visible = false
+
+	local visual = self:GetStandMultiplierVisualConfig()
+	local bd = self:GetStandIncomeBreakdown(petModel)
+	local rows = {
+		{ key = "level", value = bd.levelMultiplier, visible = true },
+		{ key = "fame", value = bd.fameMultiplier, visible = true },
+		{ key = "accessory", value = bd.accessoryMultiplier, visible = math.abs(bd.accessoryMultiplier - 1) > 0.0001 },
+	}
+
+	local function addRow(row)
+		local clone = template:Clone()
+		clone.Name = row.key .. "Multiplier"
+		clone.Visible = true
+		clone.Parent = runtimeGui
+		local imageLabel = clone:FindFirstChildWhichIsA("ImageLabel", true)
+		local textLabel = clone:FindFirstChildWhichIsA("TextLabel", true)
+		local map = visual[row.key]
+		if imageLabel and map and map.image ~= "" then
+			imageLabel.Image = map.image
+		end
+		if textLabel then
+			local prefix = (map and map.label) or row.key
+			textLabel.Text = ("%s x%.2f"):format(prefix, row.value)
+		end
+	end
+
+	for _, row in ipairs(rows) do
+		if row.visible then
+			addRow(row)
+		end
+	end
+end
+
+function PetStandManager:StartFameLoop()
+	if self._fameLoopStarted then return end
+	self._fameLoopStarted = true
+	task.spawn(function()
+		while true do
+			local fameCfg = self:GetFameConfig()
+			for petModel, state in pairs(self.petState) do
+				if petModel and petModel.Parent and state then
+					self:UpdateIncomeBillboard(petModel)
+					if not state.wild then
+						self:EnsureFameState(petModel)
+						if state.location == "petstand" then
+							local moodName = self:GetMoodFromState(state)
+							local moodData = fameCfg.moods[moodName] or fameCfg.defaultMood
+							local targetDelta = tonumber(moodData.targetDelta) or 0
+							local minSeconds = math.max(0.05, tonumber(moodData.minSeconds) or 30)
+							local maxSeconds = math.max(minSeconds, tonumber(moodData.maxSeconds) or minSeconds)
+							local blendSeconds = (minSeconds + maxSeconds) * 0.5
+							local step = targetDelta / blendSeconds
+							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) + step, fameCfg.min, fameCfg.max)
+							self:UpdateFameBillboard(petModel)
+							self:UpdateStandMultipliersBillboard(petModel)
+						else
+							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) - fameCfg.offStandDecayPerSecond, fameCfg.min, fameCfg.max)
+							self:DestroyStandBillboards(petModel)
+						end
+					end
+				end
+			end
+			task.wait(1)
+		end
+	end)
 end
 
 function PetStandManager:AddCurrencyToPlayer(player, amount)
@@ -530,6 +846,8 @@ function PetStandManager:StartIncomeLoop(petModel, standRoot)
 				stored.Value = stored.Value + income
 			end
 			self:UpdateStandDisplay(standRoot)
+			self:UpdateIncomeBillboard(petModel)
+			self:UpdateStandMultipliersBillboard(petModel)
 
 			task.wait(1)
 		end
@@ -600,6 +918,7 @@ function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standP
 		if restoredToTool then
 			self.petState[petModel].petstand = nil
 			self.petState[petModel].petstandRoot = nil
+			self:DestroyStandBillboards(petModel)
 			pcall(function() helper:Destroy() end)
 			if self.standPickupPromptConns[petModel] then
 				pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
@@ -614,6 +933,7 @@ function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standP
 					self.petState[petModel].location = "player"
 					self.petState[petModel].petstand = nil
 					self.petState[petModel].petstandRoot = nil
+					self:DestroyStandBillboards(petModel)
 					pcall(function() helper:Destroy() end)
 					if self.standPickupPromptConns[petModel] then
 						pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
@@ -733,6 +1053,7 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		self.petState[pet].location = "petstand"
 		self.petState[pet].petstand = standPart
 		self.petState[pet].petstandRoot = standRoot
+		self:EnsureFameState(pet)
 		if type(self.ConsumePetTool) == "function" then
 			self.ConsumePetTool(player, pet)
 		end
@@ -740,6 +1061,14 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		self.PetMovement.StopWandering(pet)
 		self:CreatePlacedPetPickupPrompt(pet, standRoot, standPart)
 		self:StartIncomeLoop(pet, standRoot)
+		self:UpdateFameBillboard(pet)
+		self:UpdateStandMultipliersBillboard(pet)
+		self:UpdateIncomeBillboard(pet)
+		local fameBillboard = pet:FindFirstChild("PetFameBillboard")
+		if fameBillboard and fameBillboard:IsA("BillboardGui") then
+			fameBillboard.Enabled = true
+			fameBillboard.AlwaysOnTop = true
+		end
 		self.PetStateManager:SendStateToOwner(pet)
 		self:UpdateStandDisplay(standRoot)
 	end)
@@ -751,6 +1080,7 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		connection = conn,
 	}
 end
+
 
 function PetStandManager:RestorePetToStand(petModel, player, standId, storedMoney)
 	if not petModel or not player or not standId then
@@ -795,6 +1125,7 @@ function PetStandManager:RestorePetToStand(petModel, player, standId, storedMone
 	self.petState[petModel].location = "petstand"
 	self.petState[petModel].petstand = standPart
 	self.petState[petModel].petstandRoot = standRoot
+	self:EnsureFameState(petModel)
 
 	local stored = self:GetStoredMoneyValue(standRoot)
 	if storedMoney ~= nil and stored then
@@ -804,6 +1135,9 @@ function PetStandManager:RestorePetToStand(petModel, player, standId, storedMone
 	self.PetMovement.StopWandering(petModel)
 	self:CreatePlacedPetPickupPrompt(petModel, standRoot, standPart)
 	self:StartIncomeLoop(petModel, standRoot)
+	self:UpdateFameBillboard(petModel)
+	self:UpdateStandMultipliersBillboard(petModel)
+	self:UpdateIncomeBillboard(petModel)
 	self.PetStateManager:SendStateToOwner(petModel)
 	self:UpdateStandDisplay(standRoot)
 
