@@ -71,6 +71,7 @@ function PetSaveManager:_collectPetDataForPlayer(player)
 				wetness = 0,
 				hunger = state.hunger == nil and 100 or state.hunger,
 				happiness = state.happiness == nil and 100 or state.happiness,
+				fame = tonumber(state.fame) or 50,
 				maxHunger = tonumber(state.maxHunger) or 100,
 				maxHappiness = tonumber(state.maxHappiness) or 100,
 				showered = state.showered or false,
