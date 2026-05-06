@@ -198,6 +198,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 		wetness = 0,
 		hunger = 100,
 		happiness = 100,
+		fame = 50,
 		maxHunger = tonumber(pet:GetAttribute("MaxHunger")) or 100,
 		maxHappiness = tonumber(pet:GetAttribute("MaxHappiness")) or 100,
 		showered = true,
@@ -1395,6 +1396,7 @@ function WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 			self.petState[pet].maxHappiness = math.max(1, math.floor(persistedMaxHappiness or templateMaxHappiness or 100))
 			self.petState[pet].hunger = math.clamp(tonumber(self.petState[pet].hunger) or self.petState[pet].maxHunger, 0, self.petState[pet].maxHunger)
 			self.petState[pet].happiness = math.clamp(tonumber(self.petState[pet].happiness) or self.petState[pet].maxHappiness, 0, self.petState[pet].maxHappiness)
+			self.petState[pet].fame = math.clamp(tonumber(self.petState[pet].fame) or 50, 0, 100)
 
 			if not self.petState[pet].power then
 				self.petState[pet].power = petInfo.power or 1
