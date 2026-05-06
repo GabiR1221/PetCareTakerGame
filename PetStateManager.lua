@@ -191,6 +191,7 @@ function PetStateManager:SendStateToOwner(petModel)
 		happinessMax = self:GetPetStatMax(petModel, "happiness", st),
 		hunger = tonumber(st.hunger) or 100,
 		happiness = tonumber(st.happiness) or 100,
+		fame = math.clamp(tonumber(st.fame) or 50, 0, 100),
 		location = tostring(st.location or ""),
 		petName = tostring(petModel.Name),
 		petUid = tostring(st.petUid or petModel:GetAttribute("PetUID") or ""),
