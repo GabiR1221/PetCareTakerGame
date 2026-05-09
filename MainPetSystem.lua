@@ -619,6 +619,11 @@ local function attachToolBillboardFromPet(tool, handle, petModel)
 	clone.Enabled = true
 	clone.AlwaysOnTop = true
 	clone.Adornee = handle
+	local incomeLabel = clone:FindFirstChild("Income", true)
+	if incomeLabel and incomeLabel:IsA("TextLabel") then
+		local power = tonumber(petModel:GetAttribute("Power")) or 1
+		incomeLabel.Text = ("$%d/s"):format(math.max(1, math.floor(power + 0.5)))
+	end
 	clone.Parent = handle
 end
 
