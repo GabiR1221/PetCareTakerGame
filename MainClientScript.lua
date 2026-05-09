@@ -1306,7 +1306,6 @@ local function setPetBarsVisible(visible)
 		"HungerBarFill", "WetBarFill", "DirtBarFill", "HappinessBarFill", "XPBarFill",
 		"hungerbar", "wetbar", "dirtbar", "happinessbar", "xpbar",
 		"HungerBar", "WetBar", "DirtBar", "HappinessBar", "XPBar",
-		"Multiplier",
 		}) do
 		local obj = findSideFrameObject(name)
 		if obj and obj:IsA("GuiObject") then
@@ -1339,17 +1338,99 @@ local function getItemInfoText(itemFolder, template)
 	return ""
 end
 
-local function showInventoryItemSideFrame(itemName, template, infoText)
+function clearStandBoostsSide()
+	local standBoosts = findSideFrameObject("StandBoostsSide")
+	if not standBoosts then return end
+	local template = standBoosts:FindFirstChild("Template")
+	for _, child in ipairs(standBoosts:GetChildren()) do
+		if child:IsA("Frame") and child ~= template then
+			child:Destroy()
+		end
+	end
+	if template and template:IsA("Frame") then
+		template.Visible = false
+	end
+	local playerGui = Player and Player:FindFirstChildOfClass("PlayerGui")
+	local hoverGui = playerGui and playerGui:FindFirstChild("HoverGui")
+	local standBoostsHover = hoverGui and hoverGui:FindFirstChild("StandBoostsHover")
+	if standBoostsHover and standBoostsHover:IsA("GuiObject") then
+		standBoostsHover.Visible = false
+	end
+end
+
+function setSideFrameAmountText(text)
+	if SideFrame and SideFrame:FindFirstChild("Multiplier") and SideFrame.Multiplier:FindFirstChild("Amount") then
+		SideFrame.Multiplier.Amount.Text = tostring(text or "")
+	end
+end
+
+function populateStandBoostsSide(rows)
+	local standBoosts = findSideFrameObject("StandBoostsSide")
+	if not standBoosts then return end
+	local template = standBoosts:FindFirstChild("Template")
+	if not template or not template:IsA("Frame") then return end
+	clearStandBoostsSide()
+	for _, row in ipairs(rows or {}) do
+		local clone = template:Clone()
+		clone.Visible = true
+		clone.Name = tostring(row.key or "Boost")
+		clone.Parent = standBoosts
+		local imageLabel = clone:FindFirstChildWhichIsA("ImageLabel", true)
+		local textLabel = clone:FindFirstChildWhichIsA("TextLabel", true)
+		if imageLabel and row.image then
+			imageLabel.Image = tostring(row.image)
+		end
+		if textLabel then
+			textLabel.Text = tostring(row.text or "")
+		end
+		if imageLabel then
+			local hoverName = tostring(row.hoverName or row.key or "Boost")
+			local hoverPower = tostring(row.hoverPower or row.text or "")
+			HoverGuiController.bind(
+				imageLabel,
+				nil,
+				"StandBoostsHover",
+				function()
+					return hoverName
+				end,
+				function()
+					return hoverPower
+				end
+			)
+		end
+	end
+end
+
+function showInventoryItemSideFrame(itemName, template, infoText, options)
+	options = options or {}
 	setSideFrameOpen(true)
 	setPetBarsVisible(false)
 	clearSideFrameDisplayModel()
+	clearStandBoostsSide()
 
 	if SideFrame:FindFirstChild("Title") then
 		SideFrame.Title.Visible = true
+		if SideFrame.Title:IsA("TextLabel") then
+			SideFrame.Title.Text = tostring(itemName or "Item")
+		end
 	end
-	if SideFrame:FindFirstChild("Multiplier") and SideFrame.Multiplier:FindFirstChild("Amount") then
-		SideFrame.Multiplier.Amount.Text = ""
+	if SideFrame:FindFirstChild("Multiplier") then
+		SideFrame.Multiplier.Visible = true
 	end
+	local standBoostsSide = findSideFrameObject("StandBoostsSide")
+	if standBoostsSide and standBoostsSide:IsA("GuiObject") then
+		standBoostsSide.Visible = false
+	end
+	setSideFrameAmountText("")
+
+	if options.kind == "toy" then
+		local toyGain = tonumber((options.template and options.template:GetAttribute("HappinessGainPerTick")) or (options.itemFolder and options.itemFolder:GetAttribute("HappinessGainPerTick")) or 0) or 0
+		setSideFrameAmountText(("😊%s"):format(Utilities.Short.en(math.floor(toyGain + 0.5))))
+	elseif options.kind == "accessory" then
+		local percent = tonumber((options.itemFolder and options.itemFolder:GetAttribute("IncomePercent")) or (options.template and options.template:GetAttribute("IncomePercent")) or 0) or 0
+		setSideFrameAmountText(("x%.2f"):format(1 + percent))
+	end
+
 	setSideFrameInfoLabel(infoText)
 
 	local titleLabel = findSideFrameObject("Title")
@@ -1666,9 +1747,17 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 	setPetBarsVisible(true)
 	setSideFrameInfoLabel("")
 	setSideFrameOpen(true)
-	
+	clearStandBoostsSide()
+
 	if SideFrame:FindFirstChild("Title") then
-		SideFrame.Title.Visible = false
+		SideFrame.Title.Visible = true
+		if SideFrame.Title:IsA("TextLabel") then
+			local petNameValue = PetInstance:FindFirstChild("PetName")
+			SideFrame.Title.Text = tostring((petNameValue and petNameValue.Value) or "Pet")
+		end
+	end
+	if SideFrame:FindFirstChild("Multiplier") then
+		SideFrame.Multiplier.Visible = true
 	end
 
 	if SideFrame.Display:FindFirstChild("PetModel") then
@@ -1677,7 +1766,7 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 
 	local PetTemplate = getPetTemplate(PetInstance)
 	if not PetTemplate then
-		SideFrame.Multiplier.Amount.Text = "x1"
+		setSideFrameAmountText("$1/s")
 		return
 	end
 	local PetModel = PetTemplate:Clone()
@@ -1686,7 +1775,8 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 
 	local MainPart = PetModel:FindFirstChild("MainPart") or PetModel.PrimaryPart or PetModel:FindFirstChildWhichIsA("BasePart", true)
 	if not MainPart then
-		SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
+		local basePowerFallback = tonumber(PetTemplate:GetAttribute("Power")) or 1
+		setSideFrameAmountText(("$%d/s"):format(math.max(1, math.floor(basePowerFallback + 0.5))))
 		return
 	end
 	local Pos = MainPart.Position
@@ -1695,7 +1785,12 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 	PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
 	Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
 
-	SideFrame.Multiplier.Amount.Text = "x"..Utilities.Short.en(getPetMultiplier(PetInstance))
+	local basePower = tonumber(PetTemplate:GetAttribute("Power")) or 1
+	setSideFrameAmountText(("$%d/s"):format(math.max(1, math.floor(basePower + 0.5))))
+	local standBoostsSide = findSideFrameObject("StandBoostsSide")
+	if standBoostsSide and standBoostsSide:IsA("GuiObject") then
+		standBoostsSide.Visible = true
+	end
 	local selectedPetId, selectedPetName, selectedPetUid = getSelectedPetKeys()
 	local cachedState = selectedPetId and (
 		(selectedPetUid and CachedPetStateByKey[selectedPetUid])
@@ -1706,6 +1801,34 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 	) or nil
 	if cachedState then
 		updateSideFrameState(cachedState)
+		local level = tonumber(cachedState.level) or 1
+		local fame = tonumber(cachedState.fame) or 50
+		local accessoryMult = 1 + (tonumber(cachedState.accessoryBuffs and cachedState.accessoryBuffs.incomePercent) or 0)
+		local levelMult = 1 + (math.sqrt(math.max(1, level) - 1) * 0.30)
+		local fameMult = 0.5 + (1.5 * (math.clamp(fame, 0, 100) / 100))
+		local rows = {
+			{
+				key = "Level",
+				text = ("Level x%.2f"):format(levelMult),
+				hoverName = "Level Multiplier",
+				hoverPower = "Level up your pet to increase your Level Multiplier",
+			},
+			{
+				key = "Fame",
+				text = ("Fame x%.2f"):format(fameMult),
+				hoverName = "Fame Multiplier",
+				hoverPower = "Place your pet on the stand in a Good Mood to increase your Fame Multiplier",
+			},
+		}
+		if math.abs(accessoryMult - 1) > 0.0001 then
+			table.insert(rows, {
+				key = "Accessory",
+				text = ("Accessory x%.2f"):format(accessoryMult),
+				hoverName = "Accessory Multiplier",
+				hoverPower = "This accessory increases your Money gained per second",
+			})
+		end
+		populateStandBoostsSide(rows)
 	elseif PetStateEvent then
 		pcall(function()
 			PetStateEvent:FireServer("RequestOwnedPetsState")
@@ -2095,6 +2218,11 @@ local function createToySlot(toyFolder)
 
 	local toyName = getToyNameFromFolder(toyFolder)
 	if not toyName then return end
+	local accessoriesFolder = ReplicatedStorage:FindFirstChild("Accessories")
+	local toysFolder = ReplicatedStorage:FindFirstChild("Toys")
+	if accessoriesFolder and accessoriesFolder:FindFirstChild(toyName) and not (toysFolder and toysFolder:FindFirstChild(toyName)) then
+		return
+	end
 	local toyTemplate = getToyTemplate(toyName)
 	if not toyTemplate then
 		warn(("[ToyInventory] Missing toy template for '%s'"):format(tostring(toyName)))
@@ -2151,7 +2279,7 @@ local function createToySlot(toyFolder)
 	if newSlot:FindFirstChild("Button") and newSlot.Button:IsA("GuiButton") then
 		newSlot.Button.MouseButton1Click:Connect(function()
 			Remotes.Pet:FireServer("EquipToy", tostring(toyFolder.Name))
-			showInventoryItemSideFrame(toyName, toyTemplate, getItemInfoText(toyFolder, toyTemplate))
+			showInventoryItemSideFrame(toyName, toyTemplate, getItemInfoText(toyFolder, toyTemplate), { kind = "toy", itemFolder = toyFolder, template = toyTemplate })
 			Utilities.Audio.PlayAudio("Click")
 		end)
 		HoverGuiController.bind(newSlot.Button, toyFolder, "Hover5", function(itemFolder)
@@ -2259,7 +2387,7 @@ local function createAccessorySlot(accessoryFolder)
 	end
 	if newSlot:FindFirstChild("Button") and newSlot.Button:IsA("GuiButton") then
 		newSlot.Button.MouseButton1Click:Connect(function()
-			showInventoryItemSideFrame(itemName, template, getItemInfoText(accessoryFolder, template))
+			showInventoryItemSideFrame(itemName, template, getItemInfoText(accessoryFolder, template), { kind = "accessory", itemFolder = accessoryFolder, template = template })
 			Utilities.Audio.PlayAudio("Click")
 		end)
 		HoverGuiController.bind(newSlot.Button, accessoryFolder, "Hover5", function()
