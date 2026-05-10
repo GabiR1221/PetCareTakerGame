@@ -934,15 +934,26 @@ end
 
 local function createInventoryItem(player, itemNameRaw, itemTypeRaw)
 	local itemNameText = tostring(itemNameRaw or "")
-	if itemNameText == "" then return end
+	if itemNameText == "" then return false end
 
-	local itemType = tostring(itemTypeRaw or "")
+	local itemType = string.lower(tostring(itemTypeRaw or ""))
 	if itemType == "" then
-		itemType = resolveItemType(itemNameText)
+		itemType = string.lower(resolveItemType(itemNameText))
+	end
+	local accessoriesRoot = ReplicatedStorage:FindFirstChild("Accessories")
+	local toysRoot = ReplicatedStorage:FindFirstChild("Toys")
+	if accessoriesRoot and accessoriesRoot:FindFirstChild(itemNameText) then
+		itemType = "Accessory"
+	elseif toysRoot and toysRoot:FindFirstChild(itemNameText) then
+		itemType = "Toy"
+	elseif itemType == "accessory" then
+		itemType = "Accessory"
+	else
+		itemType = "Toy"
 	end
 
 	local inventoryFolder = getInventoryFolder(player, itemType)
-	if not inventoryFolder then return end
+	if not inventoryFolder then return false end
 
 	local newItem = Instance.new("Folder")
 	newItem.Name = tostring(RandomID(inventoryFolder))
@@ -955,14 +966,17 @@ local function createInventoryItem(player, itemNameRaw, itemTypeRaw)
 
 	local itemTypeValue = Instance.new("StringValue")
 	itemTypeValue.Name = "ItemType"
-	itemTypeValue.Value = tostring(itemTypeRaw or resolveItemType(itemNameText))
+	itemTypeValue.Value = itemType
 	itemTypeValue.Parent = newItem
 
 	local equipped = Instance.new("BoolValue")
 	equipped.Name = "Equipped"
 	equipped.Value = false
 	equipped.Parent = newItem
+	return true
 end
+
+_G.createInventoryItem = createInventoryItem
 
 function ChooseRandomPet(Egg, LuckMultiplier)
 	local EggInfo = ReplicatedStorage.Eggs[Egg]
