@@ -1599,9 +1599,10 @@ function SprintRunManager:ClaimPendingCase(player, caseId)
 			if itemName then
 				local granted = false
 				if _G.createInventoryItem then
-					granted = pcall(function()
-						_G.createInventoryItem(player, itemName, itemType)
+					local ok, created = pcall(function()
+						return _G.createInventoryItem(player, itemName, itemType)
 					end)
+					granted = ok and created == true
 				end
 				if not granted then
 					createInventoryItemLocal(player, itemName, itemType)
