@@ -38,7 +38,7 @@ end
 
 --// Creates the animation of the buttons
 ButtonAnimations.Create = function(Frame : Button, Modifier : SizeModifier, Length : TweenLength)
-	local BaseSize = {X = Frame.Size.X.Scale, Y = Frame.Size.Y.Scale}
+	local BaseSize = Frame.Size
 
 	local HasOverlay = false
 	local HasGradientBorder = false
@@ -84,7 +84,7 @@ ButtonAnimations.Create = function(Frame : Button, Modifier : SizeModifier, Leng
 
 	--// Hover in & out
 	Frame.MouseEnter:Connect(function()
-		Frame:TweenSize(UDim2.fromScale(BaseSize.X * Modifier, BaseSize.Y * Modifier), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length)
+		Frame:TweenSize(UDim2.new(BaseSize.X.Scale * Modifier, BaseSize.X.Offset * Modifier, BaseSize.Y.Scale * Modifier, BaseSize.Y.Offset * Modifier), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length)
 
 		if Icon then
 			CurrentIconTarget = GetRandomHoverRotation()
@@ -105,7 +105,7 @@ ButtonAnimations.Create = function(Frame : Button, Modifier : SizeModifier, Leng
 	Frame.MouseLeave:Connect(function()
 		task.wait(Length)
 
-		Frame:TweenSize(UDim2.fromScale(BaseSize.X, BaseSize.Y), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length)
+		Frame:TweenSize(BaseSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length)
 
 		if Icon then
 			TweenIconRotation(BaseIconRotation, Length)
@@ -127,11 +127,11 @@ ButtonAnimations.Create = function(Frame : Button, Modifier : SizeModifier, Leng
 	--// Button Presses
 	if Button then
 		Button.MouseButton1Down:Connect(function()
-			Frame:TweenSize(UDim2.fromScale(BaseSize.X / Modifier, BaseSize.Y / Modifier), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length / 1.5)
+			Frame:TweenSize(UDim2.new(BaseSize.X.Scale / Modifier, BaseSize.X.Offset / Modifier, BaseSize.Y.Scale / Modifier, BaseSize.Y.Offset / Modifier), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length / 1.5)
 		end)
 
 		Button.MouseButton1Up:Connect(function()
-			Frame:TweenSize(UDim2.fromScale(BaseSize.X * Modifier, BaseSize.Y * Modifier), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length / 1.5)
+			Frame:TweenSize(UDim2.new(BaseSize.X.Scale * Modifier, BaseSize.X.Offset * Modifier, BaseSize.Y.Scale * Modifier, BaseSize.Y.Offset * Modifier), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, Length / 1.5)
 
 			if Icon then
 				TweenIconRotation(CurrentIconTarget, Length / 1.5)
@@ -149,5 +149,6 @@ ButtonAnimations.Create = function(Frame : Button, Modifier : SizeModifier, Leng
 		end)
 	end
 end
+
 
 return ButtonAnimations
