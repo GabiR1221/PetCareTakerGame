@@ -642,7 +642,7 @@ local function getShopSectionsButtonMap(shopFrame)
 			local sectionName = button.Name:gsub("Button$", "")
 			local sectionKey = sectionToKey(sectionName)
 			result[sectionKey] = button
-			if sectionKey == "Codes" then
+			if sectionKey == "codes" then
 				result["Codes"] = button
 			end
 		end
@@ -835,35 +835,7 @@ local function setupShopSectionLayoutAndButtons()
 
 	local sectionMap, sectionMeta = collectSections()
 
-	for _, child in ipairs(gamepassContainer:GetChildren()) do
-		if child:IsA("TextLabel") and string.sub(child.Name, 1, #"__SectionHeader_") == "__SectionHeader_" then
-			child:Destroy()
-		end
-	end
-
-	for key, meta in pairs(sectionMeta) do
-		local targetCard = meta.Card
-		if targetCard then
-			local header = Instance.new("TextLabel")
-			header.Name = "__SectionHeader_" .. key
-			header.BackgroundTransparency = 1
-			header.Text = meta.Name
-			header.TextXAlignment = Enum.TextXAlignment.Left
-			header.TextYAlignment = Enum.TextYAlignment.Center
-			header.Font = Enum.Font.GothamBold
-			header.TextSize = 20
-			header.TextColor3 = Color3.fromRGB(255, 255, 255)
-			header.ZIndex = math.max(targetCard.ZIndex + 1, 10)
-			header.Active = false
-			header.Selectable = false
-
-			local headerHeight = 28
-			local yPos = math.max(0, targetCard.AbsolutePosition.Y - gamepassContainer.AbsolutePosition.Y + gamepassContainer.CanvasPosition.Y - headerHeight - 6)
-			header.Position = UDim2.new(0, 12, 0, yPos)
-			header.Size = UDim2.new(targetCard.Size.X.Scale, targetCard.Size.X.Offset, 0, headerHeight)
-			header.Parent = gamepassContainer
-		end
-	end
+	-- Section headers are authored manually inside GamepassesHolder.
 
 	local sectionButtons = getShopSectionsButtonMap(shopFrame)
 	for key, button in pairs(sectionButtons) do
@@ -1037,7 +1009,7 @@ local HoverGuiController = (function()
 			currentHoverFrame = hoverFrame
 			if hoverScreenGui then
 				for _, child in ipairs(hoverScreenGui:GetChildren()) do
-					if child:IsA("GuiObject") and child.Name:match("^Hover") then
+					if child:IsA("GuiObject") and (child.Name:match("Hover") or child == currentHoverFrame) then
 						child.Visible = false
 					end
 				end
@@ -1806,7 +1778,7 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 		local accessoryMult = 1 + (tonumber(cachedState.accessoryBuffs and cachedState.accessoryBuffs.incomePercent) or 0)
 		local levelMult = 1 + (math.sqrt(math.max(1, level) - 1) * 0.30)
 		local fameMult = 0.5 + (1.5 * (math.clamp(fame, 0, 100) / 100))
-		local rows = {
+		local rows = {------------------------------------------------------------------------------------------schimba
 			{
 				key = "Level",
 				text = ("Level x%.2f"):format(levelMult),
@@ -2329,7 +2301,10 @@ local function createAccessorySlot(accessoryFolder)
 	if not objectHolder or not accessoryFolder then return end
 	if objectHolder:FindFirstChild(accessoryFolder.Name) then return end
 	local itemType = accessoryFolder:FindFirstChild("ItemType")
-	if itemType and tostring(itemType.Value) ~= "Accessory" then return end
+	if itemType then
+		local normalizedType = string.lower(tostring(itemType.Value))
+		if normalizedType ~= "accessory" then return end
+	end
 
 	local itemNameValue = accessoryFolder:FindFirstChild("ItemName")
 	local itemName = itemNameValue and tostring(itemNameValue.Value) or ""
