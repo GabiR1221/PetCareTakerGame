@@ -1037,7 +1037,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData103", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData106", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1066,7 +1066,57 @@ petInventoryAdoptionBridge.Event:Connect(function(player, _templateName, petUid)
 	if type(petUid) ~= "string" or petUid == "" then return end
 
 	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
-	if not petModel or not state then return end
+	if not petModel or not state then
+		local templateName = tostring(_templateName or "")
+		local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+		local template = petsFolder and petsFolder:FindFirstChild(templateName)
+		if not template then return end
+
+		petModel = template:Clone()
+		petModel.Name = templateName
+		petModel:SetAttribute("TemplateName", templateName)
+		petModel:SetAttribute("PetUID", petUid)
+		petModel:SetAttribute("WildPet", false)
+		petModel.Parent = ServerStorage
+
+		local detectedBaseScale = 1
+		pcall(function()
+			detectedBaseScale = tonumber(petModel:GetScale()) or 1
+		end)
+
+		local power = tonumber(template:GetAttribute("Power")) or 1
+		local rarityMultiplier = tonumber(template:GetAttribute("RarityMultiplier")) or 1
+		petModel:SetAttribute("Power", power)
+		petModel:SetAttribute("RarityMultiplier", rarityMultiplier)
+
+		state = {
+			location = "inventory",
+			wild = false,
+			ownerUserId = player.UserId,
+			xp = 0,
+			level = 1,
+			scale = detectedBaseScale,
+			baseScale = detectedBaseScale,
+			dirtiness = 0,
+			wetness = 0,
+			hunger = 100,
+			happiness = 100,
+			fame = 50,
+			maxHunger = tonumber(petModel:GetAttribute("MaxHunger")) or 100,
+			maxHappiness = tonumber(petModel:GetAttribute("MaxHappiness")) or 100,
+			showered = true,
+			dried = true,
+			accessories = {A = false, B = false},
+			power = power,
+			rarityMultiplier = rarityMultiplier,
+			petUid = petUid,
+		}
+		petState[petModel] = state
+		pcall(function()
+			PetRigManager:EnsurePetRig(petModel)
+			PetAnimationManager:SetupAnimatorForPet(petModel)
+		end)
+	end
 	if tostring(state.ownerUserId) ~= tostring(player.UserId) then return end
 	if state.wild == true then return end
 
