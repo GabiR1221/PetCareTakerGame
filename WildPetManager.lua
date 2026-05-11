@@ -89,7 +89,7 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.PetStandManager = require(script.Parent.PetStandManager)
 	self.Multipliers = require(ReplicatedStorage.Modules.Multipliers)
 	-- Settings
-	self.WILD_PET_SPAWN_AREA_TAG = "WildPetSpawnArea"
+	self.WILD_PET_SPAWN_AREA_TAG = "WildPetSpawnArea"---thats the name of these parts but the tag it actually haves is named WildPetZone
 	self.MAX_WILD_PETS = 20
 	self.SPAWN_INTERVAL = 30 -- seconds
 	self.MIN_SPAWN_INTERVAL = 12
