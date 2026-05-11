@@ -27,13 +27,10 @@ local SELL_RING_MAX_DISTANCE = 12
 local PetSellRequestBridgeName = "PetSellRequestBridge"
 local PetRuntimeStateBridgeName = "PetRuntimeStateBridge"
 local PetSellQuoteRemote = Remotes:FindFirstChild("PetSellQuote")
-if not PetSellQuoteRemote or not PetSellQuoteRemote:IsA("RemoteFunction") then
-	PetSellQuoteRemote = Instance.new("RemoteFunction")
-	PetSellQuoteRemote.Name = "PetSellQuote"
-	PetSellQuoteRemote.Parent = Remotes
-end
+local PetConvertRequestRemote = Remotes:FindFirstChild("PetConvertRequest")
 
-local RARITY_MULTIPLIERS = {
+
+local RARITY_MULTIPLIERS = {----we dont have any business with this, it was for the older system
 	Common = 1,
 	Uncommon = 1.25,
 	Rare = 1.6,
@@ -614,6 +611,15 @@ local function createInventoryPet(player, petName, petUid)
 		return nil
 	end
 
+	if type(petUid) == "string" and petUid ~= "" then
+		for _, existingPet in ipairs(petsFolder:GetChildren()) do
+			local existingUid = existingPet:FindFirstChild("PetUID")
+			if existingUid and tostring(existingUid.Value) == petUid then
+				return existingPet
+			end
+		end
+	end
+
 	if Multipliers.GetMaxPetsStorage(player) <= #petsFolder:GetChildren() then
 		warn(("[PetServer] Could not grant '%s' to %s because storage is full"):format(tostring(petName), player.Name))
 		return nil
@@ -734,6 +740,166 @@ function SellAction(Player, Pet, options)
 	end
 	
 	return payout
+end
+
+local CONVERT_REQUIRED_PET_COUNT = 3
+local CONVERT_RARITY_ORDER = { Normal = "Golden", Golden = "Diamond" }
+local CONVERT_RARITY_PREFIXES = { "Golden ", "Diamond " }
+
+local function getPetTemplateName(petFolder)
+	local petNameValue = petFolder and petFolder:FindFirstChild("PetName")
+	local petName = petNameValue and tostring(petNameValue.Value) or ""
+	return petName ~= "" and petName or nil
+end
+
+local function getConversionRarity(petTemplate)
+	local rarity = petTemplate and petTemplate:GetAttribute("Rarity")
+	if rarity == nil then
+		local settings = petTemplate and petTemplate:FindFirstChild("Settings")
+		local settingsRarity = settings and settings:FindFirstChild("Rarity")
+		rarity = settingsRarity and settingsRarity.Value or nil
+	end
+	rarity = tostring(rarity or "Normal")
+	if rarity == "" then rarity = "Normal" end
+	return rarity
+end
+
+local function getBaseConversionName(petName, rarity)
+	local baseName = tostring(petName or "")
+	local rarityPrefix = tostring(rarity or "") .. " "
+	if rarity ~= "Normal" and string.sub(baseName, 1, #rarityPrefix) == rarityPrefix then
+		baseName = string.sub(baseName, #rarityPrefix + 1)
+	end
+	for _, prefix in ipairs(CONVERT_RARITY_PREFIXES) do
+		if string.sub(baseName, 1, #prefix) == prefix then
+			baseName = string.sub(baseName, #prefix + 1)
+			break
+		end
+	end
+	return baseName
+end
+
+local function getConvertedPetName(petName, petTemplate)
+	if not ReplicatedStorage:FindFirstChild("Pets") then return nil, "PetsMissing" end
+	local explicitResult = petTemplate and (petTemplate:GetAttribute("ConvertResult") or petTemplate:GetAttribute("NextRarityPet"))
+	if type(explicitResult) == "string" and explicitResult ~= "" and ReplicatedStorage.Pets:FindFirstChild(explicitResult) then
+		return explicitResult, nil
+	end
+
+	local rarity = getConversionRarity(petTemplate)
+	local nextRarity = CONVERT_RARITY_ORDER[rarity]
+	if not nextRarity then
+		return nil, "MaxRarity"
+	end
+
+	local resultName = nextRarity .. " " .. getBaseConversionName(petName, rarity)
+	if not ReplicatedStorage.Pets:FindFirstChild(resultName) then
+		return nil, "ResultMissing"
+	end
+	return resultName, nil
+end
+
+local function notifyConversion(player, notificationType, message)
+	if GameNotificationEvent and GameNotificationEvent:IsA("RemoteEvent") then
+		GameNotificationEvent:FireClient(player, notificationType, message)
+	end
+end
+
+PetConvertRequestRemote.OnServerInvoke = function(player, petIds)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then
+		return false, "InvalidPlayer"
+	end
+	if type(petIds) ~= "table" or #petIds ~= CONVERT_REQUIRED_PET_COUNT then
+		notifyConversion(player, "error", "❌ Select exactly 3 matching pets to convert.")
+		return false, "InvalidSelection"
+	end
+
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if not petsFolder then
+		return false, "PetsMissing"
+	end
+
+	local selectedPets = {}
+	local seenIds = {}
+	local expectedName = nil
+	local expectedRarity = nil
+	local resultName = nil
+
+	for _, petId in ipairs(petIds) do
+		local petIdText = tostring(petId)
+		if seenIds[petIdText] then
+			notifyConversion(player, "error", "❌ Select 3 different pets to convert.")
+			return false, "DuplicatePet"
+		end
+		seenIds[petIdText] = true
+
+		local petFolder = petsFolder:FindFirstChild(petIdText)
+		if not petFolder then
+			notifyConversion(player, "error", "❌ One of those pets is no longer in your inventory.")
+			return false, "PetMissing"
+		end
+		if isPetCurrentlySpawnedForPlayer(player, petFolder) then
+			notifyConversion(player, "error", "❌ Pick up your pets before converting them.")
+			return false, "PetActive"
+		end
+
+		local petName = getPetTemplateName(petFolder)
+		local petTemplate = resolvePetTemplate(petFolder)
+		if not petName or not petTemplate then
+			notifyConversion(player, "error", "❌ This pet cannot be converted right now.")
+			return false, "TemplateMissing"
+		end
+
+		local rarity = getConversionRarity(petTemplate)
+		local convertedName, convertReason = getConvertedPetName(petName, petTemplate)
+		if not convertedName then
+			if convertReason == "MaxRarity" then
+				notifyConversion(player, "error", "❌ This pet is already at the highest rarity.")
+			else
+				notifyConversion(player, "error", "❌ The upgraded pet model is missing in ReplicatedStorage.Pets.")
+			end
+			return false, convertReason or "NoResult"
+		end
+
+		if expectedName and (petName ~= expectedName or rarity ~= expectedRarity or convertedName ~= resultName) then
+			notifyConversion(player, "error", "❌ You can only mark the same type of pets!")
+			return false, "MixedPets"
+		end
+
+		expectedName = petName
+		expectedRarity = rarity
+		resultName = convertedName
+		table.insert(selectedPets, petFolder)
+	end
+
+	local sellBridge = ReplicatedStorage:FindFirstChild("PetSellBridge")
+	for _, petFolder in ipairs(selectedPets) do
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		local petUid = uidValue and tostring(uidValue.Value) or ""
+		local petNameValue = petFolder:FindFirstChild("PetName")
+		local sourcePetName = petNameValue and tostring(petNameValue.Value) or ""
+		DeleteAction(player, petFolder)
+		if petUid ~= "" and sellBridge and sellBridge:IsA("BindableEvent") then
+			sellBridge:Fire(player, petUid, sourcePetName)
+		end
+	end
+
+	local newPet = createInventoryPet(player, resultName)
+	if not newPet then
+		notifyConversion(player, "error", "❌ Could not grant your converted pet. Please try again.")
+		return false, "GrantFailed"
+	end
+
+	local newUidValue = newPet:FindFirstChild("PetUID")
+	local newPetUid = newUidValue and tostring(newUidValue.Value) or ""
+	local inventoryBridge = ReplicatedStorage:FindFirstChild("PetInventoryAdoptionBridge")
+	if newPetUid ~= "" and inventoryBridge and inventoryBridge:IsA("BindableEvent") then
+		inventoryBridge:Fire(player, resultName, newPetUid)
+	end
+
+	notifyConversion(player, "success", "✅ Converted 3 pets into " .. resultName .. "!")
+	return true, "Converted", resultName
 end
 
 PetSellQuoteRemote.OnServerInvoke = function(player, petId)
