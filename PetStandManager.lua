@@ -108,6 +108,41 @@ function PetStandManager:GetFameIncomeMultiplier(fame)
 	return 0.5 + (1.5 * (clamped / 100))
 end
 
+function PetStandManager:GetAccessoryIncomePercent(state)
+	if not state then return 0 end
+	local configured = tonumber(state.accessoryBuffs and state.accessoryBuffs.incomePercent)
+	if configured and math.abs(configured) > 0.0001 then
+		return configured
+	end
+
+	local accessoryName = state.equippedAccessoryName
+	if type(accessoryName) ~= "string" or accessoryName == "" then
+		accessoryName = state.accessorySlots and state.accessorySlots.A or nil
+	end
+	if type(accessoryName) ~= "string" or accessoryName == "" then
+		state.accessoryBuffs = state.accessoryBuffs or { incomePercent = 0 }
+		state.accessoryBuffs.incomePercent = 0
+		return 0
+	end
+
+	local percent = 0
+	local storage = ServerStorage:FindFirstChild("PetAccessories")
+	local template = storage and storage:FindFirstChild(accessoryName) or nil
+	if not template then
+		local replicatedAccessories = ReplicatedStorage:FindFirstChild("Accessories")
+		template = replicatedAccessories and replicatedAccessories:FindFirstChild(accessoryName) or nil
+	end
+	if template then
+		percent = tonumber(template:GetAttribute("IncomePercentBuff")) or tonumber(template:GetAttribute("IncomePercent")) or 0
+	elseif accessoryName == "Hat1" then
+		percent = 5
+	end
+
+	state.accessoryBuffs = state.accessoryBuffs or {}
+	state.accessoryBuffs.incomePercent = percent
+	return percent
+end
+
 function PetStandManager:GetStandIncomeBreakdown(petModel)
 	local state = self.petState[petModel] or {}
 	local power = tonumber(state.power) or tonumber(petModel and petModel:GetAttribute("Power")) or 1
@@ -116,7 +151,7 @@ function PetStandManager:GetStandIncomeBreakdown(petModel)
 
 	local levelMultiplier = self:GetLevelIncomeMultiplier(level)
 	local fameMultiplier = self:GetFameIncomeMultiplier(self.petState[petModel].fame)
-	local accessoryPercent = tonumber(state.accessoryBuffs and state.accessoryBuffs.incomePercent) or 0
+	local accessoryPercent = self:GetAccessoryIncomePercent(state)
 	local accessoryMultiplier = 1 + accessoryPercent
 
 	return {
@@ -489,14 +524,15 @@ function PetStandManager:EnsureFameBillboard(petModel)
 	if not billboard then
 		billboard = Instance.new("BillboardGui")
 		billboard.Name = "PetFameBillboard"
-		billboard.Size = UDim2.new(0, 130, 0, 26)
+		billboard.Size = UDim2.new(2.5, 0, 1, 0)
 		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.8, 0)
 		billboard.AlwaysOnTop = true
 		billboard.Parent = adornee
+		billboard.Zindex = 0
 
 		local bg = Instance.new("Frame")
 		bg.Name = "BarBackground"
-		bg.Size = UDim2.new(1, 0, 1, 0)
+		bg.Size = UDim2.new(1, 0, 0.8, 0)
 		bg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 		bg.BorderSizePixel = 0
 		bg.Parent = billboard
@@ -567,22 +603,40 @@ function PetStandManager:UpdateIncomeBillboard(petModel)
 		end
 	end
 	if incomeLabel and incomeLabel:IsA("TextLabel") then
-		local state = self.petState[petModel] or {}
-		local incomePerSecond = nil
-		if state.location == "petstand" then
-			incomePerSecond = self:GetPetIncomePerSecond(petModel)
-		else
-			local power = tonumber(state.power) or tonumber(petModel:GetAttribute("Power")) or 1
-			incomePerSecond = math.max(1, math.floor(power + 0.5))
-		end
+		local incomePerSecond = self:GetPetIncomePerSecond(petModel)
 		incomeLabel.Text = ("$%d/s"):format(incomePerSecond)
+	end
+end
+
+function PetStandManager:UpdatePetToolIncomeBillboards(petModel)
+	if not petModel then return end
+	local state = self.petState[petModel]
+	if not state or state.wild == true then return end
+	local petUid = tostring(state.petUid or petModel:GetAttribute("PetUID") or "")
+	if petUid == "" then return end
+	local player = state.ownerUserId and self.Players and self.Players:GetPlayerByUserId(tonumber(state.ownerUserId)) or nil
+	if not player then return end
+
+	local incomePerSecond = self:GetPetIncomePerSecond(petModel)
+	for _, container in ipairs({ player:FindFirstChild("Backpack"), player.Character, player:FindFirstChild("StarterGear") }) do
+		if container then
+			for _, tool in ipairs(container:GetChildren()) do
+				if tool:IsA("Tool") and tostring(tool:GetAttribute("PetUID") or "") == petUid then
+					local billboard = tool:FindFirstChild("MainBillboard", true)
+					local incomeLabel = billboard and billboard:FindFirstChild("Income", true)
+					if incomeLabel and incomeLabel:IsA("TextLabel") then
+						incomeLabel.Text = ("$%d/s"):format(incomePerSecond)
+					end
+				end
+			end
+		end
 	end
 end
 
 function PetStandManager:UpdateStandMultipliersBillboard(petModel)
 	if not petModel then return end
 	local state = self.petState[petModel]
-	if not state or state.location ~= "petstand" then return end
+	if not state or state.wild == true then return end
 
 	local templateGui = ReplicatedStorage:FindFirstChild("StandMultipliers")
 	if not templateGui or not templateGui:IsA("BillboardGui") then return end
@@ -655,8 +709,9 @@ function PetStandManager:StartFameLoop()
 			local fameCfg = self:GetFameConfig()
 			for petModel, state in pairs(self.petState) do
 				if petModel and petModel.Parent and state then
-					self:UpdateIncomeBillboard(petModel)
-					if not state.wild then
+					if state.wild then
+						self:UpdateIncomeBillboard(petModel)
+					else
 						self:EnsureFameState(petModel)
 						if state.location == "petstand" then
 							local moodName = self:GetMoodFromState(state)
@@ -668,11 +723,15 @@ function PetStandManager:StartFameLoop()
 							local step = targetDelta / blendSeconds
 							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) + step, fameCfg.min, fameCfg.max)
 							self:UpdateFameBillboard(petModel)
-							self:UpdateStandMultipliersBillboard(petModel)
 						else
 							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) - fameCfg.offStandDecayPerSecond, fameCfg.min, fameCfg.max)
-							self:DestroyStandBillboards(petModel)
+							self:DestroyFameBillboard(petModel)
 						end
+
+						self:UpdateIncomeBillboard(petModel)
+						self:UpdateStandMultipliersBillboard(petModel)
+						self:UpdatePetToolIncomeBillboards(petModel)
+						self.PetStateManager:SendStateToOwner(petModel)
 					end
 				end
 			end
