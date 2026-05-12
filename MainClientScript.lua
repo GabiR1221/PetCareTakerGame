@@ -926,21 +926,53 @@ local HoverGuiController = (function()
 		return folderName ~= "" and folderName or "Unknown Pet"
 	end
 
+	local function readNumericPetValue(petInstance, valueName)
+		if not petInstance then return nil end
+		local valueObject = petInstance:FindFirstChild(valueName)
+		if valueObject and (valueObject:IsA("NumberValue") or valueObject:IsA("IntValue")) then
+			return tonumber(valueObject.Value)
+		end
+		local attr = petInstance:GetAttribute(valueName)
+		return tonumber(attr)
+	end
+
+	local function calculateBoostedPetPower(petInstance)
+		local petId = petInstance and tostring(petInstance.Name or "") or ""
+		local uidValue = petInstance and petInstance:FindFirstChild("PetUID")
+		local petUid = uidValue and tostring(uidValue.Value or "") or ""
+		local petNameValue = petInstance and petInstance:FindFirstChild("PetName")
+		local petName = petNameValue and tostring(petNameValue.Value or "") or ""
+		local cachedState = (petUid ~= "" and (CachedPetStateByKey[petUid] or CachedPetStateByKey["inv:"..petUid]))
+			or (petId ~= "" and (CachedPetStateByKey[petId] or CachedPetStateByKey["invId:"..petId]))
+			or (petName ~= "" and CachedPetStateByKey[petName])
+
+		local cachedBoostedPower = tonumber(cachedState and cachedState.boostedPower) or readNumericPetValue(petInstance, "BoostedPower")
+		if cachedBoostedPower and cachedBoostedPower > 0 then
+			return math.floor(cachedBoostedPower + 0.5)
+		end
+
+		local power = tonumber(cachedState and cachedState.power) or readNumericPetValue(petInstance, "Power")
+		if power == nil then
+			local petTemplate = getPetTemplate(petInstance)
+			power = petTemplate and tonumber(petTemplate:GetAttribute("Power")) or nil
+		end
+		power = tonumber(power) or 0
+
+		local level = tonumber(cachedState and cachedState.level) or readNumericPetValue(petInstance, "Level") or 1
+		local fame = math.clamp(tonumber(cachedState and cachedState.fame) or readNumericPetValue(petInstance, "Fame") or 50, 0, 100)
+		local accessoryPercent = tonumber(cachedState and cachedState.accessoryBuffs and cachedState.accessoryBuffs.incomePercent) or readNumericPetValue(petInstance, "AccessoryIncomePercent") or 0
+		local levelMult = 1 + (math.sqrt(math.max(1, level) - 1) * 0.30)
+		local fameMult = 0.5 + (1.5 * (fame / 100))
+		local accessoryMult = 1 + accessoryPercent
+		return math.floor(math.max(0, power * levelMult * fameMult * accessoryMult) + 0.5)
+	end
+
 	local function getPetPowerText(petInstance)
 		if not petInstance then
 			return "Power: ?"
 		end
 
-		local powerFromValue = petInstance:FindFirstChild("Power")
-		local power = powerFromValue and powerFromValue:IsA("NumberValue") and powerFromValue.Value
-		if power == nil then
-			power = petInstance:GetAttribute("Power")
-		end
-		if power == nil then
-			local petTemplate = getPetTemplate(petInstance)
-			power = petTemplate and petTemplate:GetAttribute("Power")
-		end
-		power = tonumber(power) or 0
+		local power = calculateBoostedPetPower(petInstance)
 		return ("Power: %s"):format(Utilities.Short.en(power))
 	end
 
@@ -1747,7 +1779,8 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 
 	local MainPart = PetModel:FindFirstChild("MainPart") or PetModel.PrimaryPart or PetModel:FindFirstChildWhichIsA("BasePart", true)
 	if not MainPart then
-		local basePowerFallback = tonumber(PetTemplate:GetAttribute("Power")) or 1
+		local boostedFallback = PetInstance:FindFirstChild("BoostedPower")
+		local basePowerFallback = tonumber(boostedFallback and boostedFallback.Value) or tonumber(PetTemplate:GetAttribute("Power")) or 1
 		setSideFrameAmountText(("$%d/s"):format(math.max(1, math.floor(basePowerFallback + 0.5))))
 		return
 	end
@@ -1757,7 +1790,8 @@ function UpdateSideFrame(PetInstance) -- PetInstance is the folder in Player.Pet
 	PetModel:PivotTo(PetModel:GetPivot() * CFrame.Angles(0, math.rad(180), 0))
 	Camera.CFrame = CFrame.new(Vector3.new(Pos.X + PetModel:GetExtentsSize().X * 1.5, Pos.Y, Pos.Z + 1), Pos)
 
-	local basePower = tonumber(PetTemplate:GetAttribute("Power")) or 1
+	local boostedPowerValue = PetInstance:FindFirstChild("BoostedPower")
+	local basePower = tonumber(boostedPowerValue and boostedPowerValue.Value) or tonumber(PetTemplate:GetAttribute("Power")) or 1
 	setSideFrameAmountText(("$%d/s"):format(math.max(1, math.floor(basePower + 0.5))))
 	local standBoostsSide = findSideFrameObject("StandBoostsSide")
 	if standBoostsSide and standBoostsSide:IsA("GuiObject") then
@@ -1828,6 +1862,10 @@ end
 
 updateSideFrameState = function(payload)
 	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
+	local boostedIncome = tonumber(payload.boostedPower)
+	if boostedIncome and boostedIncome > 0 then
+		setSideFrameAmountText(("$%d/s"):format(math.max(1, math.floor(boostedIncome + 0.5))))
+	end
 
 	setBar(SideFrame, "hungerbarfill", payload.hunger, tonumber(payload.hungerMax) or 100)
 	setBar(SideFrame, "wetbarfill", 0, 100)
@@ -1863,6 +1901,10 @@ end
 
 local function updateSideFrameState(payload)
 	if not payload or not SideFrame or PetFrame.SideFrameBlocker.Visible then return end
+	local boostedIncome = tonumber(payload.boostedPower)
+	if boostedIncome and boostedIncome > 0 then
+		setSideFrameAmountText(("$%d/s"):format(math.max(1, math.floor(boostedIncome + 0.5))))
+	end
 
 	setBar(SideFrame, "hungerbarfill", payload.hunger, tonumber(payload.hungerMax) or 100)
 	setBar(SideFrame, "wetbarfill", 0, 100)
@@ -3441,7 +3483,7 @@ end
 
 local function showPetsForSell()
 	if SellShopFrame and not SellShopFrame.Visible then
-		Utilities.ButtonHandler.OnClick(SellShopFrame, SELL_OPEN_POSITION)
+		Utilities.ButtonHandler.OnClick(SellShopFrame, BaseSize.SellShop or (SellShopFrame and SellShopFrame.Size) or UDim2.new(0.359, 0, 0.414, 0))
 	end
 
 	Frames.Pets:SetAttribute("CanDeletePets", false)
@@ -3449,7 +3491,7 @@ end
 
 local function hideSellShop()
 	if not SellShopFrame or not SellShopFrame.Visible then return end
-	Utilities.ButtonHandler.OnClick(SellShopFrame, SELL_OPEN_POSITION)
+	Utilities.ButtonHandler.OnClick(SellShopFrame, BaseSize.SellShop or (SellShopFrame and SellShopFrame.Size) or UDim2.new(0.359, 0, 0.414, 0))
 end
 
 local function getFoodShopUi()
@@ -3625,11 +3667,11 @@ local function GemRing()
 
 		if inRange then
 			if not isVisible and not ringDismissedWhileInside.Gem then
-				Utilities.ButtonHandler.OnClick(Frames.GemShop, UDim2.new(0.359,0,0.414,0))
+				Utilities.ButtonHandler.OnClick(Frames.GemShop, BaseSize.GemShop or Frames.GemShop.Size or UDim2.new(0.359, 0, 0.414, 0))
 			end
 		else
 			if isVisible then
-				Utilities.ButtonHandler.OnClick(Frames.GemShop, UDim2.new(0.359,0,0.414,0))
+				Utilities.ButtonHandler.OnClick(Frames.GemShop, BaseSize.GemShop or Frames.GemShop.Size or UDim2.new(0.359, 0, 0.414, 0))
 			end
 			ringDismissedWhileInside.Gem = false
 		end
@@ -4059,7 +4101,7 @@ local function redeemCodeFromInput(codeInput)
 	Remotes.RedeemCode:FireServer(string.upper(code))
 end
 
-do
+task.defer(function()
 	local codeInput, redeemButton = getCodeInputAndRedeemButton()
 	if redeemButton then
 		redeemButton.MouseButton1Click:Connect(function()
@@ -4073,7 +4115,7 @@ do
 			end
 		end)
 	end
-end
+end)
 
 --// Stats
 local StatsFrame = Frames.Stats
