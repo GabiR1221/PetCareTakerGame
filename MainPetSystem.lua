@@ -60,6 +60,7 @@ local PETGROUND_XP_PER_SEC = 5
 local ENABLE_PET_PICKUP_TOOLS = true -- Set to false to restore weld/carry pickup behavior.
 local MAX_ACTIVE_WANDERING_PETS = 3
 local GAME_NOTIFICATION_EVENT_NAME = "GameNotificationEvent"
+local PET_TOOL_ACTIVATION_GRACE_SECONDS = 0.45
 
 -- Initialize state trackers (these could be moved to their respective managers)
 local carryingPetByUserId = {}
@@ -489,10 +490,21 @@ local function equipPetToolByUid(player, petUid)
 	if not humanoid then return end
 	local backpack = player:FindFirstChild("Backpack")
 	if not backpack then return end
-	for _, tool in ipairs(backpack:GetChildren()) do
-		if tool:IsA("Tool") and tostring(tool:GetAttribute("PetUID") or "") == petUid then
-			humanoid:EquipTool(tool)
-			break
+
+	local stashPets = player:FindFirstChild("InventoryStash")
+	stashPets = stashPets and stashPets:FindFirstChild("Pets") or nil
+	for _, container in ipairs({ backpack, stashPets }) do
+		if container then
+			for _, tool in ipairs(container:GetChildren()) do
+				if tool:IsA("Tool") and tostring(tool:GetAttribute("PetUID") or "") == petUid then
+					if tool.Parent ~= backpack then
+						tool.Parent = backpack
+						task.wait()
+					end
+					humanoid:EquipTool(tool)
+					return
+				end
+			end
 		end
 	end
 end
@@ -527,17 +539,53 @@ local function stowPetAsToolForPlayer(player, petModel, autoEquip)
 	setPetStashedModel(player.UserId, petUid, petModel)
 
 	createPetPickupTool(player, petModel, state)
-	if autoEquip ~= false then
-		equipPetToolByUid(player, petUid)
-	end
 	PetStateManager:SendStateToOwner(petModel)
 	setInteractionUiHidden(player, false)
+	if autoEquip ~= false then
+		task.delay(0.12, function()
+			if player.Parent then
+				equipPetToolByUid(player, petUid)
+			end
+		end)
+	end
 	return true
 end
 
+local function sanitizePetToolVisualInstance(instance)
+	if instance:IsA("Script") or instance:IsA("LocalScript") or instance:IsA("ModuleScript") or instance:IsA("Humanoid") or instance:IsA("Animator") then
+		instance:Destroy()
+		return false
+	end
+	return true
+end
+
+local function preparePetToolVisualPart(part)
+	part.Anchored = false
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Massless = true
+end
+
 local function buildPetToolHandle(petModel)
+	local visualModel = Instance.new("Model")
+	visualModel.Name = "PetToolVisual"
+
 	local sourcePart = nil
 	if petModel then
+		local ok = pcall(function()
+			PetMoodVisualManager:UpdatePetVisuals(petModel)
+		end)
+		if not ok then
+			-- Mood visuals are cosmetic; the tool can still be created if the manager is not ready yet.
+		end
+		pcall(function()
+			AccessoryManager:RestoreAccessoriesOnPet(petModel)
+		end)
+		pcall(function()
+			PetStandManager:UpdateIncomeBillboard(petModel)
+		end)
+
 		for _, candidate in ipairs(petModel:GetDescendants()) do
 			if candidate:IsA("MeshPart") and candidate.Transparency < 0.95 then
 				sourcePart = candidate
@@ -556,12 +604,15 @@ local function buildPetToolHandle(petModel)
 			end
 		end
 	end
-	local handle = nil
 
+	local handle = nil
 	if sourcePart and sourcePart:IsA("BasePart") then
 		handle = sourcePart:Clone()
 		for _, desc in ipairs(handle:GetDescendants()) do
-			if not desc:IsA("DataModelMesh") and not desc:IsA("SpecialMesh") then
+			if not sanitizePetToolVisualInstance(desc) then
+				continue
+			end
+			if not desc:IsA("DataModelMesh") and not desc:IsA("SpecialMesh") and not desc:IsA("Attachment") then
 				desc:Destroy()
 			end
 		end
@@ -571,17 +622,36 @@ local function buildPetToolHandle(petModel)
 	end
 
 	handle.Name = "Handle"
-	handle.Anchored = false
-	handle.CanCollide = false
-	handle.CanQuery = false
-	handle.CanTouch = false
-	handle.Massless = true
+	preparePetToolVisualPart(handle)
 	handle.Transparency = math.clamp(tonumber(handle.Transparency) or 0, 0, 0.2)
 	if not sourcePart then
 		handle.Size = Vector3.new(1.1, 1.1, 1.1)
 	end
 	handle.CFrame = CFrame.new()
-	return handle
+
+	if petModel and sourcePart then
+		local sourceCFrame = sourcePart.CFrame
+		for _, source in ipairs(petModel:GetDescendants()) do
+			if source:IsA("BasePart") and source ~= sourcePart and source.Name ~= "HumanoidRootPart" then
+				local clone = source:Clone()
+				clone.Name = "Visual_" .. source.Name
+				for _, desc in ipairs(clone:GetDescendants()) do
+					if sanitizePetToolVisualInstance(desc) and (desc:IsA("Weld") or desc:IsA("WeldConstraint") or desc:IsA("Motor6D") or desc:IsA("RigidConstraint") or desc:IsA("AlignPosition") or desc:IsA("AlignOrientation")) then
+						desc:Destroy()
+					end
+				end
+				preparePetToolVisualPart(clone)
+				clone.CFrame = CFrame.new() * sourceCFrame:ToObjectSpace(source.CFrame)
+				clone.Parent = visualModel
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = handle
+				weld.Part1 = clone
+				weld.Parent = handle
+			end
+		end
+	end
+
+	return handle, visualModel
 end
 
 local function normalizeImageAssetId(assetValue)
@@ -619,12 +689,21 @@ local function attachToolBillboardFromPet(tool, handle, petModel)
 	clone.Enabled = true
 	clone.AlwaysOnTop = true
 	clone.Adornee = handle
-	local incomeLabel = clone:FindFirstChild("Income", true)
-	if incomeLabel and incomeLabel:IsA("TextLabel") then
-		local power = tonumber(petModel:GetAttribute("Power")) or 1
-		incomeLabel.Text = ("$%d/s"):format(math.max(1, math.floor(power + 0.5)))
-	end
 	clone.Parent = handle
+
+	local moodBillboard = petModel:FindFirstChild("MoodBillboard", true)
+	if moodBillboard and moodBillboard:IsA("BillboardGui") then
+		local existingMood = handle:FindFirstChild("MoodBillboard")
+		if existingMood then
+			existingMood:Destroy()
+		end
+		local moodClone = moodBillboard:Clone()
+		moodClone.Enabled = true
+		moodClone.AlwaysOnTop = true
+		moodClone.Adornee = handle
+		moodClone.Parent = handle
+	end
+
 end
 
 local function resolvePetTemplateImage(template)
@@ -708,6 +787,7 @@ createPetPickupTool = function(player, petModel, state)
 	tool:SetAttribute("PetUID", petUid)
 	tool:SetAttribute("TemplateName", petName)
 	tool:SetAttribute("SkipToolSave", true)
+	tool:SetAttribute("ActivationReadyAt", os.clock() + PET_TOOL_ACTIVATION_GRACE_SECONDS)
 	local toolTextureId = resolvePetToolTextureId(petModel, petName)
 	if toolTextureId then
 		tool.TextureId = toolTextureId
@@ -715,11 +795,17 @@ createPetPickupTool = function(player, petModel, state)
 		tool:SetAttribute("InventoryImage", toolTextureId)
 	end
 
-	local handle = buildPetToolHandle(petModel)
+	local handle, visualModel = buildPetToolHandle(petModel)
 	handle.Parent = tool
+	if visualModel then
+		visualModel.Parent = tool
+	end
 	attachToolBillboardFromPet(tool, handle, petModel)
 
 	tool.Activated:Connect(function()
+		if os.clock() < (tonumber(tool:GetAttribute("ActivationReadyAt")) or 0) then
+			return
+		end
 		dropPetFromTool(player, petUid)
 	end)
 
@@ -727,7 +813,11 @@ createPetPickupTool = function(player, petModel, state)
 	local starterGear = player:FindFirstChild("StarterGear")
 	if starterGear then
 		local starterTool = tool:Clone()
+		starterTool:SetAttribute("ActivationReadyAt", os.clock() + PET_TOOL_ACTIVATION_GRACE_SECONDS)
 		starterTool.Activated:Connect(function()
+			if os.clock() < (tonumber(starterTool:GetAttribute("ActivationReadyAt")) or 0) then
+				return
+			end
 			dropPetFromTool(player, petUid)
 		end)
 		starterTool.Parent = starterGear
@@ -1037,7 +1127,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData106", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData111", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
