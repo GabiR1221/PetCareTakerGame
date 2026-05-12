@@ -1,4 +1,7 @@
 local PetStateManager = {}
+local ServerStorage = game:GetService("ServerStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local LEVEL_THRESHOLDS = { 0, 50, 150, 350, 750, 1550 }
 local Players = game:GetService("Players")
 local DEFAULT_BASE_PET_SCALE = 1.0
@@ -7,6 +10,41 @@ local MIN_ALLOWED_SCALE = 0.5
 local MAX_ALLOWED_SCALE = 2.25
 local DEFAULT_MAX_HUNGER = 100
 local DEFAULT_MAX_HAPPINESS = 100
+
+local function resolveAccessoryIncomePercent(state)
+	if not state then return 0 end
+	local configured = tonumber(state.accessoryBuffs and state.accessoryBuffs.incomePercent)
+	if configured and math.abs(configured) > 0.0001 then
+		return configured
+	end
+
+	local accessoryName = state.equippedAccessoryName
+	if type(accessoryName) ~= "string" or accessoryName == "" then
+		accessoryName = state.accessorySlots and state.accessorySlots.A or nil
+	end
+	if type(accessoryName) ~= "string" or accessoryName == "" then
+		state.accessoryBuffs = state.accessoryBuffs or { incomePercent = 0 }
+		state.accessoryBuffs.incomePercent = 0
+		return 0
+	end
+
+	local percent = 0
+	local storage = ServerStorage:FindFirstChild("PetAccessories")
+	local template = storage and storage:FindFirstChild(accessoryName) or nil
+	if not template then
+		local replicatedAccessories = ReplicatedStorage:FindFirstChild("Accessories")
+		template = replicatedAccessories and replicatedAccessories:FindFirstChild(accessoryName) or nil
+	end
+	if template then
+		percent = tonumber(template:GetAttribute("IncomePercentBuff")) or tonumber(template:GetAttribute("IncomePercent")) or 0
+	elseif accessoryName == "Hat1" then
+		percent = 5
+	end
+
+	state.accessoryBuffs = state.accessoryBuffs or {}
+	state.accessoryBuffs.incomePercent = percent
+	return percent
+end
 
 local function resolveInventoryPetIdByUid(player, petUid)
 	if not player or type(petUid) ~= "string" or petUid == "" then return nil end
@@ -181,6 +219,14 @@ function PetStateManager:SendStateToOwner(petModel)
 		progress = math.clamp(xpInLevel / xpForNext, 0, 1)
 	end
 
+	local basePower = tonumber(st.power) or tonumber(petModel:GetAttribute("Power")) or 1
+	local fame = math.clamp(tonumber(st.fame) or 50, 0, 100)
+	local levelMultiplier = 1 + (math.sqrt(math.max(1, level) - 1) * 0.30)
+	local fameMultiplier = 0.5 + (1.5 * (fame / 100))
+	local accessoryPercent = resolveAccessoryIncomePercent(st)
+	local accessoryMultiplier = 1 + accessoryPercent
+	local boostedPower = math.max(1, basePower * levelMultiplier * fameMultiplier * accessoryMultiplier)
+
 	local payload = {
 		xp = xp,
 		level = level,
@@ -194,6 +240,12 @@ function PetStateManager:SendStateToOwner(petModel)
 		fame = math.clamp(tonumber(st.fame) or 50, 0, 100),
 		location = tostring(st.location or ""),
 		petName = tostring(petModel.Name),
+		power = basePower,
+		boostedPower = boostedPower,
+		levelMultiplier = levelMultiplier,
+		fameMultiplier = fameMultiplier,
+		accessoryMultiplier = accessoryMultiplier,
+		accessoryBuffs = st.accessoryBuffs or { incomePercent = 0 },
 		petUid = tostring(st.petUid or petModel:GetAttribute("PetUID") or ""),
 		inventoryPetId = nil,
 		levelProgress = progress,
@@ -248,6 +300,23 @@ function PetStateManager:SendStateToOwner(petModel)
 				runtimeLocation.Parent = inventoryPet
 			end
 			runtimeLocation.Value = payload.location
+
+			local function ensureNumberValue(valueName, value)
+				local numberValue = inventoryPet:FindFirstChild(valueName)
+				if not numberValue then
+					numberValue = Instance.new("NumberValue")
+					numberValue.Name = valueName
+					numberValue.Parent = inventoryPet
+				end
+				if numberValue:IsA("NumberValue") or numberValue:IsA("IntValue") then
+					numberValue.Value = tonumber(value) or 0
+				end
+			end
+
+			ensureNumberValue("Power", payload.power)
+			ensureNumberValue("BoostedPower", payload.boostedPower)
+			ensureNumberValue("Fame", payload.fame)
+			ensureNumberValue("AccessoryIncomePercent", accessoryPercent)
 		end
 	end
 
