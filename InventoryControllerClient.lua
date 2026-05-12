@@ -308,8 +308,23 @@ local function refreshInventorySuppressionState()
 	end
 end
 
-player:GetAttributeChangedSignal("RunnerActive"):Connect(refreshInventorySuppressionState)
-player:GetAttributeChangedSignal("PetInteractionActive"):Connect(refreshInventorySuppressionState)
+local function onSuppressionStateChanged()
+	refreshInventorySuppressionState()
+	if not isRunnerActive() and reloadInventory then
+		local currentCharacter = player.Character
+		if currentCharacter then
+			task.delay(0.08, function()
+				if player.Character == currentCharacter and not isRunnerActive() then
+					reloadInventory(currentCharacter)
+					manageInventory()
+				end
+			end)
+		end
+	end
+end
+
+player:GetAttributeChangedSignal("RunnerActive"):Connect(onSuppressionStateChanged)
+player:GetAttributeChangedSignal("PetInteractionActive"):Connect(onSuppressionStateChanged)
 
 if isRunnerActive() then
 	refreshInventorySuppressionState()
