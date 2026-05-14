@@ -4,12 +4,15 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
 local workspaceService = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
 local stateRemote = ReplicatedStorage:WaitForChild("RunnerStateEvent")
 local actionRemote = ReplicatedStorage:WaitForChild("RunnerActionEvent")
 local petInteractionUiRemote = ReplicatedStorage:WaitForChild("PetInteractionUIEvent")
+local BREAK_WALL_TAG = "RunnerBreakWall"
+local BREAK_WALL_NAME = "RunnerBreakWall"
 
 local function waitForRunnerGui(timeout)
 	local playerGui = player:WaitForChild("PlayerGui")
@@ -100,6 +103,7 @@ local staminaMax = 50
 local hiddenUiState = {}
 local savedCameraSubject = nil
 local modifiedWalls = {}
+local wallGradientStates = {}
 
 local ContextActionService = game:GetService("ContextActionService")
 local MOVEMENT_LOCK_ACTION = "RunnerExhaustedMoveLock"
@@ -308,27 +312,176 @@ local function clearAllTracks()
 	wallBreakFailTrack = nil
 end
 
-local function applyLocalWallBreakVisual(wallPart)
+local function forEachBreakWall(callback)
+	for _, wall in ipairs(CollectionService:GetTagged(BREAK_WALL_TAG)) do
+		if wall:IsA("BasePart") then
+			callback(wall)
+		end
+	end
+	for _, inst in ipairs(workspaceService:GetDescendants()) do
+		if inst:IsA("BasePart") and inst.Name == BREAK_WALL_NAME then
+			callback(inst)
+		end
+	end
+end
+
+local function setWallFrameVisible(wallPart, visible)
+	if not wallPart then return end
+	for _, descendant in ipairs(wallPart:GetDescendants()) do
+		if descendant:IsA("SurfaceGui") then
+			descendant.Enabled = visible
+			local frame = descendant:FindFirstChild("Frame")
+			if frame and frame:IsA("GuiObject") then
+				frame.Visible = visible
+			end
+		end
+	end
+end
+
+local function setBreakWallFramesVisible(visible)
+	forEachBreakWall(function(wall)
+		setWallFrameVisible(wall, visible)
+	end)
+end
+
+local function blendColorToWhite(color, alpha)
+	return color:Lerp(Color3.new(1, 1, 1), math.clamp(alpha, 0, 1))
+end
+
+local function blendSequenceToWhite(sequence, alpha)
+	local keypoints = {}
+	for _, keypoint in ipairs(sequence.Keypoints) do
+		table.insert(keypoints, ColorSequenceKeypoint.new(keypoint.Time, blendColorToWhite(keypoint.Value, alpha)))
+	end
+	if #keypoints == 0 then
+		return ColorSequence.new(Color3.new(1, 1, 1))
+	end
+	return ColorSequence.new(keypoints)
+end
+
+local function getWallGradients(wallPart)
+	local gradients = {}
+	if not wallPart then return gradients end
+	for _, descendant in ipairs(wallPart:GetDescendants()) do
+		if descendant:IsA("UIGradient") then
+			table.insert(gradients, descendant)
+		end
+	end
+	return gradients
+end
+
+local function snapshotWallSurfaceGuis(wallPart)
+	local snapshots = {}
+	if not wallPart then return snapshots end
+	for _, descendant in ipairs(wallPart:GetDescendants()) do
+		if descendant:IsA("SurfaceGui") then
+			snapshots[descendant] = descendant.Enabled
+		end
+	end
+	return snapshots
+end
+
+local function setWallSurfaceGuisEnabled(wallPart, enabled)
+	if not wallPart then return end
+	for _, descendant in ipairs(wallPart:GetDescendants()) do
+		if descendant:IsA("SurfaceGui") then
+			descendant.Enabled = enabled
+		end
+	end
+end
+
+local function animateWallGradientBreak(wallPart, durationOverride)
+	if not wallPart or not wallPart.Parent then return 0.25 end
+	local duration = math.clamp(tonumber(durationOverride) or tonumber(wallPart:GetAttribute("BreakGradientDuration")) or 0.35, 0.035, 2)
+	local gradients = getWallGradients(wallPart)
+	if #gradients == 0 then return 0 end
+	local state = wallGradientStates[wallPart]
+	if state and state.running then return duration end
+	state = state or {snapshots = {}}
+	state.running = true
+	state.cancelled = false
+	wallGradientStates[wallPart] = state
+	for _, gradient in ipairs(gradients) do
+		if gradient and gradient.Parent and not state.snapshots[gradient] then
+			state.snapshots[gradient] = gradient.Color
+		end
+	end
+	task.spawn(function()
+		local startedAt = os.clock()
+		while wallPart.Parent and not state.cancelled do
+			local alpha = math.clamp((os.clock() - startedAt) / duration, 0, 1)
+			for gradient, originalColor in pairs(state.snapshots) do
+				if gradient and gradient.Parent then
+					gradient.Color = blendSequenceToWhite(originalColor, alpha)
+				end
+			end
+			if alpha >= 1 then break end
+			task.wait()
+		end
+		state.running = false
+	end)
+	return duration
+end
+
+local function resetWallGradient(wallPart)
+	local state = wallGradientStates[wallPart]
+	if not state then return end
+	state.cancelled = true
+	for gradient, originalColor in pairs(state.snapshots or {}) do
+		if gradient and gradient.Parent then
+			gradient.Color = originalColor
+		end
+	end
+	wallGradientStates[wallPart] = nil
+end
+
+local function applyLocalWallBreakVisual(wallPart, visualDuration)
 	if not wallPart or not wallPart:IsA("BasePart") then return end
 	if not modifiedWalls[wallPart] then
 		modifiedWalls[wallPart] = {
 			localTransparencyModifier = wallPart.LocalTransparencyModifier,
 			canCollide = wallPart.CanCollide,
+			surfaceGuis = snapshotWallSurfaceGuis(wallPart),
 		}
 	end
-	wallPart.LocalTransparencyModifier = 1
 	wallPart.CanCollide = false
+	local hideDelay = animateWallGradientBreak(wallPart, visualDuration)
+	task.delay(hideDelay, function()
+		if wallPart and wallPart.Parent and modifiedWalls[wallPart] then
+			wallPart.LocalTransparencyModifier = 1
+			setWallSurfaceGuisEnabled(wallPart, false)
+		end
+	end)
 end
 
 local function resetLocalWalls()
 	for wallPart, snapshot in pairs(modifiedWalls) do
 		if wallPart and wallPart.Parent then
+			resetWallGradient(wallPart)
 			wallPart.LocalTransparencyModifier = snapshot.localTransparencyModifier or 0
 			wallPart.CanCollide = snapshot.canCollide == true
+			for surfaceGui, wasEnabled in pairs(snapshot.surfaceGuis or {}) do
+				if surfaceGui and surfaceGui.Parent then
+					surfaceGui.Enabled = wasEnabled == true
+				end
+			end
 		end
 		modifiedWalls[wallPart] = nil
 	end
 end
+
+
+setBreakWallFramesVisible(false)
+CollectionService:GetInstanceAddedSignal(BREAK_WALL_TAG):Connect(function(inst)
+	if inst:IsA("BasePart") then
+		setWallFrameVisible(inst, runnerActive)
+	end
+end)
+workspaceService.DescendantAdded:Connect(function(inst)
+	if inst:IsA("BasePart") and inst.Name == BREAK_WALL_NAME then
+		setWallFrameVisible(inst, runnerActive)
+	end
+end)
 
 
 local function restoreRunnerCamera()
@@ -424,6 +577,7 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 			exhaustionPhase = nil
 			waitingForJumpAnimEnd = false
 			resetLocalWalls()
+			setBreakWallFramesVisible(false)
 			clearAllTracks()
 			staminaCurrent = 0
 			staminaMax = 50
@@ -440,6 +594,7 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 		wallBreakingNow = false
 		wallBreakSuccessNow = false
 		renderStamina(false)
+		setBreakWallFramesVisible(true)
 
 		clearAllTracks()
 
@@ -623,7 +778,7 @@ stateRemote.OnClientEvent:Connect(function(action, enabled, payload)
 			if stumbleTrack then stopTrack(stumbleTrack) end
 
 			if wallBreakSuccessNow and payload and payload.wallPart then
-				applyLocalWallBreakVisual(payload.wallPart)
+				applyLocalWallBreakVisual(payload.wallPart, payload.breakVisualDuration)
 			end
 
 			if payload and payload.successAnimationId then
