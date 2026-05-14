@@ -1,4 +1,3 @@
---starterplayerscripts alongisde with mainclient
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 if _G.__PetEffectsClientConnected then return end
