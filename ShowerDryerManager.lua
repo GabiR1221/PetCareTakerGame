@@ -3,6 +3,15 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+local function getShowerEffectNames(actionName)
+	if tostring(actionName or "") == "Place" then
+		return {"ShowerPlaceEffect", "PetShowerPlaceEffect", "PetPlacedEffect", "PetInteractionEffect"}
+	elseif tostring(actionName or "") == "Remove" then
+		return {"ShowerRemoveEffect", "PetShowerRemoveEffect", "PetRemovedEffect", "PetInteractionEffect"}
+	end
+	return {"PetInteractionEffect"}
+end
+
 function ShowerDryerManager:Initialize(stateTable, carryingTable, playersService, petMovement, interactionPetResolver, stowPetAsToolCallback, interactionUiCallback)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
@@ -39,6 +48,20 @@ function ShowerDryerManager:Initialize(stateTable, carryingTable, playersService
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
+	self.EffectModule = require(ReplicatedStorage.Modules.EffectModule)
+end
+
+function ShowerDryerManager:_getShowerEffectNames(actionName)
+	return getShowerEffectNames(actionName)
+end
+
+function ShowerDryerManager:_playShowerPetEffect(actionName, petModel, showerPart)
+	if not self.EffectModule then return end
+	self.EffectModule:PlayTimedPartEffectForAll(getShowerEffectNames(actionName), petModel or showerPart, {
+		offset = CFrame.new(0, 0.25, 0),
+		weld = actionName ~= "Remove",
+		anchored = actionName == "Remove",
+	})
 end
 
 function ShowerDryerManager:_toToolHandle(toolInstance)
@@ -851,6 +874,7 @@ function ShowerDryerManager:_handleExitFromClient(player)
 		self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
 	end
 	self.PetMovement.StopWandering(pet)
+	self:_playShowerPetEffect("Remove", pet, showerPart)
 
 	self.petState[pet] = self.petState[pet] or {}
 	local state = self.petState[pet]
@@ -1092,6 +1116,7 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 		end
 
 		-- Mark as on shower
+		self:_playShowerPetEffect("Place", pet, showerPart)
 		self.petState[pet] = self.petState[pet] or {}
 		self.petState[pet].location = "shower"
 		self.petState[pet].shower = showerPart
@@ -1306,6 +1331,7 @@ function ShowerDryerManager:_finishShowerForPet(player, pet, showerPart)
 
 	self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
 	self.PetMovement.StopWandering(pet)
+	self:_playShowerPetEffect("Remove", pet, showerPart)
 
 	-- Award XP
 	self.PetStateManager:AddXP(pet, 20) -- SHOWER_XP
