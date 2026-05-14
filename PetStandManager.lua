@@ -4,6 +4,16 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local ServerStorage = game:GetService("ServerStorage")
 
+local function getStandEffectNames(actionName)
+	local baseName = tostring(actionName or "")
+	if baseName == "Place" then
+		return {"PetStandPlaceEffect", "StandPlaceEffect", "PetPlacedEffect", "PetInteractionEffect"}
+	elseif baseName == "Remove" then
+		return {"PetStandRemoveEffect", "PetStandRemoveffect", "StandRemoveEffect", "PetRemovedEffect", "PetInteractionEffect"}
+	end
+	return {"PetInteractionEffect"}
+end
+
 local DEFAULT_FAME_CONFIG = {
 	initial = 50,
 	min = 0,
@@ -51,11 +61,13 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.collectorAnimState = {}       -- [collectorPart] = true while tweening
 	self.surfacePulseState = {}        -- [standRoot] = true while pulsing
 	self.fameTasks = {}                -- [petModel] = true while fame loop runs
+	self.fameNpcState = {}             -- [standRoot] = {npcs = {Model, ...}}
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.TycoonUtils = require(script.Parent.TycoonUtils)
 	self.Multipliers = require(ReplicatedStorage.Modules.Multipliers)
+	self.EffectModule = require(ReplicatedStorage.Modules.EffectModule)
 	self.TycoonUtils:Initialize(self.Config)
 
 	self:WatchPurchaseContainers()
@@ -279,6 +291,15 @@ function PetStandManager:PulseSurfaceDisplay(standRoot, label)
 	self.surfacePulseState[standRoot] = true
 
 	local originalSize = label.Size
+	local originalAnchorPoint = label.AnchorPoint
+	local originalPosition = label.Position
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	label.Position = UDim2.new(
+		originalPosition.X.Scale + ((0.5 - originalAnchorPoint.X) * originalSize.X.Scale),
+		originalPosition.X.Offset + math.floor((0.5 - originalAnchorPoint.X) * originalSize.X.Offset + 0.5),
+		originalPosition.Y.Scale + ((0.5 - originalAnchorPoint.Y) * originalSize.Y.Scale),
+		originalPosition.Y.Offset + math.floor((0.5 - originalAnchorPoint.Y) * originalSize.Y.Offset + 0.5)
+	)
 	local originalStrokeThickness = nil
 	local stroke = label:FindFirstChildWhichIsA("UIStroke")
 	if stroke then
@@ -326,6 +347,10 @@ function PetStandManager:PulseSurfaceDisplay(standRoot, label)
 
 		shrinkTween:Play()
 		shrinkTween.Completed:Connect(function()
+			if label and label.Parent then
+				label.AnchorPoint = originalAnchorPoint
+				label.Position = originalPosition
+			end
 			self.surfacePulseState[standRoot] = nil
 		end)
 	end)
@@ -372,6 +397,21 @@ function PetStandManager:GetStoredMoneyValue(standRoot)
 	return stored
 end
 
+function PetStandManager:GetStandEffectNames(actionName)
+	return getStandEffectNames(actionName)
+end
+
+function PetStandManager:PlayStandPetEffect(actionName, petModel, standPart)
+	if not self.EffectModule then return end
+	local target = petModel or standPart
+	if not target then return end
+	self.EffectModule:PlayTimedPartEffectForAll(getStandEffectNames(actionName), target, {
+		offset = CFrame.new(0, 0.25, 0),
+		weld = actionName ~= "Remove",
+		anchored = actionName == "Remove",
+	})
+end
+
 function PetStandManager:UpdateStandDisplay(standRoot)
 	if not standRoot then return end
 
@@ -391,18 +431,23 @@ function PetStandManager:AnimateCollectorPress(collectorPart)
 
 	self.collectorAnimState[collectorPart] = true
 
-	local baseCFrame = collectorPart.CFrame
-	local pressedCFrame = baseCFrame * CFrame.new(0, -0.35, 0)
+	local baseCFrame = collectorPart:GetAttribute("CollectorBaseCFrame")
+	if typeof(baseCFrame) ~= "CFrame" then
+		baseCFrame = collectorPart.CFrame
+		collectorPart:SetAttribute("CollectorBaseCFrame", baseCFrame)
+	end
+	local pressDistance = math.clamp(tonumber(collectorPart:GetAttribute("PressDepth")) or 0.35, 0.05, 2)
+	local pressedCFrame = baseCFrame + Vector3.new(0, -pressDistance, 0)
 
 	local downTween = TweenService:Create(
 		collectorPart,
-		TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{CFrame = pressedCFrame}
 	)
 
 	local upTween = TweenService:Create(
 		collectorPart,
-		TweenInfo.new(0.11, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{CFrame = baseCFrame}
 	)
 
@@ -524,15 +569,14 @@ function PetStandManager:EnsureFameBillboard(petModel)
 	if not billboard then
 		billboard = Instance.new("BillboardGui")
 		billboard.Name = "PetFameBillboard"
-		billboard.Size = UDim2.new(2.5, 0, 1, 0)
+		billboard.Size = UDim2.new(0.9, 0, 0.9, 0)
 		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.8, 0)
 		billboard.AlwaysOnTop = true
 		billboard.Parent = adornee
-		billboard.Zindex = 0
 
 		local bg = Instance.new("Frame")
 		bg.Name = "BarBackground"
-		bg.Size = UDim2.new(1, 0, 0.8, 0)
+		bg.Size = UDim2.new(0.9, 0, 0.8, 0)
 		bg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 		bg.BorderSizePixel = 0
 		bg.Parent = billboard
@@ -701,6 +745,281 @@ function PetStandManager:UpdateStandMultipliersBillboard(petModel)
 	end
 end
 
+function PetStandManager:GetFameNpcCount(fame)
+	local value = math.clamp(tonumber(fame) or 0, 0, 100)
+	if value >= 100 then return 3 end
+	if value >= 75 then return 2 end
+	if value >= 50 then return 1 end
+	return 0
+end
+
+function PetStandManager:GetFameNpcTemplate(standRoot, index)
+	local configuredName = standRoot and (standRoot:GetAttribute("FameNpcTemplate" .. tostring(index)) or standRoot:GetAttribute("FameNpcTemplate"))
+	local candidateNames = {}
+	if type(configuredName) == "string" and configuredName ~= "" then
+		table.insert(candidateNames, configuredName)
+	end
+	table.insert(candidateNames, "StandFameNPC" .. tostring(index))
+	table.insert(candidateNames, "FameNPC" .. tostring(index))
+	table.insert(candidateNames, "StandFameNPC")
+	table.insert(candidateNames, "FameNPC")
+
+	local roots = {
+		ReplicatedStorage,
+		ReplicatedStorage:FindFirstChild("StandFameNPCs"),
+		ReplicatedStorage:FindFirstChild("FameNPCs"),
+		ReplicatedStorage:FindFirstChild("NPCs"),
+		ServerStorage,
+		ServerStorage:FindFirstChild("StandFameNPCs"),
+		ServerStorage:FindFirstChild("FameNPCs"),
+		ServerStorage:FindFirstChild("NPCs"),
+	}
+	for _, root in ipairs(roots) do
+		if root then
+			for _, name in ipairs(candidateNames) do
+				local template = root:FindFirstChild(name)
+				if template and template:IsA("Model") then
+					return template
+				end
+			end
+		end
+	end
+	return nil
+end
+
+function PetStandManager:FindFameNpcPoint(standRoot, index)
+	if not standRoot then return nil end
+	local names = {
+		"FameNpcPoint" .. tostring(index),
+		"FameNPCPoint" .. tostring(index),
+		"StandNpcPoint" .. tostring(index),
+		"StandNPCPoint" .. tostring(index),
+		"AudiencePoint" .. tostring(index),
+	}
+	for _, name in ipairs(names) do
+		local point = standRoot:FindFirstChild(name, true)
+		if point and point:IsA("BasePart") then return point end
+	end
+
+	local current = standRoot.Parent
+	while current do
+		if current.Name == "Essentials" or current:FindFirstChild("Essentials") then
+			local searchRoot = current.Name == "Essentials" and current or current:FindFirstChild("Essentials")
+			if searchRoot then
+				for _, name in ipairs(names) do
+					local point = searchRoot:FindFirstChild(name, true)
+					if point and point:IsA("BasePart") then return point end
+				end
+				local folders = {"FameNpcPoints", "FameNPCPoints", "StandNpcPoints", "AudiencePoints"}
+				for _, folderName in ipairs(folders) do
+					local folder = searchRoot:FindFirstChild(folderName, true)
+					if folder then
+						local points = {}
+						for _, child in ipairs(folder:GetChildren()) do
+							if child:IsA("BasePart") then table.insert(points, child) end
+						end
+						table.sort(points, function(a, b) return a.Name < b.Name end)
+						if points[index] then return points[index] end
+					end
+				end
+			end
+			break
+		end
+		current = current.Parent
+	end
+	return nil
+end
+
+function PetStandManager:GetFallbackFameNpcCFrame(standRoot, index)
+	local standPart = self:GetStandPlacementPart(standRoot)
+	if not standPart then return CFrame.new() end
+	local offsets = {
+		Vector3.new(0, standPart.Size.Y / 2, -4),
+		Vector3.new(3, standPart.Size.Y / 2, -4.5),
+		Vector3.new(-3, standPart.Size.Y / 2, -4.5),
+	}
+	local position = standPart.CFrame:PointToWorldSpace(offsets[index] or offsets[1])
+	local lookAt = standPart.Position + Vector3.new(0, 1, 0)
+	return CFrame.lookAt(position, Vector3.new(lookAt.X, position.Y, lookAt.Z))
+end
+
+function PetStandManager:GetFameNpcCFrame(standRoot, index)
+	local point = self:FindFameNpcPoint(standRoot, index)
+	if point then return point.CFrame end
+	return self:GetFallbackFameNpcCFrame(standRoot, index)
+end
+
+function PetStandManager:PrepareFameNpc(npc)
+	for _, descendant in ipairs(npc:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.Massless = true
+			if descendant.Name == "HumanoidRootPart" or descendant == npc.PrimaryPart then
+				descendant.Anchored = true
+			end
+		end
+	end
+end
+
+function PetStandManager:CaptureFameNpcParts(npc)
+	local parts = {}
+	if not npc then return parts end
+	for _, descendant in ipairs(npc:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, {part = descendant, transparency = descendant.Transparency})
+		end
+	end
+	return parts
+end
+
+function PetStandManager:TweenFameNpc(npc, fromCFrame, toCFrame, parts, duration, fadeIn, onComplete)
+	if not npc then return end
+	duration = math.clamp(tonumber(duration) or 0.25, 0.05, 2)
+	local alphaValue = Instance.new("NumberValue")
+	alphaValue.Value = 0
+	local conn = nil
+	conn = alphaValue.Changed:Connect(function(value)
+		if not npc or not npc.Parent then
+			if conn then conn:Disconnect() end
+			alphaValue:Destroy()
+			return
+		end
+		local alpha = math.clamp(value, 0, 1)
+		npc:PivotTo(fromCFrame:Lerp(toCFrame, alpha))
+		for _, entry in ipairs(parts or {}) do
+			local part = entry.part
+			if part and part.Parent then
+				local original = entry.transparency or 0
+				if fadeIn then
+					part.Transparency = 1 + ((original - 1) * alpha)
+				else
+					part.Transparency = original + ((1 - original) * alpha)
+				end
+			end
+		end
+	end)
+	local tween = TweenService:Create(alphaValue, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Value = 1})
+	tween:Play()
+	tween.Completed:Connect(function()
+		if conn then conn:Disconnect() end
+		alphaValue:Destroy()
+		if type(onComplete) == "function" then onComplete() end
+	end)
+end
+
+function PetStandManager:PlayFameNpcAnimation(npc, standRoot, index)
+	local animationId = standRoot and (standRoot:GetAttribute("FameNpcAnimationId" .. tostring(index)) or standRoot:GetAttribute("FameNpcAnimationId"))
+		or npc:GetAttribute("FameNpcAnimationId")
+		or npc:GetAttribute("AnimationId")
+	if type(animationId) ~= "string" or animationId == "" then return end
+
+	local animator = nil
+	local humanoid = npc:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator")
+		animator.Parent = humanoid
+	else
+		local controller = npc:FindFirstChildOfClass("AnimationController") or Instance.new("AnimationController")
+		controller.Parent = npc
+		animator = controller:FindFirstChildOfClass("Animator") or Instance.new("Animator")
+		animator.Parent = controller
+	end
+	local animation = Instance.new("Animation")
+	animation.AnimationId = animationId
+	local ok, track = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	animation:Destroy()
+	if ok and track then
+		track.Looped = true
+		track:Play(0.15)
+	end
+end
+
+function PetStandManager:SpawnFameNpc(standRoot, index)
+	local template = self:GetFameNpcTemplate(standRoot, index)
+	if not template then return nil end
+	local npc = template:Clone()
+	npc.Name = "StandFameNPC" .. tostring(index)
+	npc:SetAttribute("RuntimeFameNpc", true)
+	if not npc.PrimaryPart then
+		local root = npc:FindFirstChild("HumanoidRootPart", true) or npc:FindFirstChildWhichIsA("BasePart", true)
+		if root then npc.PrimaryPart = root end
+	end
+	local targetCFrame = self:GetFameNpcCFrame(standRoot, index)
+	local startCFrame = targetCFrame + Vector3.new(0, -1.25, 0)
+	npc:PivotTo(startCFrame)
+	self:PrepareFameNpc(npc)
+	local parts = self:CaptureFameNpcParts(npc)
+	for _, entry in ipairs(parts) do
+		if entry.part then entry.part.Transparency = 1 end
+	end
+	local folder = workspace:FindFirstChild("RuntimeEffects")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "RuntimeEffects"
+		folder.Parent = workspace
+	end
+	npc.Parent = folder
+	self:TweenFameNpc(npc, startCFrame, targetCFrame, parts, standRoot and standRoot:GetAttribute("FameNpcTweenTime") or 0.25, true)
+	self:PlayFameNpcAnimation(npc, standRoot, index)
+	return npc
+end
+
+function PetStandManager:UpdateStandFameNpcs(petModel)
+	if not petModel then return end
+	local state = self.petState[petModel]
+	local standRoot = state and state.petstandRoot
+	if not standRoot then return end
+	local desiredCount = self:GetFameNpcCount(state.fame)
+	local runtime = self.fameNpcState[standRoot]
+	if not runtime then
+		runtime = {npcs = {}}
+		self.fameNpcState[standRoot] = runtime
+	end
+
+	for index = 1, 3 do
+		local npc = runtime.npcs[index]
+		if index <= desiredCount then
+			if not npc or not npc.Parent then
+				runtime.npcs[index] = self:SpawnFameNpc(standRoot, index)
+			else
+				npc:PivotTo(self:GetFameNpcCFrame(standRoot, index))
+			end
+		elseif npc then
+			self:AnimateFameNpcOut(npc, standRoot)
+			runtime.npcs[index] = nil
+		end
+	end
+
+	if desiredCount <= 0 then
+		self.fameNpcState[standRoot] = nil
+	end
+end
+
+
+function PetStandManager:AnimateFameNpcOut(npc, standRoot)
+	if not npc or not npc.Parent then return end
+	local parts = self:CaptureFameNpcParts(npc)
+	local startCFrame = npc:GetPivot()
+	local endCFrame = startCFrame + Vector3.new(0, -1.25, 0)
+	self:TweenFameNpc(npc, startCFrame, endCFrame, parts, standRoot and standRoot:GetAttribute("FameNpcTweenTime") or 0.2, false, function()
+		if npc then pcall(function() npc:Destroy() end) end
+	end)
+end
+
+function PetStandManager:DestroyStandFameNpcs(standRoot)
+	local runtime = standRoot and self.fameNpcState[standRoot]
+	if not runtime then return end
+	for index, npc in pairs(runtime.npcs or {}) do
+		if npc then self:AnimateFameNpcOut(npc, standRoot) end
+		runtime.npcs[index] = nil
+	end
+	self.fameNpcState[standRoot] = nil
+end
+
 function PetStandManager:StartFameLoop()
 	if self._fameLoopStarted then return end
 	self._fameLoopStarted = true
@@ -723,9 +1042,13 @@ function PetStandManager:StartFameLoop()
 							local step = targetDelta / blendSeconds
 							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) + step, fameCfg.min, fameCfg.max)
 							self:UpdateFameBillboard(petModel)
+							self:UpdateStandFameNpcs(petModel)
 						else
 							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) - fameCfg.offStandDecayPerSecond, fameCfg.min, fameCfg.max)
 							self:DestroyFameBillboard(petModel)
+							if state.petstandRoot then
+								self:DestroyStandFameNpcs(state.petstandRoot)
+							end
 						end
 
 						self:UpdateIncomeBillboard(petModel)
@@ -851,6 +1174,25 @@ function PetStandManager:IsPlayerAllowedToUseStand(player, standPart)
 	return false
 end
 
+function PetStandManager:GetPetOnStand(standRoot)
+	if not standRoot then return nil end
+	for petModel, state in pairs(self.petState) do
+		if petModel and petModel.Parent and state and state.location == "petstand" and state.petstandRoot == standRoot then
+			return petModel, state
+		end
+	end
+	return nil, nil
+end
+
+function PetStandManager:GetCurrencyParticleCountForCollection(standRoot, collectorPart, collectedAmount)
+	local maxCount = math.clamp(math.floor(tonumber(collectorPart and collectorPart:GetAttribute("CurrencyParticleCount")) or 12), 1, 18)
+	local petModel = self:GetPetOnStand(standRoot)
+	local incomePerSecond = petModel and self:GetPetIncomePerSecond(petModel) or 0
+	local twoMinuteIncome = math.max(1, incomePerSecond * 120)
+	local ratio = math.clamp((tonumber(collectedAmount) or 0) / twoMinuteIncome, 0, 1)
+	return math.clamp(math.ceil(maxCount * ratio), 1, maxCount)
+end
+
 function PetStandManager:CollectStandMoney(player, standRoot)
 	if not player or not standRoot then return 0 end
 
@@ -873,6 +1215,13 @@ function PetStandManager:CollectStandMoney(player, standRoot)
 	if added > 0 then
 		stored.Value = math.max(0, stored.Value - added)
 		self:UpdateStandDisplay(standRoot)
+		local collectorPart = self:GetCollectorPart(standRoot)
+		if collectorPart and self.EffectModule then
+			self.EffectModule:PlayCurrencyCollectEffectForPlayer(player, collectorPart, {
+				count = self:GetCurrencyParticleCountForCollection(standRoot, collectorPart, amount),
+				templateName = collectorPart:GetAttribute("CurrencyParticleTemplate"),
+			})
+		end
 
 		if self.SaveManager then
 			self.SaveManager:ScheduleSave(player)
@@ -960,6 +1309,8 @@ function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standP
 
 		-- auto collect before pickup
 		self:CollectStandMoney(player, standRoot)
+		self:PlayStandPetEffect("Remove", petModel, standPart)
+		self:DestroyStandFameNpcs(standRoot)
 		self:StopIncomeLoop(petModel)
 
 		if petModel.PrimaryPart then
@@ -1118,9 +1469,11 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		end
 
 		self.PetMovement.StopWandering(pet)
+		self:PlayStandPetEffect("Place", pet, standPart)
 		self:CreatePlacedPetPickupPrompt(pet, standRoot, standPart)
 		self:StartIncomeLoop(pet, standRoot)
 		self:UpdateFameBillboard(pet)
+		self:UpdateStandFameNpcs(pet)
 		self:UpdateStandMultipliersBillboard(pet)
 		self:UpdateIncomeBillboard(pet)
 		local fameBillboard = pet:FindFirstChild("PetFameBillboard")
@@ -1195,6 +1548,7 @@ function PetStandManager:RestorePetToStand(petModel, player, standId, storedMone
 	self:CreatePlacedPetPickupPrompt(petModel, standRoot, standPart)
 	self:StartIncomeLoop(petModel, standRoot)
 	self:UpdateFameBillboard(petModel)
+	self:UpdateStandFameNpcs(petModel)
 	self:UpdateStandMultipliersBillboard(petModel)
 	self:UpdateIncomeBillboard(petModel)
 	self.PetStateManager:SendStateToOwner(petModel)
