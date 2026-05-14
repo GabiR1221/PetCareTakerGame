@@ -16,6 +16,16 @@ local Modules = PetSystem:FindFirstChild("Modules") or Instance.new("Folder")
 Modules.Name = "Modules"
 Modules.Parent = PetSystem
 
+local ReplicatedModules = ReplicatedStorage:FindFirstChild("Modules") or Instance.new("Folder")
+ReplicatedModules.Name = "Modules"
+ReplicatedModules.Parent = ReplicatedStorage
+
+local serverEffectModule = Modules:FindFirstChild("EffectModule")
+if serverEffectModule and not ReplicatedModules:FindFirstChild("EffectModule") then
+	local clientEffectModule = serverEffectModule:Clone()
+	clientEffectModule.Parent = ReplicatedModules
+end
+
 local PetStateManager = require(Modules:WaitForChild("PetStateManager"))
 local PetAttachmentManager = require(Modules:WaitForChild("PetAttachmentManager"))
 local TycoonUtils = require(Modules:WaitForChild("TycoonUtils"))
