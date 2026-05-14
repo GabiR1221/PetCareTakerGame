@@ -44,6 +44,7 @@ local WALL_BREAK_DEFAULT_STOP_DISTANCE = 1.8
 local WALL_BREAK_APPROACH_SPEED_MULTIPLIER = 1
 local WALL_BREAK_KNOCKBACK_SPEED = 34
 local WALL_BREAK_COOLDOWN = 0.4
+local WALL_BREAK_DEFAULT_VISUAL_DURATION = 0.35
 
 local WILD_CASES_FOLDER_NAME = "WildCases"
 local DEFAULT_CASE_EGG = "Starter"
@@ -442,6 +443,11 @@ function SprintRunManager:_startHeartbeat()
 					local dist = horizontal.Magnitude
 					local stopDistance = state.wallBreakStopDistance or WALL_BREAK_DEFAULT_STOP_DISTANCE
 					if dist <= stopDistance then
+						local horizontalVelocity = Vector3.new(root.AssemblyLinearVelocity.X, 0, root.AssemblyLinearVelocity.Z).Magnitude
+						local runSpeed = math.max(1, tonumber(state.runSpeed) or RUN_SPEED)
+						local speedRatio = math.clamp(horizontalVelocity / runSpeed, 0.35, 2.5)
+						local configuredDuration = tonumber(wallPart:GetAttribute("BreakGradientDuration")) or WALL_BREAK_DEFAULT_VISUAL_DURATION
+						local breakVisualDuration = math.clamp(configuredDuration / speedRatio, 0.035, configuredDuration)
 						if state.wallBreakSuccess == true then
 							root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
 						end
@@ -452,6 +458,7 @@ function SprintRunManager:_startHeartbeat()
 							successAnimationId = state.wallBreakSuccessAnimationId,
 							failedAnimationId = state.wallBreakFailAnimationId,
 							wallPart = wallPart,
+							breakVisualDuration = breakVisualDuration,
 						})
 					else
 						local moveDir = horizontal.Unit
