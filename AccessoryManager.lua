@@ -2,6 +2,15 @@ local AccessoryManager = {}
 local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local function getAccessoryEffectNames(actionName)
+	if tostring(actionName or "") == "Place" then
+		return {"AccessoryTablePlaceEffect", "AccessoryPlaceEffect", "PetPlacedEffect", "PetInteractionEffect"}
+	elseif tostring(actionName or "") == "Remove" then
+		return {"AccessoryTableRemoveEffect", "AccessoryRemoveEffect", "PetRemovedEffect", "PetInteractionEffect"}
+	end
+	return {"PetInteractionEffect"}
+end
+
 function AccessoryManager:Initialize(stateTable, carryingTable, playersService, accessoryEvent, serverStorage, interactionPetResolver, stowPetAsToolCallback, interactionUiCallback)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
@@ -18,6 +27,7 @@ function AccessoryManager:Initialize(stateTable, carryingTable, playersService, 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
 	self.PetRigManager = require(script.Parent.PetRigManager)
+	self.EffectModule = require(ReplicatedStorage.Modules.EffectModule)
 
 	-- Extend this table to add more buffs in the future.
 	-- Key must match accessory model/item name.
@@ -25,6 +35,20 @@ function AccessoryManager:Initialize(stateTable, carryingTable, playersService, 
 		Hat1 = { incomePercent = 5 },
 	}
 end
+
+function AccessoryManager:_getAccessoryEffectNames(actionName)
+	return getAccessoryEffectNames(actionName)
+end
+
+function AccessoryManager:_playAccessoryPetEffect(actionName, petModel, tablePart)
+	if not self.EffectModule then return end
+	self.EffectModule:PlayTimedPartEffectForAll(getAccessoryEffectNames(actionName), petModel or tablePart, {
+		offset = CFrame.new(0, 0.25, 0),
+		weld = actionName ~= "Remove",
+		anchored = actionName == "Remove",
+	})
+end
+
 function AccessoryManager:_getBuffForAccessory(accessoryName)
 	if type(accessoryName) ~= "string" or accessoryName == "" then
 		return nil
@@ -346,6 +370,7 @@ function AccessoryManager:ConnectAccessoryPrompt(tablePart)
 		end
 
 		self.carryingPetByUserId[player.UserId] = nil
+		self:_playAccessoryPetEffect("Place", pet, tablePart)
 
 		-- Update state (EXACTLY like old script)
 		self.petState[pet] = self.petState[pet] or {}
@@ -635,6 +660,7 @@ function AccessoryManager:HandleAccessoryEvent(player, action, data)
 		end
 
 		-- Return to pet tool flow (auto-equip) instead of old carried reattach.
+		self:_playAccessoryPetEffect("Remove", pet, state.accessoryTable)
 		local restoredToTool = false
 		if type(self.StowPetAsTool) == "function" then
 			local ok, result = pcall(function()
