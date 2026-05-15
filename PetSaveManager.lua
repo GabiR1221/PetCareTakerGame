@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
 local SAVE_DEBOUNCE_SECONDS = 8
+local URGENT_SAVE_DEBOUNCE_SECONDS = 2
 local FORCE_SAVE_AFTER_SECONDS = 60
 local AUTOSAVE_INTERVAL_SECONDS = 120
 local MAX_SAVE_RETRIES = 3
@@ -27,12 +28,49 @@ local function safeEncodeSignature(payload)
 	return encoded
 end
 
+local function normalizePetDataList(petData)
+	if type(petData) ~= "table" then
+		return {}, false
+	end
+
+	local normalized = {}
+	local indexByUid = {}
+	local changed = false
+
+	for _, petInfo in ipairs(petData) do
+		if type(petInfo) == "table" then
+			local uidKey = tostring(petInfo.petUid or "")
+			if uidKey == "" then
+				table.insert(normalized, petInfo)
+			else
+				local existingIndex = indexByUid[uidKey]
+				if not existingIndex then
+					indexByUid[uidKey] = #normalized + 1
+					table.insert(normalized, petInfo)
+				else
+					changed = true
+					local existing = normalized[existingIndex]
+					if tostring(existing.location or "") == "inventory" and tostring(petInfo.location or "") ~= "inventory" then
+						normalized[existingIndex] = petInfo
+					end
+				end
+			end
+		else
+			changed = true
+		end
+	end
+
+	return normalized, changed or #normalized ~= #petData
+end
+
 function PetSaveManager:Initialize(dataStoreName, stateTable, carryingTable)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
 	self.dataStore = DataStoreService:GetDataStore(tostring(dataStoreName))
 
 	self.pendingByUserId = {} -- userId(string) -> true while debounce timer exists
+	self.pendingUrgentByUserId = {} -- userId(string) -> true when a short critical-action save is queued
+	self.saveTokenByUserId = {} -- userId(string) -> token for replacing slower queued saves
 	self.dirtyByUserId = {} -- userId(string) -> true if data changed since last successful save
 	self.lastSavedSignatureByUserId = {}
 	self.lastSaveAtByUserId = {}
@@ -43,6 +81,7 @@ end
 
 function PetSaveManager:_collectPetDataForPlayer(player)
 	local petData = {}
+	local indexByUid = {}
 
 	for pet, state in pairs(self.petState) do
 		if state and state.ownerUserId == player.UserId and not state.wild then
@@ -88,7 +127,18 @@ function PetSaveManager:_collectPetDataForPlayer(player)
 				standStoredMoney = storedMoney or 0,
 			}
 
-			table.insert(petData, petInfo)
+			local uidKey = tostring(petInfo.petUid or "")
+			if uidKey == "" then
+				table.insert(petData, petInfo)
+			else
+				local existingIndex = indexByUid[uidKey]
+				if not existingIndex then
+					indexByUid[uidKey] = #petData + 1
+					table.insert(petData, petInfo)
+				elseif tostring(petData[existingIndex].location or "") == "inventory" and tostring(petInfo.location or "") ~= "inventory" then
+					petData[existingIndex] = petInfo
+				end
+			end
 		end
 	end
 
@@ -176,13 +226,20 @@ function PetSaveManager:LoadPlayerPets(player)
 	end)
 
 	if success and petData then
+		local normalizedPetData, normalizedChanged = normalizePetDataList(petData)
+		petData = normalizedPetData
 		print(("[PetSaveManager] Loaded %d pets for %s"):format(#petData, player.Name))
+		if normalizedChanged then
+			self.dirtyByUserId[userId] = true
+		end
 		local signature = safeEncodeSignature(petData)
 		if signature ~= nil then
 			self.lastSavedSignatureByUserId[userId] = signature
 		end
 		self.lastSaveAtByUserId[userId] = os.clock()
-		self.dirtyByUserId[userId] = nil
+		if not normalizedChanged then
+			self.dirtyByUserId[userId] = nil
+		end
 		return petData
 	end
 
@@ -201,23 +258,35 @@ function PetSaveManager:ScheduleSave(player, options)
 	options = type(options) == "table" and options or {}
 	self.dirtyByUserId[userId] = true
 
+	local urgent = options.urgent == true
 	if self.pendingByUserId[userId] then
-		return
+		if not urgent or self.pendingUrgentByUserId[userId] then
+			return
+		end
+	else
+		self.pendingByUserId[userId] = true
 	end
 
-	self.pendingByUserId[userId] = true
-	local delaySeconds = SAVE_DEBOUNCE_SECONDS
+	self.pendingUrgentByUserId[userId] = urgent or self.pendingUrgentByUserId[userId] == true
+	local token = {}
+	self.saveTokenByUserId[userId] = token
+
+	local delaySeconds = urgent and URGENT_SAVE_DEBOUNCE_SECONDS or SAVE_DEBOUNCE_SECONDS
+	local saveOptions = urgent and { force = true, reason = options.reason or "UrgentScheduledSave" } or options
 	local lastSaveAt = self.lastSaveAtByUserId[userId]
-	if options.force ~= true and options.bypassMinInterval ~= true and lastSaveAt then
+	if not urgent and options.force ~= true and options.bypassMinInterval ~= true and lastSaveAt then
 		local elapsed = os.clock() - lastSaveAt
 		if elapsed < MIN_SECONDS_BETWEEN_SAVES then
 			delaySeconds = math.max(delaySeconds, MIN_SECONDS_BETWEEN_SAVES - elapsed)
 		end
 	end
 	task.delay(delaySeconds, function()
+		if self.saveTokenByUserId[userId] ~= token then return end
 		self.pendingByUserId[userId] = nil
+		self.pendingUrgentByUserId[userId] = nil
+		self.saveTokenByUserId[userId] = nil
 		if not player.Parent then return end
-		self:SavePlayerPets(player, options)
+		self:SavePlayerPets(player, saveOptions)
 	end)
 end
 
