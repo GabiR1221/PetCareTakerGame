@@ -4,6 +4,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local ServerStorage = game:GetService("ServerStorage")
 
+local FAME_LOOP_INTERVAL_SECONDS = 5
+local STAND_VISUAL_UPDATE_INTERVAL_SECONDS = 5
+local INCOME_BILLBOARD_UPDATE_INTERVAL_SECONDS = 5
+
 local function getStandEffectNames(actionName)
 	local baseName = tostring(actionName or "")
 	if baseName == "Place" then
@@ -63,6 +67,8 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.fameTasks = {}                -- [petModel] = true while fame loop runs
 	self.fameNpcState = {}             -- [standRoot] = {npcs = {Model, ...}}
 	self.lastStateSendAtByPet = {}     -- [petModel] = os.clock timestamp for throttled UI sync
+	self.lastStandVisualUpdateAtByPet = {} -- [petModel] = os.clock timestamp for billboard/NPC refresh throttling
+	self.lastIncomeBillboardUpdateAtByPet = {} -- [petModel] = os.clock timestamp for income-loop cosmetic refresh
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
@@ -1048,12 +1054,19 @@ function PetStandManager:StartFameLoop()
 	if self._fameLoopStarted then return end
 	self._fameLoopStarted = true
 	task.spawn(function()
+		local lastTick = os.clock()
 		while true do
+			local now = os.clock()
+			local elapsed = math.max(0.01, now - lastTick)
+			lastTick = now
 			local fameCfg = self:GetFameConfig()
 			for petModel, state in pairs(self.petState) do
 				if petModel and petModel.Parent and state then
 					if state.wild then
-						self:UpdateIncomeBillboard(petModel)
+						if (now - (self.lastStandVisualUpdateAtByPet[petModel] or 0)) >= STAND_VISUAL_UPDATE_INTERVAL_SECONDS then
+							self.lastStandVisualUpdateAtByPet[petModel] = now
+							self:UpdateIncomeBillboard(petModel)
+						end
 					else
 						self:EnsureFameState(petModel)
 						if state.location == "petstand" then
@@ -1063,22 +1076,26 @@ function PetStandManager:StartFameLoop()
 							local minSeconds = math.max(0.05, tonumber(moodData.minSeconds) or 30)
 							local maxSeconds = math.max(minSeconds, tonumber(moodData.maxSeconds) or minSeconds)
 							local blendSeconds = (minSeconds + maxSeconds) * 0.5
-							local step = targetDelta / blendSeconds
+							local step = (targetDelta / blendSeconds) * elapsed
 							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) + step, fameCfg.min, fameCfg.max)
-							self:UpdateFameBillboard(petModel)
-							self:UpdateStandFameNpcs(petModel)
 						else
-							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) - fameCfg.offStandDecayPerSecond, fameCfg.min, fameCfg.max)
+							state.fame = math.clamp((tonumber(state.fame) or fameCfg.initial) - (fameCfg.offStandDecayPerSecond * elapsed), fameCfg.min, fameCfg.max)
 							self:DestroyFameBillboard(petModel)
 							if state.petstandRoot then
 								self:DestroyStandFameNpcs(state.petstandRoot)
 							end
 						end
 
-						self:UpdateIncomeBillboard(petModel)
-						self:UpdateStandMultipliersBillboard(petModel)
-						self:UpdatePetToolIncomeBillboards(petModel)
-						local now = os.clock()
+						if (now - (self.lastStandVisualUpdateAtByPet[petModel] or 0)) >= STAND_VISUAL_UPDATE_INTERVAL_SECONDS then
+							self.lastStandVisualUpdateAtByPet[petModel] = now
+							if state.location == "petstand" then
+								self:UpdateFameBillboard(petModel)
+								self:UpdateStandFameNpcs(petModel)
+							end
+							self:UpdateIncomeBillboard(petModel)
+							self:UpdateStandMultipliersBillboard(petModel)
+							self:UpdatePetToolIncomeBillboards(petModel)
+						end
 						if (now - (self.lastStateSendAtByPet[petModel] or 0)) >= 5 then
 							self.lastStateSendAtByPet[petModel] = now
 							self.PetStateManager:SendStateToOwner(petModel)
@@ -1086,7 +1103,7 @@ function PetStandManager:StartFameLoop()
 					end
 				end
 			end
-			task.wait(1)
+			task.wait(FAME_LOOP_INTERVAL_SECONDS)
 		end
 	end)
 end
@@ -1282,8 +1299,12 @@ function PetStandManager:StartIncomeLoop(petModel, standRoot)
 				stored.Value = stored.Value + income
 			end
 			self:UpdateStandDisplay(standRoot)
-			self:UpdateIncomeBillboard(petModel)
-			self:UpdateStandMultipliersBillboard(petModel)
+			local now = os.clock()
+			if (now - (self.lastIncomeBillboardUpdateAtByPet[petModel] or 0)) >= INCOME_BILLBOARD_UPDATE_INTERVAL_SECONDS then
+				self.lastIncomeBillboardUpdateAtByPet[petModel] = now
+				self:UpdateIncomeBillboard(petModel)
+				self:UpdateStandMultipliersBillboard(petModel)
+			end
 
 			task.wait(1)
 		end
@@ -1505,6 +1526,9 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		self:UpdateStandFameNpcs(pet)
 		self:UpdateStandMultipliersBillboard(pet)
 		self:UpdateIncomeBillboard(pet)
+		if self.SaveManager then
+			self.SaveManager:ScheduleSave(player, { urgent = true, reason = "PlacePetOnStand" })
+		end
 		local fameBillboard = pet:FindFirstChild("PetFameBillboard")
 		if fameBillboard and fameBillboard:IsA("BillboardGui") then
 			fameBillboard.Enabled = true
