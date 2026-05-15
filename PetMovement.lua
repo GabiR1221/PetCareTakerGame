@@ -52,6 +52,17 @@ local FLOOR_NAME_CANDIDATES = {
 -- }
 local petTasks = {}
 
+local function optimizeRuntimePetParts(pet)
+	if not pet or not pet.GetDescendants then return end
+	for _, d in ipairs(pet:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CanTouch = false
+			d.CanCollide = false
+			d.CastShadow = false
+		end
+	end
+end
+
 local function pointInsidePartXZ(part, worldPos)
 	if not part or not worldPos then return false end
 	local localPoint = part.CFrame:PointToObjectSpace(worldPos)
@@ -718,7 +729,7 @@ local function tryFleeFromNearbyPlayer(state, hrp, wanderRadius, bounds)
 		moveToPositionSmooth(state, fleeTarget, runSpeed)
 		task.wait(0.02)
 	end
-	
+
 	state.isFleeing = false
 	state.pendingFleeThreat = nil
 	return true
@@ -832,7 +843,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 			if not currentState or currentState ~= state or not currentState.wanderRunning then
 				break
 			end
-			
+
 			if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
 				task.wait(0.05)
 				continue
@@ -842,62 +853,69 @@ local function startWanderingInternal(pet, spawnPos, options)
 			local target = sampleWanderTarget(spawnPos, wanderRadius, bounds)
 			local moveSpeed = WALK_SPEED_MIN + (math.random() * (WALK_SPEED_MAX - WALK_SPEED_MIN))
 
-			local path = PathfindingService:CreatePath({
-				AgentRadius = 2,
-				AgentHeight = 3,
-				AgentCanJump = false,
-				WaypointSpacing = 2,
-			})
-
-			local success = pcall(function()
-				path:ComputeAsync(hrp.Position, target)
-			end)
-
-			if success and path.Status == Enum.PathStatus.Success then
-				local waypoints = path:GetWaypoints()
-
-				for i, wp in ipairs(waypoints) do
-					local liveState = petTasks[pet]
-					if not liveState or liveState ~= state or not liveState.wanderRunning or not pet.Parent then
-						break
-					end
-
-					local goal = Vector3.new(wp.Position.X, hrp.Position.Y, wp.Position.Z)
-					if bounds and bounds.floorPart then
-						goal = clampPointToPartXZ(bounds.floorPart, goal, FLOOR_PADDING)
-					end
-
-					if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
-						break
-					end
-
-
-					local reached, reason = moveToPositionSmooth(currentState, goal, moveSpeed, function()
-						return shouldInterruptForFlee(currentState, hrp)
-					end)
-					if reason == "flee" then
-						break
-					end
-
-					if wp.Action == Enum.PathWaypointAction.Jump then
-						pcall(function()
-							humanoid.Jump = true
-						end)
-					end
-
-					if not reached then
-						break
-					end
-
-					task.wait(0.03 + math.random() * 0.08)
-				end
-			else
+			local useSimpleOwnedMovement = ownerUserId ~= nil and pet:GetAttribute("WildPet") ~= true
+			if useSimpleOwnedMovement then
 				if bounds and bounds.floorPart then
 					target = clampPointToPartXZ(bounds.floorPart, target, FLOOR_PADDING)
 				end
-				moveToPositionSmooth(currentState, target, moveSpeed, function()
-					return shouldInterruptForFlee(currentState, hrp)
+				moveToPositionSmooth(currentState, target, moveSpeed, nil)
+			else
+				local path = PathfindingService:CreatePath({
+					AgentRadius = 2,
+					AgentHeight = 3,
+					AgentCanJump = false,
+					WaypointSpacing = 2,
+				})
+
+				local success = pcall(function()
+					path:ComputeAsync(hrp.Position, target)
 				end)
+
+				if success and path.Status == Enum.PathStatus.Success then
+					local waypoints = path:GetWaypoints()
+
+					for i, wp in ipairs(waypoints) do
+						local liveState = petTasks[pet]
+						if not liveState or liveState ~= state or not liveState.wanderRunning or not pet.Parent then
+							break
+						end
+
+						local goal = Vector3.new(wp.Position.X, hrp.Position.Y, wp.Position.Z)
+						if bounds and bounds.floorPart then
+							goal = clampPointToPartXZ(bounds.floorPart, goal, FLOOR_PADDING)
+						end
+
+						if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
+							break
+						end
+
+						local reached, reason = moveToPositionSmooth(currentState, goal, moveSpeed, function()
+							return shouldInterruptForFlee(currentState, hrp)
+						end)
+						if reason == "flee" then
+							break
+						end
+
+						if wp.Action == Enum.PathWaypointAction.Jump then
+							pcall(function()
+								humanoid.Jump = true
+							end)
+						end
+
+						if not reached then
+							break
+						end
+
+						task.wait(0.03 + math.random() * 0.08)
+					end
+				else
+					if bounds and bounds.floorPart then
+						target = clampPointToPartXZ(bounds.floorPart, target, FLOOR_PADDING)
+					end
+					moveToPositionSmooth(currentState, target, moveSpeed, function()
+						return shouldInterruptForFlee(currentState, hrp)
+					end)
+				end
 			end
 
 			doIdlePause(currentState, spawnPos)
@@ -913,6 +931,7 @@ end
 -- StartWandering(pet, originVector3?, wanderRadius?, ownerUserId?, constraintPart?)
 function PetMovement.StartWandering(pet, origin, wanderRadius, ownerUserId, constraintPart)
 	if not pet then return end
+	optimizeRuntimePetParts(pet)
 
 	local spawnPos
 	if origin and typeof(origin) == "Vector3" then
