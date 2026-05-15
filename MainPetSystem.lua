@@ -85,6 +85,7 @@ local createPetPickupTool
 local removePetToolInstances
 local isInsideTycoonBounds
 local stashedPetModelsByUserId = {}
+local saveManager
 local petInteractionUiEvent = ReplicatedStorage:FindFirstChild("PetInteractionUIEvent")
 if not petInteractionUiEvent then
 	petInteractionUiEvent = Instance.new("RemoteEvent")
@@ -128,6 +129,32 @@ local function setInteractionUiHidden(player, hidden)
 	pcall(function()
 		petInteractionUiEvent:FireClient(player, hidden == true)
 	end)
+end
+
+local function waitForPlayerInventoryDataReady(player, timeoutSeconds)
+	local deadline = os.clock() + (tonumber(timeoutSeconds) or 25)
+	while player and player.Parent and os.clock() < deadline do
+		local loaded = player:FindFirstChild("Loaded")
+		local dataLoaded = player:GetAttribute("DataLoaded") == true
+		local data = player:FindFirstChild("Data")
+		local petsFolder = data and data:FindFirstChild("Pets")
+		if (dataLoaded or (loaded and loaded.Value == true)) and petsFolder then
+			return true
+		end
+		task.wait(0.1)
+	end
+
+	return player and player.Parent ~= nil and player:FindFirstChild("Data") and player.Data:FindFirstChild("Pets") ~= nil
+end
+
+local function scheduleCriticalPetSave(player, reason)
+	if not saveManager or not player then return end
+	local ok, err = pcall(function()
+		saveManager:ScheduleSave(player, { urgent = true, reason = reason })
+	end)
+	if not ok then
+		warn(("[PetSystem] Critical pet save queue failed for %s (%s): %s"):format(player.Name, tostring(reason), tostring(err)))
+	end
 end
 
 local function getTycoonReturnPartForPlayer(userId)
@@ -446,6 +473,7 @@ local function dropCarriedPet(player, options)
 	PetMovement.StartWandering(carriedPet)
 	attachDropPickupPrompt(carriedPet, state.ownerUserId or player.UserId)
 	PetStateManager:SendStateToOwner(carriedPet)
+	scheduleCriticalPetSave(player, "DropCarriedPet")
 	return true
 end
 
@@ -603,6 +631,7 @@ local function dropPetFromTool(player, petUid)
 	attachDropPickupPrompt(petModel, state.ownerUserId or player.UserId)
 	PetStateManager:SendStateToOwner(petModel)
 	setInteractionUiHidden(player, false)
+	scheduleCriticalPetSave(player, "DropPetTool")
 	return true
 end
 
@@ -703,6 +732,7 @@ local function stowPetAsToolForPlayer(player, petModel, autoEquip)
 	createPetPickupTool(player, petModel, state)
 	PetStateManager:SendStateToOwner(petModel)
 	setInteractionUiHidden(player, false)
+	scheduleCriticalPetSave(player, "StowPetTool")
 	if autoEquip ~= false then
 		task.delay(0.12, function()
 			if player.Parent then
@@ -1289,7 +1319,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData117", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+saveManager = PetSaveManager:Initialize("PetData124", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1316,10 +1346,10 @@ petInventoryAdoptionBridge.Event:Connect(function(player, _templateName, petUid,
 	if ENABLE_PET_PICKUP_TOOLS ~= true then return end
 	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
 	if type(petUid) ~= "string" or petUid == "" then return end
-	if type(options) == "table" and options.recoverInventoryOnly == true then
+	if type(options) == "table" and (options.recoverInventoryOnly == true or options.createTool == false) then
 		return
 	end
-
+	
 	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
 	if not petModel or not state then
 		local templateName = tostring(_templateName or "")
@@ -1391,9 +1421,7 @@ petInventoryAdoptionBridge.Event:Connect(function(player, _templateName, petUid,
 	PetStateManager:SendStateToOwner(petModel)
 	createPetPickupTool(player, petModel, state)
 	equipPetToolByUid(player, petUid)
-	if saveManager then
-		saveManager:ScheduleSave(player)
-	end
+	scheduleCriticalPetSave(player, "InventoryAdoptionBridge")
 end)
 
 petGamepassGrantBridge.Event:Connect(function(player, gamepassName, petsToGrant)
@@ -1593,7 +1621,10 @@ Players.PlayerAdded:Connect(function(player)
 		end)
 	end)
 
-	task.wait(3)
+	if not waitForPlayerInventoryDataReady(player, 25) then
+		warn(("[PetSystem] Timed out waiting for Player.Data.Pets before pet restore for %s"):format(player.Name))
+		return
+	end
 	if not saveManager then
 		warn("[PetSystem] saveManager nil, cannot load pets")
 		return
@@ -1658,7 +1689,7 @@ end)
 
 Players.PlayerRemoving:Connect(function(player)
 	if saveManager then
-		saveManager:SavePlayerPets(player)
+		saveManager:SavePlayerPets(player, { force = true, reason = "PlayerRemoving" })
 		stashedPetModelsByUserId[player.UserId] = nil
 	else
 		warn("[PetSystem] saveManager is nil, cannot save pets for", player.Name)
