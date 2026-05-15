@@ -329,7 +329,8 @@ local function setWallFrameVisible(wallPart, visible)
 	if not wallPart then return end
 	for _, descendant in ipairs(wallPart:GetDescendants()) do
 		if descendant:IsA("SurfaceGui") then
-			descendant.Enabled = visible
+			-- Keep the SurfaceGui itself enabled outside runs so any non-frame signage stays visible.
+			descendant.Enabled = true
 			local frame = descendant:FindFirstChild("Frame")
 			if frame and frame:IsA("GuiObject") then
 				frame.Visible = visible
@@ -370,6 +371,22 @@ local function getWallGradients(wallPart)
 	return gradients
 end
 
+local function getGradientImageLabels(wallPart)
+	local labels = {}
+	local seen = {}
+	if not wallPart then return labels end
+	for _, descendant in ipairs(wallPart:GetDescendants()) do
+		if descendant:IsA("UIGradient") then
+			local parent = descendant.Parent
+			if parent and parent:IsA("ImageLabel") and not seen[parent] then
+				seen[parent] = true
+				table.insert(labels, parent)
+			end
+		end
+	end
+	return labels
+end
+
 local function snapshotWallSurfaceGuis(wallPart)
 	local snapshots = {}
 	if not wallPart then return snapshots end
@@ -406,6 +423,15 @@ local function animateWallGradientBreak(wallPart, durationOverride)
 			state.snapshots[gradient] = gradient.Color
 		end
 	end
+	state.imageSnapshots = state.imageSnapshots or {}
+	for _, imageLabel in ipairs(getGradientImageLabels(wallPart)) do
+		if imageLabel and imageLabel.Parent and not state.imageSnapshots[imageLabel] then
+			state.imageSnapshots[imageLabel] = {
+				imageTransparency = imageLabel.ImageTransparency,
+				backgroundTransparency = imageLabel.BackgroundTransparency,
+			}
+		end
+	end
 	task.spawn(function()
 		local startedAt = os.clock()
 		while wallPart.Parent and not state.cancelled do
@@ -413,6 +439,12 @@ local function animateWallGradientBreak(wallPart, durationOverride)
 			for gradient, originalColor in pairs(state.snapshots) do
 				if gradient and gradient.Parent then
 					gradient.Color = blendSequenceToWhite(originalColor, alpha)
+				end
+			end
+			for imageLabel, original in pairs(state.imageSnapshots or {}) do
+				if imageLabel and imageLabel.Parent then
+					imageLabel.ImageTransparency = (original.imageTransparency or 0) + ((1 - (original.imageTransparency or 0)) * alpha)
+					imageLabel.BackgroundTransparency = (original.backgroundTransparency or 0) + ((1 - (original.backgroundTransparency or 0)) * alpha)
 				end
 			end
 			if alpha >= 1 then break end
@@ -430,6 +462,12 @@ local function resetWallGradient(wallPart)
 	for gradient, originalColor in pairs(state.snapshots or {}) do
 		if gradient and gradient.Parent then
 			gradient.Color = originalColor
+		end
+	end
+	for imageLabel, original in pairs(state.imageSnapshots or {}) do
+		if imageLabel and imageLabel.Parent then
+			imageLabel.ImageTransparency = original.imageTransparency or 0
+			imageLabel.BackgroundTransparency = original.backgroundTransparency or 0
 		end
 	end
 	wallGradientStates[wallPart] = nil
