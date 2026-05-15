@@ -95,7 +95,7 @@ function WildPetManager:Initialize(stateTable, carryingTable, playersService, pe
 	self.MIN_SPAWN_INTERVAL = 12
 	self.MAX_SPAWN_INTERVAL = 30
 	self.INITIAL_SPAWN_PER_ZONE = 3
-	self.MAX_WILD_PETS_PER_AREA = 3
+	self.MAX_WILD_PETS_PER_AREA = 6
 	self.WANDER_RADIUS = 50
 	self.WILD_PET_MODELS = ServerStorage:FindFirstChild("WildPetModels") or ServerStorage:FindFirstChild("PetModels")
 	self.WILD_PET_ZONE_FOLDER = "Zones"
@@ -1210,66 +1210,12 @@ end
 function WildPetManager:ConnectAdoptionMat(adoptionMat, tycoonModel)
 	if not adoptionMat or not adoptionMat:IsA("BasePart") then return end
 
-	local prompt = adoptionMat:FindFirstChildWhichIsA("ProximityPrompt")
-	if not prompt then
-		prompt = Instance.new("ProximityPrompt")
-		prompt.Name = "AdoptionPrompt"
-		prompt.ActionText = "Adopt Pet"
-		prompt.ObjectText = "Adoption Mat"
-		prompt.MaxActivationDistance = 8
-		prompt.HoldDuration = 0
-		prompt.RequiresLineOfSight = false
-		prompt.Parent = adoptionMat
+	-- Adoption is automatic now, so mats should not show or recreate manual prompts.
+	for _, child in ipairs(adoptionMat:GetChildren()) do
+		if child:IsA("ProximityPrompt") and (child.Name == "AdoptionPrompt" or child.ActionText == "Adopt Pet") then
+			child:Destroy()
+		end
 	end
-
-	local conn = prompt.Triggered:Connect(function(player)
-		-- Check if player is carrying a wild pet
-		local pet = nil
-		for pModel, state in pairs(self.petState) do
-			if state.carrierUserId == player.UserId and state.wild and state.location == "player_wild" then
-				pet = pModel
-				break
-			end
-		end
-
-		if not pet then
-			-- Maybe the player is carrying through the regular system
-			pet = self.carryingPetByUserId[player.UserId]
-			if not pet or not self.petState[pet] or not self.petState[pet].wild then
-				return
-			end
-		end
-
-		-- Verify this is the player's tycoon
-		local ownerMatch = false
-		if tycoonModel then
-			local ownerAttr = tycoonModel:GetAttribute("OwnerId") or tycoonModel:GetAttribute("Owner") or tycoonModel:GetAttribute("OwnerUserId")
-			if ownerAttr and tostring(ownerAttr) == tostring(player.UserId) then
-				ownerMatch = true
-			else
-				local candidateNames = {"OwnerId", "Owner", "OwnerUserId"}
-				for _, nm in ipairs(candidateNames) do
-					local child = tycoonModel:FindFirstChild(nm)
-					if child and child.Value and tostring(child.Value) == tostring(player.UserId) then
-						ownerMatch = true
-						break
-					end
-				end
-			end
-		end
-
-		if not ownerMatch then
-			print("[WildPetManager] Adoption mat not in player's tycoon")
-			return
-		end
-
-		local adopted = self:AutoAdoptCarriedWildPet(player, { adoptionPosition = adoptionMat.Position })
-		if adopted then
-			print(("[WildPetManager] Pet %s adopted by %s!"):format(pet.Name, player.Name))
-		end
-	end)
-
-	return conn
 end
 
 function WildPetManager:AddOwnedPetPickupPrompt(pet, ownerUserId)
@@ -1553,11 +1499,7 @@ function WildPetManager:ScanAndConnectAdoptionMats()
 			task.wait(10)
 			self:FindAdoptionMats()
 			for adoptionMat, tycoonModel in pairs(self.adoptionMats) do
-				-- Check if already connected
-				local prompt = adoptionMat:FindFirstChildWhichIsA("ProximityPrompt")
-				if not prompt or prompt.Name ~= "AdoptionPrompt" then
-					self:ConnectAdoptionMat(adoptionMat, tycoonModel)
-				end
+				self:ConnectAdoptionMat(adoptionMat, tycoonModel)
 			end
 		end
 	end)
