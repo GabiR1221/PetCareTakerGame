@@ -211,6 +211,43 @@ function ShowerDryerManager:_prepareToolForSession(toolInstance)
 	end
 end
 
+function ShowerDryerManager:_setSessionToolsServerVisible(session, visible)
+	if not session then return end
+	session.serverToolVisibilitySnapshots = session.serverToolVisibilitySnapshots or {}
+	local function visitTool(toolInstance)
+		if not toolInstance then return end
+		local instances = {}
+		if toolInstance:IsA("BasePart") then
+			table.insert(instances, toolInstance)
+		elseif toolInstance:IsA("Model") then
+			for _, d in ipairs(toolInstance:GetDescendants()) do
+				if d:IsA("BasePart") then
+					table.insert(instances, d)
+				end
+			end
+		end
+		for _, part in ipairs(instances) do
+			if visible == false then
+				if session.serverToolVisibilitySnapshots[part] == nil then
+					session.serverToolVisibilitySnapshots[part] = part.Transparency
+				end
+				part.Transparency = 1
+			else
+				local originalTransparency = session.serverToolVisibilitySnapshots[part]
+				if originalTransparency ~= nil then
+					part.Transparency = originalTransparency
+				end
+			end
+		end
+	end
+
+	visitTool(session.spongeTool)
+	visitTool(session.showerHeadTool)
+	if visible ~= false then
+		session.serverToolVisibilitySnapshots = {}
+	end
+end
+
 function ShowerDryerManager:_getDirtPartsForPet(pet)
 	local dirtParts = {}
 	if not pet or not pet:IsA("Model") then return dirtParts end
@@ -249,6 +286,33 @@ function ShowerDryerManager:_getNearestDirtPart(session, handle)
 				distance = (closestPoint - handle.Position).Magnitude
 			else
 				distance = (dirtPart.Position - handle.Position).Magnitude
+			end
+			if distance <= nearestDistance then
+				nearestDistance = distance
+				nearestPart = dirtPart
+			end
+		end
+	end
+
+	return nearestPart
+end
+
+function ShowerDryerManager:_getNearestDirtPartAtPosition(session, worldPos, maxDistance)
+	if not session or typeof(worldPos) ~= "Vector3" then return nil end
+	if #(session.dirtParts or {}) == 0 then return nil end
+
+	local nearestPart = nil
+	local nearestDistance = tonumber(maxDistance) or 1.35
+	for _, dirtPart in ipairs(session.dirtParts or {}) do
+		if dirtPart and dirtPart.Parent then
+			local distance = math.huge
+			local ok, closestPoint = pcall(function()
+				return dirtPart:GetClosestPointOnSurface(worldPos)
+			end)
+			if ok and typeof(closestPoint) == "Vector3" then
+				distance = (closestPoint - worldPos).Magnitude
+			else
+				distance = (dirtPart.Position - worldPos).Magnitude
 			end
 			if distance <= nearestDistance then
 				nearestDistance = distance
@@ -358,6 +422,21 @@ function ShowerDryerManager:_getToolHalfThickness(toolInstance)
 	end
 
 	return 0.6
+end
+
+function ShowerDryerManager:_getToolCleanRadius(toolInstance)
+	local cleanBox = nil
+	if toolInstance then
+		if toolInstance:IsA("BasePart") and toolInstance.Name == "CleanBox" then
+			cleanBox = toolInstance
+		elseif toolInstance.FindFirstChild then
+			cleanBox = toolInstance:FindFirstChild("CleanBox", true)
+		end
+	end
+	if cleanBox and cleanBox:IsA("BasePart") then
+		return math.clamp(math.max(cleanBox.Size.X, cleanBox.Size.Y, cleanBox.Size.Z) * 0.5, 1.1, 4.5)
+	end
+	return 1.45
 end
 
 function ShowerDryerManager:_getPetSurfaceParts(pet)
@@ -569,6 +648,56 @@ function ShowerDryerManager:_updatePlayerToolPose(session, toolWorldPos, toolNor
 	armPose.targetPart.CFrame = CFrame.lookAt(targetPos, targetPos + normal.Unit)
 end
 
+function ShowerDryerManager:_resolvePlayerShowerAnimationId(session)
+	local showerPart = session and session.showerPart
+	for _, attrName in ipairs({"ShowerLoopAnimationId", "PlayerShowerAnimationId", "ShowerAnimationId"}) do
+		local raw = showerPart and showerPart:GetAttribute(attrName)
+		if raw ~= nil and tostring(raw) ~= "" then
+			local digits = tostring(raw):match("%d+")
+			if digits then
+				return "rbxassetid://" .. digits
+			end
+		end
+	end
+
+	local config = ReplicatedStorage:FindFirstChild("ShowerLoopAnimationId") or ReplicatedStorage:FindFirstChild("PlayerShowerAnimationId")
+	if config and config:IsA("ValueBase") and tostring(config.Value) ~= "" then
+		local digits = tostring(config.Value):match("%d+")
+		if digits then
+			return "rbxassetid://" .. digits
+		end
+	end
+
+	return nil
+end
+
+function ShowerDryerManager:_playPlayerShowerLoop(session, humanoid)
+	if not session or not humanoid then return nil end
+	local animationId = self:_resolvePlayerShowerAnimationId(session)
+	if not animationId then return nil end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	local animation = Instance.new("Animation")
+	animation.Name = "ShowerLoopAnimation"
+	animation.AnimationId = animationId
+
+	local ok, track = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	animation:Destroy()
+	if not ok or not track then return nil end
+
+	track.Looped = true
+	track.Priority = Enum.AnimationPriority.Action
+	track:Play(0.15)
+	return track
+end
+
 function ShowerDryerManager:_startPlayerShowerStance(session)
 	if not session or not session.player then return end
 	local character = session.player.Character
@@ -615,9 +744,6 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 	local previousSit = humanoid.Sit
 	local previousPlatformStand = humanoid.PlatformStand
 	local previousAnchored = root.Anchored
-	local animateScript = character:FindFirstChild("Animate")
-	local previousAnimateEnabled = (animateScript and animateScript:IsA("LocalScript")) and animateScript.Enabled or nil
-	local resetMotors = {}
 
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
@@ -633,17 +759,7 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 	pcall(function()
 		humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
 	end)
-	if animateScript and animateScript:IsA("LocalScript") then
-		animateScript.Enabled = false
-	end
-	for _, d in ipairs(character:GetDescendants()) do
-		if d:IsA("Motor6D") then
-			pcall(function()
-				d.Transform = CFrame.new()
-			end)
-			resetMotors[d] = true
-		end
-	end
+	local showerLoopTrack = self:_playPlayerShowerLoop(session, humanoid)
 
 	local lockConn = RunService.Heartbeat:Connect(function()
 		if not root.Parent or not standPart.Parent then return end
@@ -652,13 +768,6 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 		root.AssemblyAngularVelocity = Vector3.zero
 		humanoid.Sit = false
 		humanoid.PlatformStand = false
-		for motor in pairs(resetMotors) do
-			if motor and motor.Parent then
-				pcall(function()
-					motor.Transform = CFrame.new()
-				end)
-			end
-		end
 	end)
 
 	session.playerStance = {
@@ -672,13 +781,10 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 		wasSit = previousSit,
 		wasPlatformStand = previousPlatformStand,
 		wasAnchored = previousAnchored,
-		animateScript = animateScript,
-		animateEnabled = previousAnimateEnabled,
-		resetMotors = resetMotors,
+		showerLoopTrack = showerLoopTrack,
 		lockConn = lockConn,
 	}
 end
-
 
 function ShowerDryerManager:_stopPlayerShowerStance(session)
 	if not session or not session.playerStance then return end
@@ -710,9 +816,10 @@ function ShowerDryerManager:_stopPlayerShowerStance(session)
 			end
 		end)
 	end
-	if stance.animateScript and stance.animateScript.Parent and stance.animateEnabled ~= nil then
+	if stance.showerLoopTrack then
 		pcall(function()
-			stance.animateScript.Enabled = stance.animateEnabled
+			stance.showerLoopTrack:Stop(0.15)
+			stance.showerLoopTrack:Destroy()
 		end)
 	end
 	if stance.standPart and stance.standPart.Parent then
@@ -798,7 +905,15 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	end
 
 	local snapDistance = (surfacePos - clampedPos).Magnitude
-	local useSnappedSurface = (snapDistance <= 2.6)
+	local snapEnterDistance = 2.55
+	local snapExitDistance = 3.15
+	local useSnappedSurface = session.surfaceSnapActive == true
+	if useSnappedSurface then
+		useSnappedSurface = snapDistance <= snapExitDistance
+	else
+		useSnappedSurface = snapDistance <= snapEnterDistance
+	end
+	session.surfaceSnapActive = useSnappedSurface
 	local targetSurfacePos = useSnappedSurface and surfacePos or clampedPos
 	local payloadSurfaceNormal = payload.surfaceNormal
 	local targetSurfaceNormal = useSnappedSurface and surfaceNormal or (session.lastToolNormal or surfaceNormal)
@@ -810,27 +925,13 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	end
 
 	local toolOffset = math.clamp(self:_getToolHalfThickness(activeTool) * 0.65, 0.18, 0.4)
-	local unsmoothedFinalPos = targetSurfacePos + targetSurfaceNormal.Unit * toolOffset
-	local smoothingAlpha = useSnappedSurface and 0.86 or 0.45
-	local finalPos = unsmoothedFinalPos
-	if session.lastToolWorldPos then
-		finalPos = session.lastToolWorldPos:Lerp(unsmoothedFinalPos, smoothingAlpha)
-	end
+	local finalPos = targetSurfacePos + targetSurfaceNormal.Unit * toolOffset
 	session.lastToolWorldPos = finalPos
+	session.lastToolNormal = targetSurfaceNormal
 
-	local smoothedNormal = targetSurfaceNormal
-	if session.lastToolNormal then
-		local mixed = session.lastToolNormal:Lerp(targetSurfaceNormal, 0.32)
-		if mixed.Magnitude > 1e-4 then
-			smoothedNormal = mixed.Unit
-		end
-	end
-	session.lastToolNormal = smoothedNormal
-
-	local activePart = self:_moveToolToPosition(activeTool, finalPos, smoothedNormal)
-	if not activePart then return end
-
-	self:_updatePlayerToolPose(session, finalPos, smoothedNormal)
+	-- Server no longer moves replicated brush/showerhead parts or rubs the pet weld.
+	-- It only validates the owner-sent target and advances progress. The owner sees
+	-- local-only tool/pet feedback from ShowerMinigameClient.
 
 	local petPrimary = session.pet.PrimaryPart
 	if not petPrimary then return end
@@ -839,8 +940,7 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if distance > 6 then return end
 
 	local now = tick()
-	local touchedPart = self:_getNearestDirtPart(session, activePart)
-	self:_updateRubPose(session, targetSurfacePos, smoothedNormal, touchedPart)
+	local touchedPart = self:_getNearestDirtPartAtPosition(session, targetSurfacePos, self:_getToolCleanRadius(activeTool))
 
 	if (now - (session.lastProgressTick or 0)) < 0.04 then return end
 	session.lastProgressTick = now
@@ -911,6 +1011,20 @@ function ShowerDryerManager:_handleExitFromClient(player)
 	self:_cleanupShowerSession(player, true)
 end
 
+function ShowerDryerManager:_normalizeShowerToolObject(found, preferredName)
+	if not found then return nil end
+	if found:IsA("Model") then return found end
+	if found:IsA("BasePart") then
+		local parent = found.Parent
+		local isToolPartName = preferredName == "SpongePart" or preferredName == "ShowerHeadPart"
+		if isToolPartName and parent and parent:IsA("Model") and (parent:FindFirstChild("CleanBox", true) or parent:FindFirstChildWhichIsA("WeldConstraint", true)) then
+			return parent
+		end
+		return found
+	end
+	return nil
+end
+
 function ShowerDryerManager:_findObjectNearShower(showerPart, preferredName)
 	if not showerPart then return nil end
 
@@ -922,12 +1036,16 @@ function ShowerDryerManager:_findObjectNearShower(showerPart, preferredName)
 	for _, root in ipairs(roots) do
 		if root and root.FindFirstChild then
 			local direct = root:FindFirstChild(preferredName)
-			if direct and (direct:IsA("BasePart") or direct:IsA("Model")) then
-				return direct
+			local normalizedDirect = self:_normalizeShowerToolObject(direct, preferredName)
+			if normalizedDirect then
+				return normalizedDirect
 			end
 			for _, d in ipairs(root:GetDescendants()) do
 				if (d:IsA("BasePart") or d:IsA("Model")) and d.Name == preferredName then
-					return d
+					local normalized = self:_normalizeShowerToolObject(d, preferredName)
+					if normalized then
+						return normalized
+					end
 				end
 			end
 		end
@@ -958,7 +1076,7 @@ function ShowerDryerManager:_handleRotateFromClient(player, payload)
 	local direction = tonumber(payload.direction) or 0
 	if direction == 0 then return end
 	direction = (direction > 0) and 1 or -1
-	
+
 	local now = tick()
 	if (now - (session.lastRotateTick or 0)) < 0.08 then
 		return
@@ -966,24 +1084,10 @@ function ShowerDryerManager:_handleRotateFromClient(player, payload)
 	session.lastRotateTick = now
 
 
-	local showerPart = session.showerPart
-	if not showerPart or not showerPart:IsA("BasePart") then return end
-	
-	local weld = session.showerPetWeld
-	if not weld or not weld.Parent then
-		weld = self:_bindPetToShowerWeld(session)
-	end
-
-	local rotationStep = math.rad(90) * direction
-	if weld and weld.Parent then
-		session.baseWeldC0 = (session.baseWeldC0 or weld.C0) * CFrame.Angles(0, rotationStep, 0)
-		self:_updateRubPose(session)
-	else
-		local pet = session.pet
-		if pet and pet.Parent then
-			pet:PivotTo(pet:GetPivot() * CFrame.Angles(0, rotationStep, 0))
-		end
-	end
+	-- Rotation is now a local presentation detail for the showering player.
+	-- The server only rate-limits and records the intent for auditing/progress context,
+	-- so other clients do not receive replicated pet rotation spam.
+	session.logicalRotationSteps = ((session.logicalRotationSteps or 0) + direction) % 4
 end
 
 
@@ -1252,7 +1356,8 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 	self.activeShowerSessions[player.UserId] = session
 	self:_startPlayerShowerStance(session)
 	self:_bindPetToShowerWeld(session)
-	self:_startPlayerToolPose(session)
+	-- Server now shows a lightweight looping shower animation for other players.
+	-- The detailed minigame camera/tool feedback stays on the showering player's client.
 
 	local spongePart = self:_toToolHandle(spongeTool)
 	local showerHeadPart = self:_toToolHandle(showerHeadTool)
@@ -1266,10 +1371,13 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 			pet = pet,
 			spongePart = spongePart,
 			showerHeadPart = showerHeadPart,
+			spongeTool = spongeTool,
+			showerHeadTool = showerHeadTool,
 			stage = 1,
 			progress = 0,
 			stageText = "Scrub with Sponge",
 			rotationEnabled = true,
+			serverLoopAnimationId = self:_resolvePlayerShowerAnimationId(session),
 		})
 	end
 end
@@ -1290,6 +1398,7 @@ function ShowerDryerManager:_cleanupShowerSession(player, sendEndEvent)
 	end
 
 	self:_clearDirtSessionAttributes(session)
+	self:_setSessionToolsServerVisible(session, true)
 	self:_stopPlayerToolPose(session)
 	self:_stopPlayerShowerStance(session)
 	
