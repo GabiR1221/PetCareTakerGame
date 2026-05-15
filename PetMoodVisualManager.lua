@@ -368,7 +368,7 @@ function PetMoodVisualManager:_startLoop()
 			end
 
 			self:_cleanupRemovedPets()
-			task.wait(0.5)
+			task.wait(1.5)
 		end
 	end)
 end
