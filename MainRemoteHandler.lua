@@ -97,7 +97,13 @@ local function isPetCurrentlySpawnedForPlayer(player, petFolder)
 
 	local mirroredLocation = petFolder:FindFirstChild("RuntimeLocation")
 	local mirroredLocationName = mirroredLocation and tostring(mirroredLocation.Value or "") or ""
-	if mirroredLocationName == "free" or mirroredLocationName == "petground" or mirroredLocationName == "player_wild" or mirroredLocationName == "player" then
+	if mirroredLocationName == "free"
+		or mirroredLocationName == "petstand"
+		or mirroredLocationName == "shower"
+		or mirroredLocationName == "npc"
+		or mirroredLocationName == "petground"
+		or mirroredLocationName == "player_wild"
+		or mirroredLocationName == "player" then
 		return true
 	end
 
@@ -121,7 +127,13 @@ local function isPetCurrentlySpawnedForPlayer(player, petFolder)
 			if state.wild == true then
 				return true
 			end
-			return (location == "free" or location == "petground" or location == "player_wild" or location == "player")
+			return (location == "free"
+				or location == "petstand"
+				or location == "shower"
+				or location == "npc"
+				or location == "petground"
+				or location == "player_wild"
+				or location == "player")
 		end
 	end
 
