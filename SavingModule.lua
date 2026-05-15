@@ -15,7 +15,20 @@ SavingFunctions.SaveData = function(Player, AutoSave)
 		return
 	end
 
-	Player.Loaded.Value = false
+	if Player:GetAttribute("SavingData") == true then
+		if not AutoSave then
+			return
+		end
+		local deadline = os.clock() + 5
+		while Player:GetAttribute("SavingData") == true and os.clock() < deadline do
+			task.wait(0.1)
+		end
+		if Player:GetAttribute("SavingData") == true then
+			warn("[SavingModule] Final save skipped because another save is still running for "..Player.Name)
+			return
+		end
+	end
+	Player:SetAttribute("SavingData", true)
 
 	local Save = {}
 
@@ -29,9 +42,11 @@ SavingFunctions.SaveData = function(Player, AutoSave)
 
 	Save["Pets"] = {}
 	for _,Pet in Folder.Pets:GetChildren() do
+		local petUidValue = Pet:FindFirstChild("PetUID")
 		Save["Pets"][tonumber(Pet.Name)] = {
 			PetName = Pet.PetName.Value,
 			Equipped = Pet.Equipped.Value,
+			PetUID = petUidValue and tostring(petUidValue.Value or "") or "",
 		}
 	end
 
@@ -65,10 +80,10 @@ SavingFunctions.SaveData = function(Player, AutoSave)
 			SessionLock.Release(Player.UserId)
 		end)
 	end
-	-- restore Loaded if player still present and not leaving
+	-- mark this save complete without flipping Loaded/DataLoaded; those represent load readiness.
 	pcall(function()
-		if Player and Player.Parent and Player:FindFirstChild("Loaded") then
-			Player.Loaded.Value = true
+		if Player then
+			Player:SetAttribute("SavingData", false)
 		end
 	end)
 end
