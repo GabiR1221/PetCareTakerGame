@@ -82,6 +82,7 @@ local petPickupPromptConns = {}
 local sellPromptConns = {}
 local attachDropPickupPrompt
 local createPetPickupTool
+local removePetToolInstances
 local isInsideTycoonBounds
 local stashedPetModelsByUserId = {}
 local petInteractionUiEvent = ReplicatedStorage:FindFirstChild("PetInteractionUIEvent")
@@ -205,6 +206,157 @@ local function resolveInventoryPetIdByPetName(player, petName)
 	return nil
 end
 
+local function getInventoryPetFolderById(player, inventoryPetId)
+	if not player or not inventoryPetId then return nil end
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	return petsFolder and petsFolder:FindFirstChild(tostring(inventoryPetId)) or nil
+end
+
+local function findUnclaimedInventoryPetByName(player, petName, claimedInventoryIds)
+	if not player or type(petName) ~= "string" or petName == "" then return nil end
+	local data = player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if not petsFolder then return nil end
+
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		if not claimedInventoryIds[tostring(petFolder.Name)] then
+			local petNameValue = petFolder:FindFirstChild("PetName")
+			if petNameValue and tostring(petNameValue.Value) == petName then
+				return petFolder
+			end
+		end
+	end
+	return nil
+end
+
+local function setInventoryPetUid(petFolder, petUid)
+	if not petFolder or type(petUid) ~= "string" or petUid == "" then return end
+	local uidValue = petFolder:FindFirstChild("PetUID")
+	if not uidValue then
+		uidValue = Instance.new("StringValue")
+		uidValue.Name = "PetUID"
+		uidValue.Parent = petFolder
+	end
+	uidValue.Value = petUid
+end
+
+
+local function removeDuplicateInventoryRowsByUid(player)
+	local data = player and player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if not petsFolder then return end
+	local firstByUid = {}
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		local uid = uidValue and tostring(uidValue.Value) or ""
+		if uid ~= "" then
+			if firstByUid[uid] then
+				petFolder:Destroy()
+			else
+				firstByUid[uid] = petFolder
+			end
+		end
+	end
+end
+
+
+local function pruneInventoryRowsToSavedPets(player, petData)
+	local data = player and player:FindFirstChild("Data")
+	local petsFolder = data and data:FindFirstChild("Pets")
+	if not petsFolder or type(petData) ~= "table" then return end
+
+	local savedUidSet = {}
+	local savedNameCounts = {}
+	for _, petInfo in ipairs(petData) do
+		if type(petInfo) == "table" then
+			local modelName = tostring(petInfo.modelName or "")
+			local petUid = tostring(petInfo.petUid or "")
+			if modelName ~= "" then
+				savedNameCounts[modelName] = (savedNameCounts[modelName] or 0) + 1
+			end
+			if petUid ~= "" then
+				savedUidSet[petUid] = true
+			end
+		end
+	end
+
+	local currentNameCounts = {}
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		local petNameValue = petFolder:FindFirstChild("PetName")
+		local petName = petNameValue and tostring(petNameValue.Value) or ""
+		if petName ~= "" then
+			currentNameCounts[petName] = (currentNameCounts[petName] or 0) + 1
+		end
+	end
+
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		local petNameValue = petFolder:FindFirstChild("PetName")
+		local petName = petNameValue and tostring(petNameValue.Value) or ""
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		local uid = uidValue and tostring(uidValue.Value) or ""
+		local savedCount = savedNameCounts[petName]
+		if savedCount and currentNameCounts[petName] and currentNameCounts[petName] > savedCount and (uid == "" or not savedUidSet[uid]) then
+			currentNameCounts[petName] -= 1
+			petFolder:Destroy()
+		end
+	end
+end
+
+local function ensureInventoryEntriesFromPetData(player, petData)
+	if not player or type(petData) ~= "table" then return end
+	local inventoryBridge = ReplicatedStorage:FindFirstChild(PetInventoryAdoptionBridgeName)
+	if not inventoryBridge or not inventoryBridge:IsA("BindableEvent") then
+		return
+	end
+
+	local claimedInventoryIds = {}
+	for _, petInfo in ipairs(petData) do
+		if type(petInfo) == "table" then
+			local modelName = tostring(petInfo.modelName or "")
+			local petUid = tostring(petInfo.petUid or "")
+			if modelName ~= "" and petUid ~= "" then
+				local inventoryPetId = resolveInventoryPetIdByUid(player, petUid)
+				local inventoryPet = inventoryPetId and getInventoryPetFolderById(player, inventoryPetId) or nil
+				if not inventoryPet then
+					-- If older inventory data has the pet by name but no matching UID, claim
+					-- that row instead of creating a duplicate row every rejoin.
+					inventoryPet = findUnclaimedInventoryPetByName(player, modelName, claimedInventoryIds)
+					if inventoryPet then
+						setInventoryPetUid(inventoryPet, petUid)
+					else
+						-- Inventory recovery must only recreate Player.Data.Pets rows. The runtime
+						-- pet/tool bridge listener skips this flagged call so non-inventory pets
+						-- do not become duplicate backpack tools on join.
+						inventoryBridge:Fire(player, modelName, petUid, { recoverInventoryOnly = true })
+						task.wait()
+						local recoveredId = resolveInventoryPetIdByUid(player, petUid)
+						inventoryPet = recoveredId and getInventoryPetFolderById(player, recoveredId) or nil
+					end
+				end
+				if inventoryPet then
+					claimedInventoryIds[tostring(inventoryPet.Name)] = true
+				end
+			end
+		end
+	end
+	removeDuplicateInventoryRowsByUid(player)
+	pruneInventoryRowsToSavedPets(player, petData)
+end
+
+local function removeBackpackToolsForNonInventoryPetData(player, petData)
+	if not player or type(petData) ~= "table" then return end
+	for _, petInfo in ipairs(petData) do
+		if type(petInfo) == "table" and tostring(petInfo.location or "") ~= "inventory" then
+			local petUid = tostring(petInfo.petUid or "")
+			if petUid ~= "" then
+				removePetToolInstances(player, petUid)
+				clearPetStashedModel(player.UserId, petUid)
+			end
+		end
+	end
+end
+
 local function setInventoryRuntimeLocation(player, inventoryPetId, location)
 	if not player or not inventoryPetId then return end
 	local data = player:FindFirstChild("Data")
@@ -307,7 +459,7 @@ local function getPickupPartFromPet(petModel)
 	return primary
 end
 
-local function removePetToolInstances(player, petUid)
+removePetToolInstances = function(player, petUid)
 	if not player or type(petUid) ~= "string" or petUid == "" then return end
 	for _, container in ipairs({ player:FindFirstChild("Backpack"), player:FindFirstChild("StarterGear"), player.Character }) do
 		if container then
@@ -1137,7 +1289,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-local saveManager = PetSaveManager:Initialize("PetData111", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+local saveManager = PetSaveManager:Initialize("PetData117", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1160,10 +1312,13 @@ if not petInventoryAdoptionBridge or not petInventoryAdoptionBridge:IsA("Bindabl
 	petInventoryAdoptionBridge.Parent = ReplicatedStorage
 end
 
-petInventoryAdoptionBridge.Event:Connect(function(player, _templateName, petUid)
+petInventoryAdoptionBridge.Event:Connect(function(player, _templateName, petUid, options)
 	if ENABLE_PET_PICKUP_TOOLS ~= true then return end
 	if typeof(player) ~= "Instance" or not player:IsA("Player") then return end
 	if type(petUid) ~= "string" or petUid == "" then return end
+	if type(options) == "table" and options.recoverInventoryOnly == true then
+		return
+	end
 
 	local petModel, state = findOwnedPetByUid(player.UserId, petUid)
 	if not petModel or not state then
@@ -1445,6 +1600,11 @@ Players.PlayerAdded:Connect(function(player)
 	end
 	local petData = saveManager:LoadPlayerPets(player)
 	if petData and #petData > 0 then
+		-- PetSaveManager is the authoritative runtime-pet backup. Recreate any missing
+		-- Player.Data.Pets rows before mapping RuntimeLocation so UI/backpack state
+		-- survives even if the older player-data save missed pet folders.
+		ensureInventoryEntriesFromPetData(player, petData)
+		task.wait()
 		if not ENABLE_PET_PICKUP_TOOLS then
 			for _, petInfo in ipairs(petData) do
 				if type(petInfo) == "table" and petInfo.location == "inventory" then
@@ -1452,6 +1612,7 @@ Players.PlayerAdded:Connect(function(player)
 				end
 			end
 		end
+		removeBackpackToolsForNonInventoryPetData(player, petData)
 		WildPetManager:SpawnOwnedPetsForPlayer(player, petData)
 		local data = player:FindFirstChild("Data")
 		local petsFolder = data and data:FindFirstChild("Pets")
@@ -1496,9 +1657,9 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-	stashedPetModelsByUserId[player.UserId] = nil
 	if saveManager then
 		saveManager:SavePlayerPets(player)
+		stashedPetModelsByUserId[player.UserId] = nil
 	else
 		warn("[PetSystem] saveManager is nil, cannot save pets for", player.Name)
 	end
