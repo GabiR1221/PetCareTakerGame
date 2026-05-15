@@ -563,12 +563,46 @@ Remotes.Rebirth.OnServerEvent:Connect(function(Player)
 end)
 
 local InventoryBridgeName = "PetInventoryAdoptionBridge"
+local FORCE_PLAYER_DATA_SAVE_NAME = "ForcePlayerDataSave"
+local CRITICAL_DATA_SAVE_DEBOUNCE_SECONDS = 2
+local pendingDataSaveByUserId = {}
 
+local function scheduleCriticalPlayerDataSave(player, reason)
+	if not player then return end
+	local userId = player.UserId
+	if pendingDataSaveByUserId[userId] then return end
+	pendingDataSaveByUserId[userId] = true
+	task.delay(CRITICAL_DATA_SAVE_DEBOUNCE_SECONDS, function()
+		pendingDataSaveByUserId[userId] = nil
+		if not player.Parent then return end
+		local saveFunction = ReplicatedStorage:FindFirstChild(FORCE_PLAYER_DATA_SAVE_NAME)
+		if not saveFunction or not saveFunction:IsA("BindableFunction") then return end
+		local ok, err = pcall(function()
+			saveFunction:Invoke(player)
+		end)
+		if not ok then
+			warn(("[PetServer] Critical player data save failed for %s (%s): %s"):format(player.Name, tostring(reason), tostring(err)))
+		end
+	end)
+end
 local function getPetsFolder(player)
 	if not player then return nil end
 	local data = player:FindFirstChild("Data")
 	if not data then return nil end
 	return data:FindFirstChild("Pets")
+end
+
+local function waitForPlayerDataReady(player, timeoutSeconds)
+	local deadline = os.clock() + (tonumber(timeoutSeconds) or 25)
+	while player and player.Parent and os.clock() < deadline do
+		local loaded = player:FindFirstChild("Loaded")
+		local dataReady = player:GetAttribute("DataLoaded") == true or (loaded and loaded.Value == true)
+		if dataReady and getPetsFolder(player) then
+			return true
+		end
+		task.wait(0.1)
+	end
+	return player and player.Parent ~= nil and getPetsFolder(player) ~= nil
 end
 
 local function getNextPetId(petsFolder)
@@ -578,6 +612,9 @@ local function getNextPetId(petsFolder)
 		if numericId and numericId >= nextId then
 			nextId = numericId + 1
 		end
+	end
+	while petsFolder:FindFirstChild(tostring(nextId)) do
+		nextId += 1
 	end
 	return tostring(nextId)
 end
@@ -600,6 +637,100 @@ local function ensurePetUidValue(petFolder, desiredUid)
 	return uidValue.Value
 end
 
+local function getPetFolderScore(petFolder)
+	if not petFolder then return -1 end
+	local score = #petFolder:GetChildren()
+	local petName = petFolder:FindFirstChild("PetName")
+	if petName and petName:IsA("StringValue") and petName.Value ~= "" then
+		score += 10
+	end
+	local equipped = petFolder:FindFirstChild("Equipped")
+	if equipped and equipped:IsA("BoolValue") then
+		score += 5
+	end
+	local uid = petFolder:FindFirstChild("PetUID")
+	if uid and uid:IsA("StringValue") and uid.Value ~= "" then
+		score += 3
+	end
+	return score
+end
+
+local function copyMissingPetValue(target, duplicate, valueName)
+	if not target or not duplicate then return end
+	if target:FindFirstChild(valueName) then return end
+	local source = duplicate:FindFirstChild(valueName)
+	if source and source:IsA("ValueBase") then
+		local clone = source:Clone()
+		clone.Parent = target
+	end
+end
+
+local function mergeDuplicatePetFolderData(keepFolder, removeFolder)
+	if not keepFolder or not removeFolder then return end
+	for _, valueName in ipairs({"PetName", "Equipped", "PetUID", "RuntimeLocation"}) do
+		copyMissingPetValue(keepFolder, removeFolder, valueName)
+	end
+
+	local keepUid = keepFolder:FindFirstChild("PetUID")
+	local removeUid = removeFolder:FindFirstChild("PetUID")
+	if keepUid and removeUid and tostring(keepUid.Value or "") == "" and tostring(removeUid.Value or "") ~= "" then
+		keepUid.Value = tostring(removeUid.Value)
+	end
+end
+
+local function choosePetFolderToKeep(a, b)
+	local aScore = getPetFolderScore(a)
+	local bScore = getPetFolderScore(b)
+	if bScore > aScore then
+		return b, a
+	end
+	return a, b
+end
+
+local function cleanupDuplicatePetFolders(player)
+	local petsFolder = getPetsFolder(player)
+	if not petsFolder then return 0 end
+
+	local removed = 0
+	local firstByUid = {}
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		local uid = uidValue and tostring(uidValue.Value or "") or ""
+		if uid ~= "" then
+			local existing = firstByUid[uid]
+			if existing and existing.Parent == petsFolder then
+				local keep, remove = choosePetFolderToKeep(existing, petFolder)
+				mergeDuplicatePetFolderData(keep, remove)
+				firstByUid[uid] = keep
+				remove:Destroy()
+				removed += 1
+			else
+				firstByUid[uid] = petFolder
+			end
+		end
+	end
+
+	local firstByFolderName = {}
+	for _, petFolder in ipairs(petsFolder:GetChildren()) do
+		local folderName = tostring(petFolder.Name)
+		local existing = firstByFolderName[folderName]
+		if existing and existing.Parent == petsFolder then
+			local keep, remove = choosePetFolderToKeep(existing, petFolder)
+			mergeDuplicatePetFolderData(keep, remove)
+			firstByFolderName[folderName] = keep
+			remove:Destroy()
+			removed += 1
+		else
+			firstByFolderName[folderName] = petFolder
+		end
+	end
+
+	if removed > 0 then
+		warn(("[PetServer] Removed %d duplicate Player.Data.Pets folder(s) for %s"):format(removed, player.Name))
+	end
+	return removed
+end
+
 local function ensureAllPlayerPetUids(player)
 	local petsFolder = getPetsFolder(player)
 	if not petsFolder then return end
@@ -607,6 +738,7 @@ local function ensureAllPlayerPetUids(player)
 	for _, petFolder in ipairs(petsFolder:GetChildren()) do
 		ensurePetUidValue(petFolder)
 	end
+	cleanupDuplicatePetFolders(player)
 end
 
 local function createInventoryPet(player, petName, petUid)
@@ -622,6 +754,7 @@ local function createInventoryPet(player, petName, petUid)
 		warn(("[PetServer] Could not grant '%s' to %s because Player.Data.Pets is missing"):format(tostring(petName), player.Name))
 		return nil
 	end
+	cleanupDuplicatePetFolders(player)
 
 	if type(petUid) == "string" and petUid ~= "" then
 		for _, existingPet in ipairs(petsFolder:GetChildren()) do
@@ -652,6 +785,8 @@ local function createInventoryPet(player, petName, petUid)
 	equippedValue.Value = false
 	equippedValue.Parent = petFolder
 
+	cleanupDuplicatePetFolders(player)
+	scheduleCriticalPlayerDataSave(player, "CreateInventoryPet")
 	return petFolder
 end
 
@@ -750,6 +885,8 @@ function SellAction(Player, Pet, options)
 	if sellBridge and sellBridge:IsA("BindableEvent") then
 		sellBridge:Fire(Player, petUid, petName)
 	end
+	
+	scheduleCriticalPlayerDataSave(Player, "SellPet")
 	
 	return payout
 end
@@ -909,7 +1046,8 @@ PetConvertRequestRemote.OnServerInvoke = function(player, petIds)
 	if newPetUid ~= "" and inventoryBridge and inventoryBridge:IsA("BindableEvent") then
 		inventoryBridge:Fire(player, resultName, newPetUid)
 	end
-
+	scheduleCriticalPlayerDataSave(player, "ConvertPets")
+	
 	notifyConversion(player, "success", "✅ Converted 3 pets into " .. resultName .. "!")
 	return true, "Converted", resultName
 end
@@ -1005,8 +1143,10 @@ Players.PlayerAdded:Connect(function(Player)
 	PetFolder.Name = Player.Name
 	PetFolder.Parent = workspace.PlayerPets
 
-	repeat wait() until Player:FindFirstChild("Loaded") and Player.Loaded.Value or Player.Parent == nil
-	if Player.Parent == nil then return end
+	if not waitForPlayerDataReady(Player, 25) then
+		warn(("[PetServer] Timed out waiting for player data before initializing runtime inventory for %s"):format(Player.Name))
+		return
+	end
 
 	ensureAllPlayerPetUids(Player)
 	hydrateToyInventoryFromJson(Player)
