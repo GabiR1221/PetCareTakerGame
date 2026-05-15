@@ -62,6 +62,7 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.surfacePulseState = {}        -- [standRoot] = true while pulsing
 	self.fameTasks = {}                -- [petModel] = true while fame loop runs
 	self.fameNpcState = {}             -- [standRoot] = {npcs = {Model, ...}}
+	self.lastStateSendAtByPet = {}     -- [petModel] = os.clock timestamp for throttled UI sync
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
@@ -74,6 +75,17 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self:StartFameLoop()
 
 	return self
+end
+
+function PetStandManager:OptimizeStandPetParts(petModel)
+	if not petModel or not petModel.GetDescendants then return end
+	for _, d in ipairs(petModel:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CanTouch = false
+			d.CanCollide = false
+			d.CastShadow = false
+		end
+	end
 end
 
 function PetStandManager:GetMoodFromState(state)
@@ -436,7 +448,7 @@ function PetStandManager:AnimateCollectorPress(collectorPart)
 		baseCFrame = collectorPart.CFrame
 		collectorPart:SetAttribute("CollectorBaseCFrame", baseCFrame)
 	end
-	local pressDistance = math.clamp(tonumber(collectorPart:GetAttribute("PressDepth")) or 0.35, 0.05, 2)
+	local pressDistance = math.clamp(tonumber(collectorPart:GetAttribute("PressDepth")) or 0.13, 0.05, 2)
 	local pressedCFrame = baseCFrame + Vector3.new(0, -pressDistance, 0)
 
 	local downTween = TweenService:Create(
@@ -705,12 +717,6 @@ function PetStandManager:UpdateStandMultipliersBillboard(petModel)
 	local template = runtimeGui:FindFirstChild("Template")
 	local layout = runtimeGui:FindFirstChildWhichIsA("UIListLayout")
 	if not template or not template:IsA("Frame") or not layout then return end
-
-	for _, child in ipairs(runtimeGui:GetChildren()) do
-		if child:IsA("Frame") and child.Name ~= "Template" then
-			child:Destroy()
-		end
-	end
 	template.Visible = false
 
 	local visual = self:GetStandMultiplierVisualConfig()
@@ -720,6 +726,24 @@ function PetStandManager:UpdateStandMultipliersBillboard(petModel)
 		{ key = "fame", value = bd.fameMultiplier, visible = true },
 		{ key = "accessory", value = bd.accessoryMultiplier, visible = math.abs(bd.accessoryMultiplier - 1) > 0.0001 },
 	}
+
+	local signatureParts = {}
+	for _, row in ipairs(rows) do
+		if row.visible then
+			table.insert(signatureParts, ("%s:%.3f"):format(row.key, row.value))
+		end
+	end
+	local signature = table.concat(signatureParts, "|")
+	if runtimeGui:GetAttribute("RowsSignature") == signature then
+		return
+	end
+	runtimeGui:SetAttribute("RowsSignature", signature)
+
+	for _, child in ipairs(runtimeGui:GetChildren()) do
+		if child:IsA("Frame") and child.Name ~= "Template" then
+			child:Destroy()
+		end
+	end
 
 	local function addRow(row)
 		local clone = template:Clone()
@@ -1054,7 +1078,11 @@ function PetStandManager:StartFameLoop()
 						self:UpdateIncomeBillboard(petModel)
 						self:UpdateStandMultipliersBillboard(petModel)
 						self:UpdatePetToolIncomeBillboards(petModel)
-						self.PetStateManager:SendStateToOwner(petModel)
+						local now = os.clock()
+						if (now - (self.lastStateSendAtByPet[petModel] or 0)) >= 5 then
+							self.lastStateSendAtByPet[petModel] = now
+							self.PetStateManager:SendStateToOwner(petModel)
+						end
 					end
 				end
 			end
@@ -1463,6 +1491,7 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		self.petState[pet].location = "petstand"
 		self.petState[pet].petstand = standPart
 		self.petState[pet].petstandRoot = standRoot
+		self:OptimizeStandPetParts(pet)
 		self:EnsureFameState(pet)
 		if type(self.ConsumePetTool) == "function" then
 			self.ConsumePetTool(player, pet)
@@ -1537,6 +1566,7 @@ function PetStandManager:RestorePetToStand(petModel, player, standId, storedMone
 	self.petState[petModel].location = "petstand"
 	self.petState[petModel].petstand = standPart
 	self.petState[petModel].petstandRoot = standRoot
+	self:OptimizeStandPetParts(petModel)
 	self:EnsureFameState(petModel)
 
 	local stored = self:GetStoredMoneyValue(standRoot)
