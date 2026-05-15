@@ -360,7 +360,7 @@ function PetMoodVisualManager:_startLoop()
 	task.spawn(function()
 		while true do
 			for petModel, state in pairs(self.petState) do
-				if petModel and petModel.Parent and state and not state.wild then
+				if petModel and petModel.Parent and state and not state.wild and state.location ~= "inventory" then
 					pcall(function()
 						self:UpdatePetVisuals(petModel)
 					end)
@@ -368,7 +368,7 @@ function PetMoodVisualManager:_startLoop()
 			end
 
 			self:_cleanupRemovedPets()
-			task.wait(1.5)
+			task.wait(5)
 		end
 	end)
 end
