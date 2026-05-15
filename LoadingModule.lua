@@ -147,11 +147,33 @@ LoadingFunctions.LoadData = function(Player)
 	PetMultipliers.AddPlayer(Player.Name)
 
 	if Datastore and Datastore.Pets then
+		local loadedPetFolderNames = {}
+		local loadedPetUids = {}
 		for PetId, PetInfo in Datastore.Pets do
+			local petFolderName = tostring(PetId)
+			local petUid = type(PetInfo) == "table" and tostring(PetInfo.PetUID or "") or ""
+			if loadedPetFolderNames[petFolderName] or (petUid ~= "" and loadedPetUids[petUid]) then
+				warn(("[LoadData] Skipping duplicate saved pet row id=%s uid=%s for %s"):format(petFolderName, petUid, Player.Name))
+				continue
+			end
+			loadedPetFolderNames[petFolderName] = true
+			if petUid ~= "" then
+				loadedPetUids[petUid] = true
+			end
+
 			local NewPet = RS.Assets.PetTemplate:Clone()
-			NewPet.Name = PetId
+			NewPet.Name = petFolderName
 			NewPet.Equipped.Value = PetInfo.Equipped
 			NewPet.PetName.Value = PetInfo.PetName
+			if type(PetInfo.PetUID) == "string" and PetInfo.PetUID ~= "" then
+				local uidValue = NewPet:FindFirstChild("PetUID")
+				if not uidValue then
+					uidValue = Instance.new("StringValue")
+					uidValue.Name = "PetUID"
+					uidValue.Parent = NewPet
+				end
+				uidValue.Value = PetInfo.PetUID
+			end
 			NewPet.Parent = MainFolder.Pets
 
 			if PetInfo.Equipped then
