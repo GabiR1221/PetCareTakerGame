@@ -40,7 +40,7 @@ local function restorePetScaleAndHipHeight(petStateManager, pet, state)
 	petStateManager:SetPetScale(pet, targetScale)
 end
 
-local function grantAdoptedPetToInventory(player, petModel)
+local function grantAdoptedPetToInventory(player, petModel, options)
 	if not player or not petModel then return end
 	local templateName = petModel:GetAttribute("TemplateName") or petModel.Name
 	if type(templateName) ~= "string" or templateName == "" then return end
@@ -52,7 +52,7 @@ local function grantAdoptedPetToInventory(player, petModel)
 
 	local bridge = ReplicatedStorage:FindFirstChild(INVENTORY_BRIDGE_NAME)
 	if bridge and bridge:IsA("BindableEvent") then
-		bridge:Fire(player, templateName, petUid)
+		bridge:Fire(player, templateName, petUid, options)
 	end
 end
 
@@ -220,7 +220,7 @@ function WildPetManager:GrantOwnedPetFromTemplate(player, templateName)
 	grantAdoptedPetToInventory(player, pet)
 	self:UpdateOwnedPetRegistryForPlayer(player)
 	if self.SaveManager then
-		self.SaveManager:ScheduleSave(player)
+		self.SaveManager:ScheduleSave(player, { urgent = true, reason = "GrantOwnedPetFromTemplate" })
 	end
 
 	return true, pet
@@ -396,7 +396,7 @@ function WildPetManager:ClearPlayerPetsForRebirth(player)
 
 	self:UpdateOwnedPetRegistryForPlayer(player)
 	if self.SaveManager then
-		self.SaveManager:ScheduleSave(player)
+		self.SaveManager:ScheduleSave(player, { urgent = true, reason = "ClearPlayerPetsForRebirth" })
 	end
 end
 
@@ -443,7 +443,7 @@ function WildPetManager:RemoveOwnedPetByUid(player, petUid)
 	if removedCount > 0 then
 		self:UpdateOwnedPetRegistryForPlayer(player)
 		if self.SaveManager then
-			self.SaveManager:ScheduleSave(player)
+			self.SaveManager:ScheduleSave(player, { urgent = true, reason = "RemoveOwnedPetByUid" })
 		end
 	end
 
@@ -498,7 +498,7 @@ function WildPetManager:RemoveOneOwnedPetByName(player, petName)
 
 	self:UpdateOwnedPetRegistryForPlayer(player)
 	if self.SaveManager then
-		self.SaveManager:ScheduleSave(player)
+		self.SaveManager:ScheduleSave(player, { urgent = true, reason = "RemoveOneOwnedPetByName" })
 	end
 
 	return true
@@ -1013,7 +1013,7 @@ function WildPetManager:AutoAdoptCarriedWildPet(player, options)
 
 	self:UpdateOwnedPetRegistryForPlayer(player)
 	if self.SaveManager then
-		self.SaveManager:ScheduleSave(player)
+		self.SaveManager:ScheduleSave(player, { urgent = true, reason = "AutoAdopt" })
 	end
 
 	self.PetStateManager:AddXP(pet, 1)
