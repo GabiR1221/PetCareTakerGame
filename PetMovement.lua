@@ -34,7 +34,10 @@ local FLEE_MAX_DURATION = 2.8
 local FLEE_START_MAX_WAIT = 0.3
 local FLEE_SPEED_MIN = 6.5
 local FLEE_SPEED_MAX = 10
-local FLEE_INTERRUPT_CHECK_INTERVAL = 0.12
+local FLEE_INTERRUPT_CHECK_INTERVAL = 0.20
+local OWNED_MOVE_POLL_INTERVAL = 0.10
+local WILD_MOVE_POLL_INTERVAL = 0.06
+local MOVE_REISSUE_INTERVAL = 0.70
 
 local FLOOR_NAME_CANDIDATES = {
 	"Floor",
@@ -59,6 +62,9 @@ local function optimizeRuntimePetParts(pet)
 			d.CanTouch = false
 			d.CanCollide = false
 			d.CastShadow = false
+			pcall(function()
+				d:SetNetworkOwner(nil)
+			end)
 		end
 	end
 end
@@ -504,12 +510,13 @@ local function moveToPositionSmooth(state, targetPos, speed, interruptCheck)
 
 		setFacingTarget(state, targetPos)
 
-		if os.clock() - lastReissue >= 0.35 then
+		if os.clock() - lastReissue >= MOVE_REISSUE_INTERVAL then
 			humanoid:MoveTo(targetPos)
 			lastReissue = os.clock()
 		end
 
-		task.wait(1 / 30)
+		local pollInterval = state.pet:GetAttribute("WildPet") == true and WILD_MOVE_POLL_INTERVAL or OWNED_MOVE_POLL_INTERVAL
+		task.wait(pollInterval)
 	end
 
 	return false, "stopped"
@@ -946,6 +953,13 @@ function PetMovement.StartWandering(pet, origin, wanderRadius, ownerUserId, cons
 	if not humanoid or not hrp then
 		return
 	end
+
+	pcall(function()
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	end)
 
 	startWanderingInternal(pet, spawnPos, {
 		wanderRadius = tonumber(wanderRadius) or DEFAULT_WANDER_RADIUS,
