@@ -3,6 +3,13 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+-- Server presentation tuning for what other players see. Edit these offsets
+-- if the cloned sponge/showerhead should sit differently in the player's hand.
+local SERVER_SPONGE_HAND_OFFSET = CFrame.new(0, 0.5, 0)
+local SERVER_SPONGE_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
+local SERVER_SHOWERHEAD_HAND_OFFSET = CFrame.new(0, 0.3, 1)
+local SERVER_SHOWERHEAD_ROTATION_OFFSET = CFrame.Angles(math.rad(-25), math.rad(15), 0)
+
 local function getShowerEffectNames(actionName)
 	if tostring(actionName or "") == "Place" then
 		return {"ShowerPlaceEffect", "PetShowerPlaceEffect", "PetPlacedEffect", "PetInteractionEffect"}
@@ -77,6 +84,25 @@ function ShowerDryerManager:_toToolHandle(toolInstance)
 			end
 		end
 		return toolInstance.PrimaryPart
+	end
+	return nil
+end
+
+function ShowerDryerManager:_getToolContactPart(toolInstance)
+	if not toolInstance then return nil end
+	if toolInstance:IsA("BasePart") then
+		local childCleanBox = toolInstance:FindFirstChild("CleanBox")
+		if childCleanBox and childCleanBox:IsA("BasePart") then
+			return childCleanBox
+		end
+		return toolInstance
+	end
+	if toolInstance:IsA("Model") then
+		local cleanBox = toolInstance:FindFirstChild("CleanBox", true)
+		if cleanBox and cleanBox:IsA("BasePart") then
+			return cleanBox
+		end
+		return self:_toToolHandle(toolInstance)
 	end
 	return nil
 end
@@ -324,6 +350,45 @@ function ShowerDryerManager:_getNearestDirtPartAtPosition(session, worldPos, max
 	return nearestPart
 end
 
+function ShowerDryerManager:_getDistanceToPartSurface(part, worldPos)
+	if not part or not part:IsA("BasePart") or typeof(worldPos) ~= "Vector3" then
+		return math.huge
+	end
+	local ok, closestPoint = pcall(function()
+		return part:GetClosestPointOnSurface(worldPos)
+	end)
+	if ok and typeof(closestPoint) == "Vector3" then
+		return (closestPoint - worldPos).Magnitude
+	end
+	return (part.Position - worldPos).Magnitude
+end
+
+function ShowerDryerManager:_getValidatedTouchedDirtPart(session, rawWorldPos, targetSurfacePos, maxDistance)
+	if not session or typeof(rawWorldPos) ~= "Vector3" or typeof(targetSurfacePos) ~= "Vector3" then
+		return nil
+	end
+	local dirtParts = session.dirtParts or {}
+	if #dirtParts == 0 then
+		return nil
+	end
+
+	local nearestPart = nil
+	local nearestDistance = tonumber(maxDistance) or 1.35
+	local rawAllowance = nearestDistance + 0.45
+	for _, dirtPart in ipairs(dirtParts) do
+		if dirtPart and dirtPart.Parent then
+			local surfaceDistance = self:_getDistanceToPartSurface(dirtPart, targetSurfacePos)
+			local rawDistance = self:_getDistanceToPartSurface(dirtPart, rawWorldPos)
+			if surfaceDistance <= nearestDistance and rawDistance <= rawAllowance then
+				nearestDistance = surfaceDistance
+				nearestPart = dirtPart
+			end
+		end
+	end
+
+	return nearestPart
+end
+
 function ShowerDryerManager:_getStainState(session, dirtPart)
 	session.stainStateByPart = session.stainStateByPart or {}
 	local state = session.stainStateByPart[dirtPart]
@@ -399,42 +464,21 @@ function ShowerDryerManager:_clearDirtSessionAttributes(session)
 end
 
 function ShowerDryerManager:_getToolHalfThickness(toolInstance)
-	if not toolInstance then
-		return 0.6
+	local contactPart = self:_getToolContactPart(toolInstance)
+	if contactPart then
+		return math.max(contactPart.Size.X, contactPart.Size.Y, contactPart.Size.Z) * 0.5
 	end
-
-	if toolInstance:IsA("BasePart") then
-		return math.max(toolInstance.Size.X, toolInstance.Size.Y, toolInstance.Size.Z) * 0.5
-	end
-
-	if toolInstance:IsA("Model") then
-		local ok, boxCFrame, boxSize = pcall(function()
-			return toolInstance:GetBoundingBox()
-		end)
-		if ok and boxSize then
-			return math.max(boxSize.X, boxSize.Y, boxSize.Z) * 0.5
-		end
-
-		local handle = self:_toToolHandle(toolInstance)
-		if handle then
-			return math.max(handle.Size.X, handle.Size.Y, handle.Size.Z) * 0.5
-		end
-	end
-
 	return 0.6
 end
 
 function ShowerDryerManager:_getToolCleanRadius(toolInstance)
-	local cleanBox = nil
-	if toolInstance then
-		if toolInstance:IsA("BasePart") and toolInstance.Name == "CleanBox" then
-			cleanBox = toolInstance
-		elseif toolInstance.FindFirstChild then
-			cleanBox = toolInstance:FindFirstChild("CleanBox", true)
-		end
-	end
+	local cleanBox = toolInstance and toolInstance.FindFirstChild and toolInstance:FindFirstChild("CleanBox", true) or nil
 	if cleanBox and cleanBox:IsA("BasePart") then
 		return math.clamp(math.max(cleanBox.Size.X, cleanBox.Size.Y, cleanBox.Size.Z) * 0.5, 1.1, 4.5)
+	end
+	local contactPart = self:_getToolContactPart(toolInstance)
+	if contactPart then
+		return math.clamp(math.max(contactPart.Size.X, contactPart.Size.Y, contactPart.Size.Z) * 0.5, 1.1, 4.5)
 	end
 	return 1.45
 end
@@ -648,9 +692,12 @@ function ShowerDryerManager:_updatePlayerToolPose(session, toolWorldPos, toolNor
 	armPose.targetPart.CFrame = CFrame.lookAt(targetPos, targetPos + normal.Unit)
 end
 
-function ShowerDryerManager:_resolvePlayerShowerAnimationId(session)
+function ShowerDryerManager:_resolvePlayerShowerAnimationId(session, stage)
 	local showerPart = session and session.showerPart
-	for _, attrName in ipairs({"ShowerLoopAnimationId", "PlayerShowerAnimationId", "ShowerAnimationId"}) do
+	local attrNames = (tonumber(stage) == 2)
+		and {"ShowerLoopAnimationId2", "PlayerShowerAnimationId2", "ShowerAnimationId2"}
+		or {"ShowerLoopAnimationId", "PlayerShowerAnimationId", "ShowerAnimationId"}
+	for _, attrName in ipairs(attrNames) do
 		local raw = showerPart and showerPart:GetAttribute(attrName)
 		if raw ~= nil and tostring(raw) ~= "" then
 			local digits = tostring(raw):match("%d+")
@@ -660,7 +707,11 @@ function ShowerDryerManager:_resolvePlayerShowerAnimationId(session)
 		end
 	end
 
-	local config = ReplicatedStorage:FindFirstChild("ShowerLoopAnimationId") or ReplicatedStorage:FindFirstChild("PlayerShowerAnimationId")
+	local config = nil
+	if tonumber(stage) == 2 then
+		config = ReplicatedStorage:FindFirstChild("ShowerLoopAnimationId2") or ReplicatedStorage:FindFirstChild("PlayerShowerAnimationId2")
+	end
+	config = config or ReplicatedStorage:FindFirstChild("ShowerLoopAnimationId") or ReplicatedStorage:FindFirstChild("PlayerShowerAnimationId")
 	if config and config:IsA("ValueBase") and tostring(config.Value) ~= "" then
 		local digits = tostring(config.Value):match("%d+")
 		if digits then
@@ -673,7 +724,7 @@ end
 
 function ShowerDryerManager:_playPlayerShowerLoop(session, humanoid)
 	if not session or not humanoid then return nil end
-	local animationId = self:_resolvePlayerShowerAnimationId(session)
+	local animationId = self:_resolvePlayerShowerAnimationId(session, session.serverPresentationStage or session.stage or 1)
 	if not animationId then return nil end
 
 	local animator = humanoid:FindFirstChildOfClass("Animator")
@@ -698,6 +749,321 @@ function ShowerDryerManager:_playPlayerShowerLoop(session, humanoid)
 	return track
 end
 
+
+function ShowerDryerManager:_setRuntimeEffectPartsInvisible(effectInstance)
+	if not effectInstance then return end
+	local function apply(inst)
+		if inst:IsA("BasePart") then
+			inst.Transparency = 1
+			inst.CanCollide = false
+			inst.CanQuery = false
+			inst.CanTouch = false
+			inst.Massless = true
+		elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Light") then
+			inst.Enabled = true
+		end
+	end
+	apply(effectInstance)
+	for _, d in ipairs(effectInstance:GetDescendants()) do
+		apply(d)
+	end
+end
+
+function ShowerDryerManager:_attachServerToolEffect(effectTemplate, targetPart)
+	if not effectTemplate or not targetPart then return nil end
+	local clone = effectTemplate:Clone()
+	clone.Name = "Server" .. tostring(effectTemplate.Name)
+
+	if clone:IsA("Attachment") then
+		clone.Parent = targetPart
+		self:_setRuntimeEffectPartsInvisible(clone)
+		return clone
+	end
+
+	if clone:IsA("ParticleEmitter") or clone:IsA("Trail") or clone:IsA("Beam") or clone:IsA("Light") then
+		local attachment = Instance.new("Attachment")
+		attachment.Name = clone.Name .. "Attachment"
+		attachment.Parent = targetPart
+		clone.Parent = attachment
+		self:_setRuntimeEffectPartsInvisible(attachment)
+		return attachment
+	end
+
+	if clone:IsA("BasePart") then
+		clone.CFrame = targetPart.CFrame
+		clone.Anchored = false
+		clone.Parent = targetPart
+		local weld = Instance.new("WeldConstraint")
+		weld.Name = "ServerShowerEffectWeld"
+		weld.Part0 = targetPart
+		weld.Part1 = clone
+		weld.Parent = clone
+	elseif clone:IsA("Model") then
+		if not clone.PrimaryPart then
+			local firstPart = clone:FindFirstChildWhichIsA("BasePart", true)
+			if firstPart then
+				pcall(function() clone.PrimaryPart = firstPart end)
+			end
+		end
+		if clone.PrimaryPart then
+			clone:PivotTo(targetPart.CFrame)
+		end
+		clone.Parent = targetPart
+		if clone.PrimaryPart then
+			local weld = Instance.new("WeldConstraint")
+			weld.Name = "ServerShowerEffectWeld"
+			weld.Part0 = targetPart
+			weld.Part1 = clone.PrimaryPart
+			weld.Parent = clone.PrimaryPart
+		end
+	else
+		clone.Parent = targetPart
+	end
+
+	local fallbackAttachment = nil
+	for _, d in ipairs(clone:GetDescendants()) do
+		if (d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Light"))
+			and not (d.Parent and (d.Parent:IsA("Attachment") or d.Parent:IsA("BasePart"))) then
+			fallbackAttachment = fallbackAttachment or Instance.new("Attachment")
+			fallbackAttachment.Name = clone.Name .. "FallbackAttachment"
+			fallbackAttachment.Parent = targetPart
+			d.Parent = fallbackAttachment
+		end
+	end
+
+	self:_setRuntimeEffectPartsInvisible(clone)
+	if fallbackAttachment and not clone:IsA("BasePart") and not clone:IsA("Model") then
+		clone.Parent = fallbackAttachment
+		return fallbackAttachment
+	end
+	return clone
+end
+
+function ShowerDryerManager:_captureToolPresentationSnapshot(toolInstance)
+	if not toolInstance then return nil end
+	local snapshot = {
+		tool = toolInstance,
+		parent = toolInstance.Parent,
+		partState = {},
+	}
+	if toolInstance:IsA("Model") then
+		snapshot.pivot = toolInstance:GetPivot()
+	elseif toolInstance:IsA("BasePart") then
+		snapshot.cframe = toolInstance.CFrame
+	end
+	local function capturePart(part)
+		snapshot.partState[part] = {
+			Anchored = part.Anchored,
+			CanCollide = part.CanCollide,
+			CanQuery = part.CanQuery,
+			CanTouch = part.CanTouch,
+			Massless = part.Massless,
+		}
+	end
+	if toolInstance:IsA("BasePart") then
+		capturePart(toolInstance)
+	elseif toolInstance:IsA("Model") then
+		for _, d in ipairs(toolInstance:GetDescendants()) do
+			if d:IsA("BasePart") then
+				capturePart(d)
+			end
+		end
+	end
+	return snapshot
+end
+
+function ShowerDryerManager:_restoreToolPresentationSnapshot(snapshot)
+	if not snapshot or not snapshot.tool then return end
+	local toolInstance = snapshot.tool
+	if snapshot.parent then
+		toolInstance.Parent = snapshot.parent
+	end
+	if toolInstance:IsA("Model") and snapshot.pivot then
+		pcall(function() toolInstance:PivotTo(snapshot.pivot) end)
+	elseif toolInstance:IsA("BasePart") and snapshot.cframe then
+		pcall(function() toolInstance.CFrame = snapshot.cframe end)
+	end
+	for part, state in pairs(snapshot.partState or {}) do
+		if part and part.Parent then
+			pcall(function()
+				part.Anchored = state.Anchored == true
+				part.CanCollide = state.CanCollide == true
+				part.CanQuery = state.CanQuery == true
+				part.CanTouch = state.CanTouch == true
+				part.Massless = state.Massless == true
+				part.AssemblyLinearVelocity = Vector3.zero
+				part.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+	end
+end
+
+function ShowerDryerManager:_createHeldToolPresentationWelds(toolInstance, contactPart, hand)
+	local welds = {}
+	local function addWeld(part0, part1, name)
+		if not part0 or not part1 or part0 == part1 then return end
+		local weld = Instance.new("WeldConstraint")
+		weld.Name = name or "ServerShowerPresentationWeld"
+		weld.Part0 = part0
+		weld.Part1 = part1
+		weld.Parent = part1
+		table.insert(welds, weld)
+	end
+
+	addWeld(hand, contactPart, "ServerShowerHeldToolWeld")
+	if toolInstance:IsA("Model") then
+		for _, d in ipairs(toolInstance:GetDescendants()) do
+			if d:IsA("BasePart") and d ~= contactPart then
+				addWeld(contactPart, d, "ServerShowerToolPartWeld")
+			end
+		end
+	end
+	return welds
+end
+
+function ShowerDryerManager:_prepareExistingHeldTool(toolInstance)
+	if not toolInstance then return end
+	local function prep(part)
+		part.Anchored = false
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Massless = true
+	end
+	if toolInstance:IsA("BasePart") then
+		prep(toolInstance)
+	elseif toolInstance:IsA("Model") then
+		for _, d in ipairs(toolInstance:GetDescendants()) do
+			if d:IsA("BasePart") then
+				prep(d)
+			end
+		end
+		if not toolInstance.PrimaryPart then
+			local handle = self:_getToolContactPart(toolInstance) or self:_toToolHandle(toolInstance)
+			if handle then pcall(function() toolInstance.PrimaryPart = handle end) end
+		end
+	end
+end
+
+function ShowerDryerManager:_cloneServerHeldTool(toolInstance)
+	if not toolInstance then return nil end
+	local clone = toolInstance:Clone()
+	clone.Name = "ServerShowerHeld" .. tostring(toolInstance.Name)
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+			d:Destroy()
+		elseif d:IsA("BasePart") then
+			d.Anchored = false
+			d.CanCollide = false
+			d.CanQuery = false
+			d.CanTouch = false
+			d.Massless = true
+		end
+	end
+	if clone:IsA("BasePart") then
+		clone.Anchored = false
+		clone.CanCollide = false
+		clone.CanQuery = false
+		clone.CanTouch = false
+		clone.Massless = true
+	elseif clone:IsA("Model") and not clone.PrimaryPart then
+		local handle = self:_getToolContactPart(clone) or self:_toToolHandle(clone)
+		if handle then
+			pcall(function() clone.PrimaryPart = handle end)
+		end
+	end
+	return clone
+end
+
+function ShowerDryerManager:_attachHeldToolToCharacter(session, toolInstance, effectName)
+	if not session or not session.player then return nil end
+	local character = session.player.Character
+	if not character then return nil end
+	local hand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm") or character:FindFirstChild("RightLowerArm")
+	if not hand or not hand:IsA("BasePart") then return nil end
+	local snapshot = self:_captureToolPresentationSnapshot(toolInstance)
+	self:_prepareExistingHeldTool(toolInstance)
+	toolInstance.Parent = character
+	local contactPart = self:_getToolContactPart(toolInstance) or self:_toToolHandle(toolInstance)
+	if not contactPart then
+		self:_restoreToolPresentationSnapshot(snapshot)
+		return nil
+	end
+	local isShowerHead = tostring(effectName) == "ShowerHeadEffect"
+	local handOffset = isShowerHead and SERVER_SHOWERHEAD_HAND_OFFSET or SERVER_SPONGE_HAND_OFFSET
+	local rotationOffset = isShowerHead and SERVER_SHOWERHEAD_ROTATION_OFFSET or SERVER_SPONGE_ROTATION_OFFSET
+	local handCf = hand.CFrame * handOffset * rotationOffset
+	if toolInstance:IsA("Model") then
+		local relative = toolInstance:GetPivot():ToObjectSpace(contactPart.CFrame)
+		toolInstance:PivotTo(handCf * relative:Inverse())
+	else
+		toolInstance.CFrame = handCf
+	end
+	local welds = self:_createHeldToolPresentationWelds(toolInstance, contactPart, hand)
+
+	local effectClone = nil
+	local effectsFolder = ReplicatedStorage:FindFirstChild("Effects")
+	local template = effectsFolder and effectsFolder:FindFirstChild(effectName)
+	if template then
+		effectClone = self:_attachServerToolEffect(template, contactPart)
+	end
+	return { tool = toolInstance, effect = effectClone, snapshot = snapshot, welds = welds }
+end
+
+function ShowerDryerManager:_clearServerShowerPresentation(session)
+	if not session then return end
+	if session.serverToolEffect then
+		pcall(function() session.serverToolEffect:Destroy() end)
+		session.serverToolEffect = nil
+	end
+	for _, weld in ipairs(session.serverHeldToolWelds or {}) do
+		if weld and weld.Parent then
+			pcall(function() weld:Destroy() end)
+		end
+	end
+	session.serverHeldToolWelds = nil
+	if session.serverHeldToolSnapshot then
+		self:_restoreToolPresentationSnapshot(session.serverHeldToolSnapshot)
+		session.serverHeldToolSnapshot = nil
+	end
+	session.serverHeldTool = nil
+end
+
+function ShowerDryerManager:_stopServerShowerAnimation(session)
+	local stance = session and session.playerStance
+	if stance and stance.showerLoopTrack then
+		pcall(function()
+			stance.showerLoopTrack:Stop(0.15)
+			stance.showerLoopTrack:Destroy()
+		end)
+		stance.showerLoopTrack = nil
+	end
+end
+
+function ShowerDryerManager:_setServerShowerPresentationStage(session, stage)
+	if not session then return end
+	stage = tonumber(stage) == 2 and 2 or 1
+	if session.serverPresentationStage == stage and session.serverHeldTool then return end
+	session.serverPresentationStage = stage
+	self:_clearServerShowerPresentation(session)
+
+	local tool = (stage == 1) and session.spongeTool or session.showerHeadTool
+	local effectName = (stage == 1) and "SpongeEffect" or "ShowerHeadEffect"
+	local presentation = self:_attachHeldToolToCharacter(session, tool, effectName)
+	if presentation then
+		session.serverHeldTool = presentation.tool
+		session.serverToolEffect = presentation.effect
+		session.serverHeldToolSnapshot = presentation.snapshot
+		session.serverHeldToolWelds = presentation.welds
+	end
+
+	local stance = session.playerStance
+	if stance and stance.humanoid then
+		self:_stopServerShowerAnimation(session)
+		stance.showerLoopTrack = self:_playPlayerShowerLoop(session, stance.humanoid)
+	end
+end
+
 function ShowerDryerManager:_startPlayerShowerStance(session)
 	if not session or not session.player then return end
 	local character = session.player.Character
@@ -719,7 +1085,7 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 	standPart.Anchored = true
 	standPart.Parent = workspace
 
-	local standOffset = Vector3.new(0, 0, 5.25)
+	local standOffset = Vector3.new(0, 1, -5.4)
 	local standPos = showerPart.CFrame:PointToWorldSpace(standOffset)
 	local lookAtPos = showerPart.Position + Vector3.new(0, 1.35, 0)
 	local flatLook = Vector3.new(lookAtPos.X - standPos.X, 0, lookAtPos.Z - standPos.Z)
@@ -759,7 +1125,7 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 	pcall(function()
 		humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
 	end)
-	local showerLoopTrack = self:_playPlayerShowerLoop(session, humanoid)
+	local showerLoopTrack = nil
 
 	local lockConn = RunService.Heartbeat:Connect(function()
 		if not root.Parent or not standPart.Parent then return end
@@ -784,10 +1150,12 @@ function ShowerDryerManager:_startPlayerShowerStance(session)
 		showerLoopTrack = showerLoopTrack,
 		lockConn = lockConn,
 	}
+	self:_setServerShowerPresentationStage(session, session.stage or 1)
 end
 
 function ShowerDryerManager:_stopPlayerShowerStance(session)
 	if not session or not session.playerStance then return end
+	self:_clearServerShowerPresentation(session)
 	local stance = session.playerStance
 	if stance.lockConn then
 		pcall(function()
@@ -874,6 +1242,30 @@ function ShowerDryerManager:_stopPlayerToolPose(session)
 	session.armPose = nil
 end
 
+function ShowerDryerManager:_mapClientPresentedPointToServerPet(session, worldPos)
+	if not session or typeof(worldPos) ~= "Vector3" then
+		return worldPos
+	end
+	local steps = math.floor(tonumber(session.logicalRotationSteps) or 0) % 4
+	if steps == 0 then
+		return worldPos
+	end
+
+	local basePivot = session.serverPetBasePivot
+	if typeof(basePivot) ~= "CFrame" then
+		local pet = session.pet
+		if not pet or not pet.Parent then
+			return worldPos
+		end
+		basePivot = pet:GetPivot()
+		session.serverPetBasePivot = basePivot
+	end
+
+	local presentedPivot = basePivot * CFrame.Angles(0, math.rad(90 * steps), 0)
+	local localPoint = presentedPivot:PointToObjectSpace(worldPos)
+	return basePivot:PointToWorldSpace(localPoint)
+end
+
 function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if not player then return end
 	local session = self.activeShowerSessions[player.UserId]
@@ -881,6 +1273,15 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if not session.pet or not session.pet.Parent then return end
 	if (self.petState[session.pet] or {}).location ~= "shower" then return end
 	if type(payload) ~= "table" then return end
+	if session.player ~= player then return end
+
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root and session.showerPart and session.showerPart:IsA("BasePart") then
+		if (root.Position - session.showerPart.Position).Magnitude > 30 then
+			return
+		end
+	end
 
 	local worldPos = payload.worldPos
 	if typeof(worldPos) ~= "Vector3" then return end
@@ -889,24 +1290,39 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	local activeTool = (session.stage == 1) and session.spongeTool or session.showerHeadTool
 	if not activeTool then return end
 
-	local clampedPos = self:_clampToWall(session, worldPos)
+	local clientClampedPos = self:_clampToWall(session, worldPos)
 
 	if session.showerPart and session.showerPart:IsA("BasePart") then
-		local showerDistance = (clampedPos - session.showerPart.Position).Magnitude
+		local showerDistance = (clientClampedPos - session.showerPart.Position).Magnitude
 		if showerDistance > 20 then
 			return
 		end
 	end
 
-	local surfacePos, surfaceNormal = self:_snapPositionToPetSurface(session, clampedPos)
+	local nowForMove = tick()
+	local lastMoveAt = session.lastClientMoveAt
+	if session.lastClientMovePos and lastMoveAt then
+		local dt = math.max(nowForMove - lastMoveAt, 1 / 240)
+		local speed = (clientClampedPos - session.lastClientMovePos).Magnitude / dt
+		if speed > 180 then
+			session.lastClientMoveAt = nowForMove
+			session.lastClientMovePos = clientClampedPos
+			return
+		end
+	end
+	session.lastClientMoveAt = nowForMove
+	session.lastClientMovePos = clientClampedPos
+
+	local serverContactPos = self:_mapClientPresentedPointToServerPet(session, clientClampedPos)
+	local surfacePos, surfaceNormal = self:_snapPositionToPetSurface(session, serverContactPos)
 	if typeof(surfacePos) ~= "Vector3" then return end
 	if typeof(surfaceNormal) ~= "Vector3" or surfaceNormal.Magnitude < 1e-4 then
 		surfaceNormal = Vector3.new(0, 1, 0)
 	end
 
-	local snapDistance = (surfacePos - clampedPos).Magnitude
-	local snapEnterDistance = 2.55
-	local snapExitDistance = 3.15
+	local snapDistance = (surfacePos - serverContactPos).Magnitude
+	local snapEnterDistance = 1.1
+	local snapExitDistance = 1.5
 	local useSnappedSurface = session.surfaceSnapActive == true
 	if useSnappedSurface then
 		useSnappedSurface = snapDistance <= snapExitDistance
@@ -914,12 +1330,12 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		useSnappedSurface = snapDistance <= snapEnterDistance
 	end
 	session.surfaceSnapActive = useSnappedSurface
-	local targetSurfacePos = useSnappedSurface and surfacePos or clampedPos
-	local payloadSurfaceNormal = payload.surfaceNormal
-	local targetSurfaceNormal = useSnappedSurface and surfaceNormal or (session.lastToolNormal or surfaceNormal)
-	if typeof(payloadSurfaceNormal) == "Vector3" and payloadSurfaceNormal.Magnitude > 1e-4 then
-		targetSurfaceNormal = payloadSurfaceNormal.Unit
+	local clientHitPet = payload.hitPet == true
+	if not useSnappedSurface or not clientHitPet then
+		return
 	end
+	local targetSurfacePos = surfacePos
+	local targetSurfaceNormal = surfaceNormal
 	if typeof(targetSurfaceNormal) ~= "Vector3" or targetSurfaceNormal.Magnitude < 1e-4 then
 		targetSurfaceNormal = Vector3.new(0, 1, 0)
 	end
@@ -940,7 +1356,8 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	if distance > 6 then return end
 
 	local now = tick()
-	local touchedPart = self:_getNearestDirtPartAtPosition(session, targetSurfacePos, self:_getToolCleanRadius(activeTool))
+	local cleanRadius = self:_getToolCleanRadius(activeTool)
+	local touchedPart = self:_getValidatedTouchedDirtPart(session, serverContactPos, targetSurfacePos, cleanRadius)
 
 	if (now - (session.lastProgressTick or 0)) < 0.04 then return end
 	session.lastProgressTick = now
@@ -1028,6 +1445,16 @@ end
 function ShowerDryerManager:_findObjectNearShower(showerPart, preferredName)
 	if not showerPart then return nil end
 
+	local candidateNames = { preferredName }
+	if preferredName == "SpongePart" then
+		table.insert(candidateNames, "Sponge")
+		table.insert(candidateNames, "SpongeTool")
+	elseif preferredName == "ShowerHeadPart" then
+		table.insert(candidateNames, "ShowerHead")
+		table.insert(candidateNames, "ShowerHeadTool")
+		table.insert(candidateNames, "Shower Head")
+	end
+
 	local roots = {showerPart}
 	local parent = showerPart.Parent
 	if parent then table.insert(roots, parent) end
@@ -1035,16 +1462,22 @@ function ShowerDryerManager:_findObjectNearShower(showerPart, preferredName)
 
 	for _, root in ipairs(roots) do
 		if root and root.FindFirstChild then
-			local direct = root:FindFirstChild(preferredName)
-			local normalizedDirect = self:_normalizeShowerToolObject(direct, preferredName)
-			if normalizedDirect then
-				return normalizedDirect
+			for _, candidateName in ipairs(candidateNames) do
+				local direct = root:FindFirstChild(candidateName)
+				local normalizedDirect = self:_normalizeShowerToolObject(direct, preferredName)
+				if normalizedDirect then
+					return normalizedDirect
+				end
 			end
 			for _, d in ipairs(root:GetDescendants()) do
-				if (d:IsA("BasePart") or d:IsA("Model")) and d.Name == preferredName then
-					local normalized = self:_normalizeShowerToolObject(d, preferredName)
-					if normalized then
-						return normalized
+				if d:IsA("BasePart") or d:IsA("Model") then
+					for _, candidateName in ipairs(candidateNames) do
+						if d.Name == candidateName then
+							local normalized = self:_normalizeShowerToolObject(d, preferredName)
+							if normalized then
+								return normalized
+							end
+						end
 					end
 				end
 			end
@@ -1084,10 +1517,13 @@ function ShowerDryerManager:_handleRotateFromClient(player, payload)
 	session.lastRotateTick = now
 
 
-	-- Rotation is now a local presentation detail for the showering player.
-	-- The server only rate-limits and records the intent for auditing/progress context,
-	-- so other clients do not receive replicated pet rotation spam.
+	-- Rotation is a local presentation detail, but the server records the same
+	-- 90-degree steps so tool hit positions can be mapped back to the authoritative
+	-- unrotated pet/dirt parts for validation and progress.
 	session.logicalRotationSteps = ((session.logicalRotationSteps or 0) + direction) % 4
+	session.lastClientMoveAt = nil
+	session.lastClientMovePos = nil
+	session.surfaceSnapActive = false
 end
 
 
@@ -1285,11 +1721,13 @@ function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart)
 		if session.progress >= 1 then
 			session.stage = 2
 			session.progress = 0
+			self:_setServerShowerPresentationStage(session, 2)
 			if self.showerRemote then
 				self.showerRemote:FireClient(session.player, "Stage", {
 					stage = 2,
 					progress = 0,
 					stageText = "Rinse with Shower Head",
+					serverLoopAnimationId = self:_resolvePlayerShowerAnimationId(session, 2),
 				})
 			end
 		end
@@ -1350,6 +1788,8 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 		lastRotateTick = 0,
 		lastToolWorldPos = nil,
 		lastToolNormal = nil,
+		logicalRotationSteps = 0,
+		serverPetBasePivot = pet:GetPivot(),
 		originalShowerCFrame = showerPart.CFrame,
 	}
 
