@@ -426,6 +426,46 @@ local function countActiveOwnedWanderingPets(userId)
 	return count
 end
 
+local stowPetAsToolForPlayer
+
+local INTERACTION_LOCATIONS_TO_STOW = {
+	shower = true,
+	accessory = true,
+}
+
+local function normalizeTransientPetLocationsToInventory(petData)
+	if type(petData) ~= "table" then return end
+	for _, petInfo in ipairs(petData) do
+		if type(petInfo) == "table" and INTERACTION_LOCATIONS_TO_STOW[tostring(petInfo.location or "")] then
+			petInfo.location = "inventory"
+			petInfo.shower = nil
+			petInfo.accessoryTable = nil
+		end
+	end
+end
+
+stowPetAsToolForPlayer = function(player, petModel, autoEquip)
+	if not player then return end
+	for petModel, state in pairs(petState) do
+		if petModel and state and tostring(state.ownerUserId) == tostring(player.UserId) and state.wild ~= true then
+			if INTERACTION_LOCATIONS_TO_STOW[tostring(state.location or "")] then
+				local stowed = false
+				if type(stowPetAsToolForPlayer) == "function" then
+					local ok, result = pcall(function()
+						return stowPetAsToolForPlayer(player, petModel, false)
+					end)
+					stowed = ok and result == true
+				end
+				if not stowed then
+					state.location = "inventory"
+					state.shower = nil
+					state.accessoryTable = nil
+				end
+			end
+		end
+	end
+end
+
 local function dropCarriedPet(player, options)
 	options = options or {}
 	local carriedPet = carryingPetByUserId[player.UserId]
@@ -1319,7 +1359,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-saveManager = PetSaveManager:Initialize("PetData124", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+saveManager = PetSaveManager:Initialize("PetData126", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1630,6 +1670,7 @@ Players.PlayerAdded:Connect(function(player)
 		return
 	end
 	local petData = saveManager:LoadPlayerPets(player)
+	normalizeTransientPetLocationsToInventory(petData)
 	if petData and #petData > 0 then
 		-- PetSaveManager is the authoritative runtime-pet backup. Recreate any missing
 		-- Player.Data.Pets rows before mapping RuntimeLocation so UI/backpack state
@@ -1688,6 +1729,7 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
+	stowActiveInteractionPetsForPlayer(player)
 	if saveManager then
 		saveManager:SavePlayerPets(player, { force = true, reason = "PlayerRemoving" })
 		stashedPetModelsByUserId[player.UserId] = nil
