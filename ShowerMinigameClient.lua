@@ -9,6 +9,23 @@ local mouse = player:GetMouse()
 local camera = workspace.CurrentCamera
 local showerRemote = ReplicatedStorage:WaitForChild("ShowerMinigameEvent")
 
+-- Shower client tuning:
+-- CameraPartForwardOffset moves the actual camera in front of the physical CameraPart
+-- so targeting rays do not start inside/behind that part. Set the same attribute on
+-- CameraPart to override this default per shower.
+local DEFAULT_CAMERA_PART_FORWARD_OFFSET = 2
+-- Owner-client local tool tuning. Edit these for how far the local tools sit off
+-- the pet surface and how the showerhead is rotated during rinse mode.
+---z = y  
+local CLIENT_SPONGE_SURFACE_OFFSET_SCALE = 0.65
+local CLIENT_SPONGE_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
+local CLIENT_SHOWERHEAD_SURFACE_OFFSET_SCALE = 0.65
+local CLIENT_TOOL_SURFACE_OFFSET_MIN = 0.18
+local CLIENT_TOOL_SURFACE_OFFSET_MAX = 0.4
+local CLIENT_SHOWERHEAD_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
+local CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE = 6
+local CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS = 32
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
 gui.ResetOnSpawn = false
@@ -105,7 +122,7 @@ rotateLeft.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
 rotateLeft.TextColor3 = Color3.new(1, 1, 1)
 rotateLeft.Font = Enum.Font.SourceSansBold
 rotateLeft.TextSize = 20
-rotateLeft.Text = "⟵"
+rotateLeft.Text = "<-"
 rotateLeft.AutoButtonColor = false
 rotateLeft.Active = true
 rotateLeft.Selectable = true
@@ -120,7 +137,7 @@ rotateRight.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
 rotateRight.TextColor3 = Color3.new(1, 1, 1)
 rotateRight.Font = Enum.Font.SourceSansBold
 rotateRight.TextSize = 20
-rotateRight.Text = "⟶"
+rotateRight.Text = "->"
 rotateRight.AutoButtonColor = false
 rotateRight.Active = true 
 rotateRight.Selectable = true
@@ -163,12 +180,22 @@ local localShowerHeadOriginal = nil
 local originalVisualSnapshots = {}
 local lastLocalToolPos = nil
 local lastLocalToolNormal = nil
+local lastLocalToolRight = nil
+local lastLocalToolHitPet = false
 local localArmPose = nil
+local localCharacterTransparencySnapshots = {}
+local localCharacterHiddenConn = nil
+local localHiddenServerEffectSnapshots = {}
 local localPetBasePivot = nil
 local localPetRubOffset = Vector3.zero
 local localPetRubTilt = Vector3.zero
 local lastLocalRubWorldPos = nil
 local lastLocalRubAt = nil
+local localToolEffects = {}
+local spongeRubbingActive = false
+local showerHeadEffectActive = false
+local showerHeadFixedRight = nil
+local showerHeadFixedUp = nil
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -190,7 +217,21 @@ local function getToolHandle(toolInstance)
 		return toolInstance
 	end
 	if toolInstance:IsA("Model") then
-		return toolInstance.PrimaryPart or toolInstance:FindFirstChild("Handle", true) or toolInstance:FindFirstChildWhichIsA("BasePart", true)
+		local handle = toolInstance:FindFirstChild("Handle", true)
+			or toolInstance:FindFirstChild("SpongePart", true)
+			or toolInstance:FindFirstChild("ShowerHeadPart", true)
+		if handle and handle:IsA("BasePart") then
+			return handle
+		end
+		if toolInstance.PrimaryPart and toolInstance.PrimaryPart.Name ~= "CleanBox" then
+			return toolInstance.PrimaryPart
+		end
+		for _, d in ipairs(toolInstance:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name ~= "CleanBox" then
+				return d
+			end
+		end
+		return toolInstance.PrimaryPart or toolInstance:FindFirstChildWhichIsA("BasePart", true)
 	end
 	return nil
 end
@@ -201,14 +242,136 @@ local function prepareLocalVisualInstance(instance)
 		return false
 	end
 	if instance:IsA("BasePart") then
+		local isNestedCleanBox = instance.Name == "CleanBox" and instance.Parent ~= nil
+		if isNestedCleanBox then
+			instance.Transparency = 1
+			instance.LocalTransparencyModifier = 1
+		else
+			instance.LocalTransparencyModifier = 0
+		end
 		instance.Anchored = true
 		instance.CanCollide = false
 		instance.CanQuery = false
 		instance.CanTouch = false
 		instance.Massless = true
-		instance.LocalTransparencyModifier = 0
 	end
 	return true
+end
+
+local function getEffectsFolder()
+	local effects = ReplicatedStorage:FindFirstChild("Effects")
+	if effects and effects:IsA("Folder") then
+		return effects
+	end
+	return nil
+end
+
+local function getToolContactPart(toolInstance)
+	if not toolInstance then return nil end
+	if toolInstance:IsA("BasePart") then
+		return toolInstance.Name == "CleanBox" and toolInstance or (toolInstance:FindFirstChild("CleanBox") or toolInstance)
+	end
+	if toolInstance:IsA("Model") then
+		local cleanBox = toolInstance:FindFirstChild("CleanBox", true)
+		if cleanBox and cleanBox:IsA("BasePart") then
+			return cleanBox
+		end
+		return getToolHandle(toolInstance)
+	end
+	return nil
+end
+
+local function getToolVisualPivotPart(toolInstance)
+	-- Local visuals should be positioned by the visible sponge/showerhead body,
+	-- not by an invisible CleanBox that can be offset for hit detection.
+	local handle = getToolHandle(toolInstance)
+	if handle and handle:IsA("BasePart") then
+		return handle
+	end
+	if toolInstance and toolInstance:IsA("Model") then
+		for _, d in ipairs(toolInstance:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name ~= "CleanBox" then
+				return d
+			end
+		end
+	end
+	return getToolContactPart(toolInstance)
+end
+
+local function setEffectEnabled(effectInstance, enabled)
+	if not effectInstance then return end
+	local function apply(inst)
+		if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") then
+			inst.Enabled = enabled == true
+		elseif inst:IsA("BasePart") then
+			inst.Transparency = 1
+		elseif inst:IsA("Decal") or inst:IsA("Texture") then
+			inst.Transparency = (enabled == true) and 0 or 1
+		elseif inst:IsA("Light") then
+			inst.Enabled = enabled == true
+		end
+	end
+	apply(effectInstance)
+	for _, d in ipairs(effectInstance:GetDescendants()) do
+		apply(d)
+	end
+end
+
+local function attachEffectToPart(effectInstance, targetPart, centerOnTarget)
+	if not effectInstance or not targetPart then return end
+	if effectInstance:IsA("Attachment") then
+		if centerOnTarget then
+			effectInstance.CFrame = CFrame.new()
+		end
+		effectInstance.Parent = targetPart
+		return
+	end
+	if effectInstance:IsA("ParticleEmitter") or effectInstance:IsA("Trail") or effectInstance:IsA("Beam") or effectInstance:IsA("Light") then
+		local attachment = Instance.new("Attachment")
+		attachment.Name = effectInstance.Name .. "Attachment"
+		if centerOnTarget then
+			attachment.CFrame = CFrame.new()
+		end
+		attachment.Parent = targetPart
+		effectInstance.Parent = attachment
+		return
+	end
+	if effectInstance:IsA("BasePart") then
+		effectInstance.Anchored = false
+		effectInstance.CanCollide = false
+		effectInstance.CanQuery = false
+		effectInstance.CanTouch = false
+		effectInstance.Massless = true
+		effectInstance.CFrame = centerOnTarget and targetPart.CFrame or effectInstance.CFrame
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = targetPart
+		weld.Part1 = effectInstance
+		weld.Parent = effectInstance
+	end
+	effectInstance.Parent = targetPart
+end
+
+local function addLocalToolEffect(originalTool, effectName, startsEnabled)
+	if not originalTool or localToolEffects[originalTool] then return end
+	local visual = localToolVisuals[originalTool]
+	if not visual then return end
+	local effectsFolder = getEffectsFolder()
+	local template = effectsFolder and effectsFolder:FindFirstChild(effectName)
+	if not template then return end
+	local targetPart = getToolVisualPivotPart(visual) or getToolHandle(visual) or getToolContactPart(visual)
+	if not targetPart then return end
+	local clone = template:Clone()
+	clone.Name = "Local" .. effectName
+	attachEffectToPart(clone, targetPart, true)
+	localToolEffects[originalTool] = clone
+	setEffectEnabled(clone, startsEnabled == true)
+end
+
+local function setLocalToolEffectActive(originalTool, active)
+	local effect = originalTool and localToolEffects[originalTool]
+	if effect then
+		setEffectEnabled(effect, active == true)
+	end
 end
 
 local function setOriginalToolLocalHidden(toolInstance, hidden)
@@ -247,58 +410,80 @@ local function cloneLocalToolVisual(toolInstance)
 	return clone
 end
 
+local function setLocalShowerCharacterVisible(visible)
+	local character = player.Character
+	if not character then return end
+	local function hideCharacterInstance(inst)
+		if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Light") then
+			if localHiddenServerEffectSnapshots[inst] == nil then
+				localHiddenServerEffectSnapshots[inst] = inst.Enabled
+			end
+			inst.Enabled = false
+			return
+		end
+		if inst:IsA("BasePart") then
+			if localCharacterTransparencySnapshots[inst] == nil then
+				localCharacterTransparencySnapshots[inst] = inst.LocalTransparencyModifier
+			end
+			inst.LocalTransparencyModifier = 1
+		elseif inst:IsA("Decal") or inst:IsA("Texture") then
+			if localCharacterTransparencySnapshots[inst] == nil then
+				localCharacterTransparencySnapshots[inst] = inst.Transparency
+			end
+			inst.Transparency = 1
+		end
+	end
+	if visible == false then
+		for _, d in ipairs(character:GetDescendants()) do
+			hideCharacterInstance(d)
+		end
+		if localCharacterHiddenConn then
+			localCharacterHiddenConn:Disconnect()
+		end
+		localCharacterHiddenConn = character.DescendantAdded:Connect(hideCharacterInstance)
+	else
+		if localCharacterHiddenConn then
+			localCharacterHiddenConn:Disconnect()
+			localCharacterHiddenConn = nil
+		end
+		for inst, enabled in pairs(localHiddenServerEffectSnapshots) do
+			if inst and inst.Parent and (inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Light")) then
+				inst.Enabled = enabled == true
+			end
+		end
+		localHiddenServerEffectSnapshots = {}
+		for inst, value in pairs(localCharacterTransparencySnapshots) do
+			if inst and inst.Parent then
+				if inst:IsA("BasePart") then
+					inst.LocalTransparencyModifier = value or 0
+				elseif inst:IsA("Decal") or inst:IsA("Texture") then
+					inst.Transparency = value or 0
+				end
+			end
+		end
+		localCharacterTransparencySnapshots = {}
+	end
+end
+
 local function cleanupLocalArmPose()
-	if not localArmPose then return end
-	if localArmPose.ikControl then
-		pcall(function()
-			localArmPose.ikControl.Enabled = false
-			localArmPose.ikControl:Destroy()
-		end)
+	if localArmPose then
+		if localArmPose.ikControl then
+			pcall(function()
+				localArmPose.ikControl.Enabled = false
+				localArmPose.ikControl:Destroy()
+			end)
+		end
+		if localArmPose.targetPart then
+			pcall(function() localArmPose.targetPart:Destroy() end)
+		end
+		localArmPose = nil
 	end
-	if localArmPose.targetPart then
-		pcall(function() localArmPose.targetPart:Destroy() end)
-	end
-	localArmPose = nil
+	setLocalShowerCharacterVisible(true)
 end
 
 local function setupLocalArmPose()
 	cleanupLocalArmPose()
-	local character = player.Character
-	if not character then return end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return end
-	local endEffector = character:FindFirstChild("RightHand") or character:FindFirstChild("RightLowerArm") or character:FindFirstChild("Right Arm")
-	-- Keep the IK chain rooted in the arm so the whole character body does not twist.
-	local chainRoot = character:FindFirstChild("RightUpperArm") or character:FindFirstChild("Right Arm") or character:FindFirstChild("UpperTorso")
-	if not endEffector or not chainRoot or not endEffector:IsA("BasePart") or not chainRoot:IsA("BasePart") then return end
-
-	local targetPart = Instance.new("Part")
-	targetPart.Name = "LocalShowerToolIKTarget"
-	targetPart.Size = Vector3.new(0.2, 0.2, 0.2)
-	targetPart.Transparency = 1
-	targetPart.CanCollide = false
-	targetPart.CanQuery = false
-	targetPart.CanTouch = false
-	targetPart.Anchored = true
-	targetPart.Parent = workspace.CurrentCamera or workspace
-
-	local attachment = Instance.new("Attachment")
-	attachment.Name = "LocalShowerToolIKTargetAttachment"
-	attachment.Parent = targetPart
-
-	local ikControl = Instance.new("IKControl")
-	ikControl.Name = "LocalShowerToolIK"
-	ikControl.Type = Enum.IKControlType.Position
-	ikControl.ChainRoot = chainRoot
-	ikControl.EndEffector = endEffector
-	ikControl.Target = attachment
-	ikControl.Priority = 100
-	ikControl.Weight = 0.9
-	ikControl.SmoothTime = 0.08
-	ikControl.Enabled = true
-	ikControl.Parent = humanoid
-
-	localArmPose = { targetPart = targetPart, ikControl = ikControl }
+	setLocalShowerCharacterVisible(false)
 end
 
 local function updateLocalArmPose(toolWorldPos, toolNormal)
@@ -312,6 +497,12 @@ local function updateLocalArmPose(toolWorldPos, toolNormal)
 end
 
 local function cleanupLocalShowerVisuals()
+	for _, effect in pairs(localToolEffects) do
+		if effect then pcall(function() effect:Destroy() end) end
+	end
+	localToolEffects = {}
+	spongeRubbingActive = false
+	showerHeadEffectActive = false
 	for original, visual in pairs(localToolVisuals) do
 		if visual then pcall(function() visual:Destroy() end) end
 		setOriginalToolLocalHidden(original, false)
@@ -327,18 +518,62 @@ local function cleanupLocalShowerVisuals()
 	originalVisualSnapshots = {}
 	lastLocalToolPos = nil
 	lastLocalToolNormal = nil
+	lastLocalToolRight = nil
+	lastLocalToolHitPet = false
 	localPetBasePivot = nil
 	localPetRubOffset = Vector3.zero
 	localPetRubTilt = Vector3.zero
 	lastLocalRubWorldPos = nil
 	lastLocalRubAt = nil
+	showerHeadFixedRight = nil
+	showerHeadFixedUp = nil
 	cleanupLocalArmPose()
+end
+
+local function setLocalToolVisualVisible(originalTool, visible)
+	local visual = originalTool and localToolVisuals[originalTool]
+	if not visual then return end
+	local modifier = visible and 0 or 1
+	if visual:IsA("BasePart") then
+		visual.LocalTransparencyModifier = modifier
+	elseif visual:IsA("Model") then
+		for _, d in ipairs(visual:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.LocalTransparencyModifier = modifier
+			end
+		end
+	end
+end
+
+local function updateLocalToolStageVisibility()
+	setLocalToolVisualVisible(localSpongeOriginal, currentStage == 1)
+	setLocalToolVisualVisible(localShowerHeadOriginal, currentStage ~= 1)
+end
+
+local function normalizeLocalToolOriginal(toolInstance)
+	if not toolInstance then return nil end
+	if toolInstance:IsA("BasePart") then
+		local parent = toolInstance.Parent
+		if parent and parent:IsA("Model") then
+			local partCount = 0
+			for _, d in ipairs(parent:GetDescendants()) do
+				if d:IsA("BasePart") then
+					partCount += 1
+					if partCount > 1 then break end
+				end
+			end
+			if partCount > 1 or parent:FindFirstChild("CleanBox", true) then
+				return parent
+			end
+		end
+	end
+	return toolInstance
 end
 
 local function setupLocalShowerVisuals(payload)
 	cleanupLocalShowerVisuals()
-	localSpongeOriginal = payload.spongeTool or payload.spongePart
-	localShowerHeadOriginal = payload.showerHeadTool or payload.showerHeadPart
+	localSpongeOriginal = normalizeLocalToolOriginal(payload.spongeTool or payload.spongePart)
+	localShowerHeadOriginal = normalizeLocalToolOriginal(payload.showerHeadTool or payload.showerHeadPart)
 	for _, original in ipairs({ localSpongeOriginal, localShowerHeadOriginal }) do
 		if original then
 			local visual = cloneLocalToolVisual(original)
@@ -348,6 +583,9 @@ local function setupLocalShowerVisuals(payload)
 			end
 		end
 	end
+	addLocalToolEffect(localSpongeOriginal, "SpongeEffect", false)
+	addLocalToolEffect(localShowerHeadOriginal, "ShowerHeadEffect", false)
+	updateLocalToolStageVisibility()
 	setupLocalArmPose()
 end
 
@@ -363,6 +601,10 @@ local function getLocalActiveOriginalTool()
 end
 
 local function getLocalToolHalfThickness(toolInstance)
+	local visualPart = getToolVisualPivotPart(toolInstance)
+	if visualPart then
+		return math.max(visualPart.Size.X, visualPart.Size.Y, visualPart.Size.Z) * 0.5
+	end
 	local handle = getToolHandle(toolInstance)
 	if handle then
 		return math.max(handle.Size.X, handle.Size.Y, handle.Size.Z) * 0.5
@@ -379,16 +621,43 @@ local function moveLocalToolToPosition(toolInstance, worldPos, surfaceNormal)
 	end
 	normal = normal.Unit
 	local up = normal
-	local right = Vector3.new(0, 1, 0):Cross(up)
+	local right = lastLocalToolRight
+	if toolInstance == localShowerHeadOriginal and currentStage ~= 1 then
+		if not showerHeadFixedRight or not showerHeadFixedUp then
+			local camCf = camera and camera.CFrame or CFrame.new()
+			showerHeadFixedRight = camCf.RightVector
+			showerHeadFixedUp = (camCf * CLIENT_SHOWERHEAD_ROTATION_OFFSET).UpVector
+		end
+		right = showerHeadFixedRight
+		up = showerHeadFixedUp
+	end
+	local previousRight = right
+	if typeof(right) == "Vector3" and right.Magnitude > 1e-4 then
+		right = right - (up * right:Dot(up))
+	end
+	if typeof(right) ~= "Vector3" or right.Magnitude < 1e-4 then
+		local cameraRight = camera and camera.CFrame.RightVector or Vector3.new(1, 0, 0)
+		right = cameraRight - (up * cameraRight:Dot(up))
+	end
+	if typeof(right) ~= "Vector3" or right.Magnitude < 1e-4 then
+		right = Vector3.new(0, 1, 0):Cross(up)
+	end
 	if right.Magnitude < 1e-4 then
 		right = Vector3.new(1, 0, 0):Cross(up)
 	end
 	right = right.Unit
+	if typeof(previousRight) == "Vector3" and previousRight.Magnitude > 1e-4 and right:Dot(previousRight.Unit) < 0 then
+		right = -right
+	end
+	lastLocalToolRight = right
 	local cf = CFrame.fromMatrix(worldPos, right, up)
+	if toolInstance == localSpongeOriginal and currentStage == 1 then
+		cf = cf * CLIENT_SPONGE_ROTATION_OFFSET
+	end
 	if visual:IsA("Model") then
-		local handle = getToolHandle(visual)
-		if handle then
-			local relative = visual:GetPivot():ToObjectSpace(handle.CFrame)
+		local pivotPart = getToolVisualPivotPart(visual) or getToolHandle(visual)
+		if pivotPart then
+			local relative = visual:GetPivot():ToObjectSpace(pivotPart.CFrame)
 			visual:PivotTo(cf * relative:Inverse())
 		else
 			visual:PivotTo(cf)
@@ -479,6 +748,15 @@ local function endShowerView()
 	exitButton.Visible = false
 end
 
+local function getCameraPartViewCFrame(targetCameraPart)
+	local forwardOffset = DEFAULT_CAMERA_PART_FORWARD_OFFSET
+	local attrOffset = targetCameraPart and targetCameraPart:GetAttribute("ClientCameraForwardOffset")
+	if attrOffset ~= nil then
+		forwardOffset = math.clamp(tonumber(attrOffset) or forwardOffset, -8, 8)
+	end
+	return targetCameraPart.CFrame * CFrame.new(0, 0, -forwardOffset)
+end
+
 local function startShowerView(targetCameraPart)
 	if not targetCameraPart or not targetCameraPart:IsA("BasePart") then
 		return
@@ -489,12 +767,12 @@ local function startShowerView(targetCameraPart)
 	cameraPart = targetCameraPart
 
 	camera.CameraType = Enum.CameraType.Scriptable
-	camera.CFrame = targetCameraPart.CFrame
+	camera.CFrame = getCameraPartViewCFrame(targetCameraPart)
 
 	clearCameraFollow()
 	cameraConn = RunService.RenderStepped:Connect(function()
 		if cameraPart and cameraPart.Parent then
-			local baseCFrame = cameraPart.CFrame
+			local baseCFrame = getCameraPartViewCFrame(cameraPart)
 			local viewport = camera.ViewportSize
 			local nx = 0
 			local ny = 0
@@ -529,10 +807,15 @@ local function getMovePoint(screenPos)
 		params.FilterDescendantsInstances = {currentPet}
 		local hitPet = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
 		if hitPet then
+			local surfaceNormal = hitPet.Normal
+			local toCamera = ray.Origin - hitPet.Position
+			if toCamera.Magnitude > 1e-4 and surfaceNormal:Dot(toCamera.Unit) < 0 then
+				surfaceNormal = -surfaceNormal
+			end
 			return {
-				worldPos = hitPet.Position + (hitPet.Normal * 0.02),
+				worldPos = hitPet.Position + (surfaceNormal * 0.02),
 				hitPet = true,
-				surfaceNormal = hitPet.Normal,
+				surfaceNormal = surfaceNormal,
 			}
 		end
 	end
@@ -545,28 +828,41 @@ local function getMovePoint(screenPos)
 		if math.abs(denom) > 1e-4 then
 			local distance = originToWall:Dot(normal) / denom
 			if distance > 0 then
+				local wallPos = ray.Origin + (ray.Direction * distance)
+				local cameraDistance = (wallPos - ray.Origin).Magnitude
+				if cameraDistance < CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE then
+					wallPos = ray.Origin + (ray.Direction.Unit * CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE)
+				end
 				return {
-					worldPos = ray.Origin + (ray.Direction * distance),
+					worldPos = wallPos,
 					hitPet = false,
+					surfaceNormal = normal,
 				}
 			end
 		end
 	end
 
-	if mouse and mouse.Hit then
-		return {
-			worldPos = mouse.Hit.Position,
-			hitPet = false,
-		}
-	end
-
-	return nil
+	local fallbackDistance = CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE
+	return {
+		worldPos = ray.Origin + (ray.Direction.Unit * fallbackDistance),
+		hitPet = false,
+		surfaceNormal = camera and camera.CFrame.LookVector or Vector3.new(0, 0, -1),
+	}
 end
 
 local function startCursorTracking()
 	clearCursorTracking()
-	cursorTrackConn = RunService.RenderStepped:Connect(function()
+	cursorTrackConn = RunService.RenderStepped:Connect(function(dt)
 		if not gui.Enabled then return end
+		if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled and not isTouchDragging then
+			applyLocalPetRub(nil, nil, false)
+			if spongeRubbingActive then
+				spongeRubbingActive = false
+				setLocalToolEffectActive(localSpongeOriginal, false)
+			end
+			return
+		end
+
 		local mousePos = pointerScreenPos or UserInputService:GetMouseLocation()
 		local isOverPanel = mousePos and (
 			mousePos.X >= panel.AbsolutePosition.X
@@ -574,29 +870,86 @@ local function startCursorTracking()
 				and mousePos.Y >= panel.AbsolutePosition.Y
 				and mousePos.Y <= (panel.AbsolutePosition.Y + panel.AbsoluteSize.Y)
 		)
-		if isOverPanel then return end
+		if isOverPanel then
+			applyLocalPetRub(nil, nil, false)
+			if spongeRubbingActive then
+				spongeRubbingActive = false
+				setLocalToolEffectActive(localSpongeOriginal, false)
+			end
+			return
+		end
 
 		local now = tick()
 		local movePoint = getMovePoint(mousePos)
-		if not movePoint then return end
+		if not movePoint then
+			applyLocalPetRub(nil, nil, false)
+			if spongeRubbingActive then
+				spongeRubbingActive = false
+				setLocalToolEffectActive(localSpongeOriginal, false)
+			end
+			return
+		end
+
 		local worldPos = movePoint.worldPos
 		if typeof(worldPos) ~= "Vector3" then return end
 
 		local activeOriginalTool = getLocalActiveOriginalTool()
 		if activeOriginalTool then
 			local normal = movePoint.surfaceNormal
-			if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
+			if movePoint.hitPet ~= true and activeOriginalTool == localSpongeOriginal then
+				normal = lastLocalToolNormal or (camera and -camera.CFrame.LookVector) or Vector3.new(0, 1, 0)
+			elseif typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
 				normal = lastLocalToolNormal or Vector3.new(0, 1, 0)
 			end
 			normal = normal.Unit
-			local toolOffset = math.clamp(getLocalToolHalfThickness(activeOriginalTool) * 0.65, 0.18, 0.4)
+			if activeOriginalTool == localShowerHeadOriginal and currentStage ~= 1 then
+				if not showerHeadFixedUp then
+					local camCf = camera and camera.CFrame or CFrame.new()
+					showerHeadFixedRight = camCf.RightVector
+					showerHeadFixedUp = (camCf * CLIENT_SHOWERHEAD_ROTATION_OFFSET).UpVector
+				end
+				normal = showerHeadFixedUp
+			elseif movePoint.hitPet == true and lastLocalToolHitPet and typeof(lastLocalToolNormal) == "Vector3" and lastLocalToolNormal.Magnitude > 1e-4 then
+				local targetNormal = normal
+				if targetNormal:Dot(lastLocalToolNormal.Unit) < -0.35 then
+					targetNormal = lastLocalToolNormal
+				end
+				local normalAlpha = 1 - math.exp(-math.clamp(tonumber(dt) or (1 / 60), 0, 0.1) * 18)
+				normal = lastLocalToolNormal:Lerp(targetNormal, normalAlpha)
+				if normal.Magnitude > 1e-4 then
+					normal = normal.Unit
+				end
+			end
+
+			local offsetScale = (activeOriginalTool == localShowerHeadOriginal and currentStage ~= 1)
+				and CLIENT_SHOWERHEAD_SURFACE_OFFSET_SCALE
+				or CLIENT_SPONGE_SURFACE_OFFSET_SCALE
+			local toolOffset = math.clamp(
+				getLocalToolHalfThickness(activeOriginalTool) * offsetScale,
+				CLIENT_TOOL_SURFACE_OFFSET_MIN,
+				CLIENT_TOOL_SURFACE_OFFSET_MAX
+			)
 			local desiredPos = movePoint.hitPet and (worldPos + (normal * toolOffset)) or worldPos
 			if lastLocalToolPos then
-				desiredPos = lastLocalToolPos:Lerp(desiredPos, movePoint.hitPet and 0.85 or 0.55)
+				local smoothness = movePoint.hitPet and 22 or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS
+				local alpha = 1 - math.exp(-math.clamp(tonumber(dt) or (1 / 60), 0, 0.1) * smoothness)
+				desiredPos = lastLocalToolPos:Lerp(desiredPos, alpha)
 			end
 			lastLocalToolPos = desiredPos
 			lastLocalToolNormal = normal
+			lastLocalToolHitPet = movePoint.hitPet == true
 			moveLocalToolToPosition(activeOriginalTool, desiredPos, normal)
+			applyLocalPetRub(worldPos, normal, movePoint.hitPet == true)
+			local spongeActive = (currentStage == 1 and movePoint.hitPet == true)
+			if spongeActive ~= spongeRubbingActive then
+				spongeRubbingActive = spongeActive
+				setLocalToolEffectActive(localSpongeOriginal, spongeRubbingActive)
+			end
+			local showerActive = (currentStage ~= 1)
+			if showerActive ~= showerHeadEffectActive then
+				showerHeadEffectActive = showerActive
+				setLocalToolEffectActive(localShowerHeadOriginal, showerHeadEffectActive)
+			end
 		end
 
 		local hasMovedEnough = (not lastToolMovePoint) or ((worldPos - lastToolMovePoint).Magnitude >= 0.04)
@@ -607,13 +960,10 @@ local function startCursorTracking()
 		lastToolMoveFireAt = now
 		lastToolMovePoint = worldPos
 
-		if worldPos then
-			showerRemote:FireServer("ToolMove", {
-				worldPos = worldPos,
-				hitPet = movePoint.hitPet == true,
-				surfaceNormal = movePoint.surfaceNormal,
-			})
-		end
+		showerRemote:FireServer("ToolMove", {
+			worldPos = worldPos,
+			hitPet = movePoint.hitPet == true,
+		})
 	end)
 end
 
@@ -706,6 +1056,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		activeTouch = input
 		isTouchDragging = true
 		pointerScreenPos = inputPos
+	elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
 	end
 end)	
 
@@ -758,12 +1109,29 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		if payload.stageText then
 			stageLabel.Text = tostring(payload.stageText)
 		end
+		if payload.serverLoopAnimationId then
+			task.defer(suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
+			task.delay(0.25, suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
+		end
 		updateBar(payload.progress or 0)
 	elseif action == "Stage" then
 		currentStage = tonumber(payload.stage) or currentStage
 		lastLocalToolPos = nil
+		lastLocalToolNormal = nil
+		lastLocalToolRight = nil
+		showerHeadFixedRight = nil
+		showerHeadFixedUp = nil
+		updateLocalToolStageVisibility()
+		spongeRubbingActive = false
+		setLocalToolEffectActive(localSpongeOriginal, false)
+		showerHeadEffectActive = (currentStage ~= 1)
+		setLocalToolEffectActive(localShowerHeadOriginal, showerHeadEffectActive)
 		if payload.stageText then
 			stageLabel.Text = tostring(payload.stageText)
+		end
+		if payload.serverLoopAnimationId then
+			task.defer(suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
+			task.delay(0.25, suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
 		end
 		updateBar(payload.progress or 0)
 	elseif action == "End" then
