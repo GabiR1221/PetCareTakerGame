@@ -641,7 +641,12 @@ function WildPetManager:GetWeightedRandomTemplate()
 end
 
 function WildPetManager:FindPetTemplateByName(templateName)
-	if not self.WILD_PET_MODELS or not templateName then
+	templateName = tostring(templateName or "")
+	if templateName == "" then
+		return nil
+	end
+
+	if not self.WILD_PET_MODELS then
 		local replicatedPets = ReplicatedStorage:FindFirstChild("Pets")
 		if replicatedPets then
 			local fallback = replicatedPets:FindFirstChild(templateName)
