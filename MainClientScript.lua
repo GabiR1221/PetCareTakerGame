@@ -3445,8 +3445,8 @@ local openedPetFrameFromBank = false
 local defaultPetsPosition = Frames.Pets.Position
 local SellShopFrame = Frames:FindFirstChild("SellShop")
 local FoodShopFrame = Frames:FindFirstChild("FoodShop")
-local defaultSellPosition = SellShopFrame and SellShopFrame.Position or SELL_OPEN_POSITION
-local defaultFoodShopPosition = FoodShopFrame and FoodShopFrame.Position or FOOD_OPEN_POSITION
+local defaultSellPosition = SellShopFrame.Position 
+local defaultFoodShopPosition = FoodShopFrame.Position 
 
 local FoodShopRemotes = ReplicatedStorage:FindFirstChild("FoodShopRemotes")
 local FoodRequestItems = FoodShopRemotes and FoodShopRemotes:FindFirstChild("RequestItems")
@@ -4157,3 +4157,171 @@ function RenderStepped()
 end
 
 RunService.RenderStepped:Connect(RenderStepped)
+
+-- LuckyBlock roll/reveal UX
+task.defer(function()
+	local luckyEvent = ReplicatedStorage:FindFirstChild("LuckyBlockOpenEvent")
+	if not luckyEvent or not luckyEvent:IsA("RemoteEvent") then
+		return
+	end
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "LuckyBlockRollGui"
+	screenGui.ResetOnSpawn = false
+	screenGui.IgnoreGuiInset = true
+	screenGui.Enabled = false
+	screenGui.Parent = Player:WaitForChild("PlayerGui")
+
+	local label = Instance.new("TextLabel")
+	label.Name = "RollLabel"
+	label.Size = UDim2.new(0, 600, 0, 72)
+	label.Position = UDim2.new(0.5, -300, 0.14, 0)
+	label.BackgroundTransparency = 0.2
+	label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.TextStrokeTransparency = 0.4
+	label.Font = Enum.Font.GothamBold
+	label.TextScaled = true
+	label.Text = ""
+	label.Parent = screenGui
+
+	local rollRoot = nil
+	local rollingModel = nil
+
+	local function cleanupRollWorld()
+		if rollingModel then
+			pcall(function() rollingModel:Destroy() end)
+			rollingModel = nil
+		end
+		if rollRoot then
+			pcall(function() rollRoot:Destroy() end)
+			rollRoot = nil
+		end
+	end
+
+	local function cloneVisualPetModel(petName)
+		local petsFolder = ReplicatedStorage:FindFirstChild("Pets")
+		local template = petsFolder and petsFolder:FindFirstChild(petName)
+		if not template or not template:IsA("Model") then return nil end
+		local model = template:Clone()
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+				d:Destroy()
+			elseif d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false
+				d.CanQuery = false
+				d.CanTouch = false
+			end
+		end
+		return model
+	end
+
+	local function placeModelAt(model, cf)
+		if not model then return end
+		local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+		if not primary then
+			model:Destroy()
+			return
+		end
+		model.PrimaryPart = primary
+		model:PivotTo(cf)
+		model.Parent = workspace
+	end
+
+	local function ensureRollRoot()
+		if rollRoot and rollRoot.Parent then return rollRoot end
+		local root = Instance.new("Part")
+		root.Name = "LuckyBlockRollRoot"
+		root.Size = Vector3.new(1, 1, 1)
+		root.Transparency = 1
+		root.Anchored = true
+		root.CanCollide = false
+		root.CanQuery = false
+		root.CanTouch = false
+		root.Parent = workspace
+		rollRoot = root
+		return root
+	end
+
+	local rollingToken = 0
+
+	luckyEvent.OnClientEvent:Connect(function(action, payload)
+		payload = payload or {}
+		if action == "Start" then
+			rollingToken += 1
+			local token = rollingToken
+			local finalReward = tostring(payload.finalReward or "Unknown")
+			local duration = math.clamp(tonumber(payload.rollDuration) or 4.5, 2, 8)
+			local luckyBlockName = tostring(payload.luckyBlockName or "LuckyBlock")
+			local candidates = {}
+			if type(payload.rollCandidates) == "table" then
+				for _, n in ipairs(payload.rollCandidates) do
+					local name = tostring(n or "")
+					if name ~= "" then
+						table.insert(candidates, name)
+					end
+				end
+			end
+			if #candidates == 0 then
+				table.insert(candidates, finalReward)
+			end
+			screenGui.Enabled = true
+			label.Text = ("🎲 Opening %s..."):format(luckyBlockName)
+			cleanupRollWorld()
+			local worldRoot = ensureRollRoot()
+			local char = Player.Character
+			local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+			if hrp then
+				worldRoot.CFrame = hrp.CFrame * CFrame.new(0, -1.2, -8)
+			end
+
+			local blockModel = cloneVisualPetModel(luckyBlockName)
+			if blockModel then
+				rollingModel = blockModel
+				placeModelAt(rollingModel, worldRoot.CFrame)
+			end
+			task.wait(0.55)
+
+			local t0 = os.clock()
+			local idx = 1
+			while screenGui.Enabled and token == rollingToken do
+				local elapsed = os.clock() - t0
+				if elapsed >= duration then
+					break
+				end
+				local progress = math.clamp(elapsed / duration, 0, 1)
+				local pick = candidates[((idx - 1) % #candidates) + 1]
+				idx += 1
+				if rollingModel then
+					pcall(function() rollingModel:Destroy() end)
+				end
+				rollingModel = cloneVisualPetModel(pick)
+				if rollingModel then
+					placeModelAt(rollingModel, worldRoot.CFrame)
+				end
+				label.Text = ("🎲 Rolling... %s"):format(pick)
+				task.wait(0.05 + (progress * 0.22))
+			end
+		elseif action == "Reveal" then
+			rollingToken += 1
+			screenGui.Enabled = true
+			local finalReward = tostring(payload.finalReward or "Unknown")
+			if rollingModel then
+				pcall(function() rollingModel:Destroy() end)
+			end
+			rollingModel = cloneVisualPetModel(finalReward)
+			if rollingModel and rollRoot and rollRoot.Parent then
+				placeModelAt(rollingModel, rollRoot.CFrame)
+			end
+			label.Text = ("✨ You got: %s!"):format(finalReward)
+			notifyPlayer("success", ("✨ LuckyBlock reward: %s"):format(finalReward))
+			task.delay(1.8, function()
+				if screenGui then
+					screenGui.Enabled = false
+				end
+				cleanupRollWorld()
+			end)
+		end
+	end)
+end)
