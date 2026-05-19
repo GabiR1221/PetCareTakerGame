@@ -1618,6 +1618,10 @@ function ShowerDryerManager:ConnectShowerPrompt(showerPart)
 			print("[PetManager] Shower: player triggered while not carrying/holding a pet.")
 			return
 		end
+		local currentState = self.petState[pet]
+		if (currentState and currentState.isLuckyBlock == true) or pet:GetAttribute("IsLuckyBlock") == true then
+			return
+		end
 		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 		if hum then
 			pcall(function() hum:UnequipTools() end)
