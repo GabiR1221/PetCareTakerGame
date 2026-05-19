@@ -90,7 +90,26 @@ function PetStandManager:OptimizeStandPetParts(petModel)
 			d.CanTouch = false
 			d.CanCollide = false
 			d.CastShadow = false
+			d.Massless = true
+			pcall(function()
+				d:SetNetworkOwner(nil)
+			end)
 		end
+	end
+
+	local humanoid = petModel:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		pcall(function()
+			humanoid.AutoRotate = false
+			humanoid:Move(Vector3.zero, true)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+		end)
 	end
 end
 
@@ -1478,6 +1497,10 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 			pet = resolvedPet
 		end
 		if not pet then
+			return
+		end
+		local petState = self.petState[pet]
+		if (petState and petState.isLuckyBlock == true) or pet:GetAttribute("IsLuckyBlock") == true then
 			return
 		end
 		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
