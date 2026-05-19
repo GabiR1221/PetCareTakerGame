@@ -43,6 +43,7 @@ local PetStandManager = require(Modules:WaitForChild("PetStandManager"))
 local PetMoodVisualManager = require(Modules:WaitForChild("PetMoodVisualManager"))
 local SprintRunManager = require(Modules:WaitForChild("SprintRunManager"))
 local ToyHappinessManager = require(Modules:WaitForChild("ToyHappinessManager"))
+local LuckyBlockConfig = require(script.Parent:WaitForChild("LuckyBlockConfig"))
 -- Services
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -86,12 +87,9 @@ local removePetToolInstances
 local isInsideTycoonBounds
 local stashedPetModelsByUserId = {}
 local saveManager
+
 local petInteractionUiEvent = ReplicatedStorage:FindFirstChild("PetInteractionUIEvent")
-if not petInteractionUiEvent then
-	petInteractionUiEvent = Instance.new("RemoteEvent")
-	petInteractionUiEvent.Name = "PetInteractionUIEvent"
-	petInteractionUiEvent.Parent = ReplicatedStorage
-end
+local luckyBlockOpenEvent = ReplicatedStorage:FindFirstChild("LuckyBlockOpenEvent")
 
 local function getStashedPetBucket(userId)
 	if not stashedPetModelsByUserId[userId] then
@@ -183,6 +181,167 @@ local function canPlayerDropCarriedPet(player, carriedPet)
 		return false
 	end
 	return state.wild ~= true
+end
+
+local function isLuckyBlockPet(petModel, state)
+	if not petModel then return false end
+	if state and state.isLuckyBlock == true then return true end
+	if petModel:GetAttribute("IsLuckyBlock") == true then return true end
+	local templateName = tostring((state and state.templateName) or petModel.Name)
+	local cfg = LuckyBlockConfig:GetBlockConfig(templateName)
+	if string.find(string.lower(templateName), "luckyblock", 1, true) then return true end
+	return type(cfg) == "table"
+end
+
+local function resolveLuckyBlockTemplateName(state, luckyPet)
+	local raw = tostring(
+		(state and state.templateName)
+			or (luckyPet and luckyPet:GetAttribute("TemplateName"))
+			or (luckyPet and luckyPet.Name)
+			or ""
+	)
+	if raw == "" then return "" end
+	if LuckyBlockConfig:GetBlockConfig(raw) then
+		return raw
+	end
+	-- Some runtime flows append random suffixes to model names (ex: LuckyBlock_x83ab).
+	local stripped = raw:match("^(.-)_[%w%-]+$")
+	if stripped and stripped ~= "" and LuckyBlockConfig:GetBlockConfig(stripped) then
+		return stripped
+	end
+	return raw
+end
+
+local function chooseLuckyBlockReward(templateName)
+	local cfg = LuckyBlockConfig:GetBlockConfig(templateName)
+	local drops = cfg and cfg.drops
+	if type(drops) ~= "table" or #drops == 0 then return nil end
+	local total = 0
+	for _, entry in ipairs(drops) do
+		total += math.max(0, tonumber(entry.weight) or 0)
+	end
+	if total <= 0 then return nil end
+	local roll = Random.new():NextNumber(0, total)
+	local cursor = 0
+	for _, entry in ipairs(drops) do
+		cursor += math.max(0, tonumber(entry.weight) or 0)
+		if roll <= cursor then
+			return tostring(entry.petName or "")
+		end
+	end
+	return tostring(drops[#drops].petName or "")
+end
+
+local function getLuckyBlockCandidateNames(templateName)
+	local cfg = LuckyBlockConfig:GetBlockConfig(templateName)
+	local drops = cfg and cfg.drops
+	if type(drops) ~= "table" then return {} end
+	local out = {}
+	local seen = {}
+	for _, entry in ipairs(drops) do
+		local name = tostring(entry and entry.petName or "")
+		if name ~= "" and not seen[name] then
+			seen[name] = true
+			table.insert(out, name)
+		end
+	end
+	return out
+end
+
+local function removeInventoryPetRowByUid(player, petUid)
+	if not player or type(petUid) ~= "string" or petUid == "" then return false end
+	local data = player:FindFirstChild("Data")
+	local pets = data and data:FindFirstChild("Pets")
+	if not pets then return false end
+	for _, petFolder in ipairs(pets:GetChildren()) do
+		local uidValue = petFolder:FindFirstChild("PetUID")
+		if uidValue and tostring(uidValue.Value) == petUid then
+			petFolder:Destroy()
+			return true
+		end
+	end
+	return false
+end
+
+local GameNotificationEvent = ReplicatedStorage:FindFirstChild("GameNotificationEvent")
+
+local function notifyConversion(player, notificationType, message)
+	if GameNotificationEvent and GameNotificationEvent:IsA("RemoteEvent") then
+		GameNotificationEvent:FireClient(player, notificationType, message)
+	end
+end
+
+local function openLuckyBlockForPlayer(player, luckyPet, state)
+	if not player or not luckyPet or not state then return false end
+	local templateName = resolveLuckyBlockTemplateName(state, luckyPet)
+	local rewardName = state.luckyBlockReward
+	if type(rewardName) ~= "string" then
+		rewardName = nil
+	end
+	if rewardName == "" then
+		rewardName = nil
+	end
+	if not rewardName then
+		rewardName = chooseLuckyBlockReward(templateName)
+		state.luckyBlockReward = rewardName
+	end
+	if type(rewardName) ~= "string" or rewardName == "" then
+		notifyConversion(player, "error", ("❌ LuckyBlock '%s' has no configured drops."):format(tostring(templateName or "Unknown")))
+		return false
+	end
+	if not WildPetManager:CanGrantPetToInventory(player) then
+		notifyConversion(player, "error", "❌ Your pet inventory is full.")
+		return false
+	end
+	if not WildPetManager:FindPetTemplateByName(rewardName) then
+		notifyConversion(player, "error", ("❌ LuckyBlock reward '%s' template is missing."):format(tostring(rewardName or "Unknown")))
+		return false
+	end
+
+	local luckyEvent = ReplicatedStorage:FindFirstChild("LuckyBlockOpenEvent")
+	if luckyEvent and luckyEvent:IsA("RemoteEvent") then
+		luckyEvent:FireClient(player, "Start", {
+			luckyBlockName = templateName,
+			finalReward = rewardName,
+			rollDuration = 4.5,
+			rollCandidates = getLuckyBlockCandidateNames(templateName),
+		})
+		-- Reliability resend for clients that finished loading UI listeners a bit late after join.
+		task.delay(0.6, function()
+			if not player or not player.Parent then return end
+			luckyEvent:FireClient(player, "Start", {
+				luckyBlockName = templateName,
+				finalReward = rewardName,
+				rollDuration = 3.9,
+				rollCandidates = getLuckyBlockCandidateNames(templateName),
+			})
+		end)
+	end
+
+	local luckyUid = tostring(state.petUid or luckyPet:GetAttribute("PetUID") or "")
+	if luckyUid ~= "" then
+		WildPetManager:RemoveOwnedPetByUid(player, luckyUid)
+		removeInventoryPetRowByUid(player, luckyUid)
+		removePetToolInstances(player, luckyUid)
+	else
+		luckyPet:Destroy()
+	end
+
+	task.delay(4.6, function()
+		if not player or not player.Parent then return end
+		local ok, petOrReason = WildPetManager:GrantOwnedPetFromTemplate(player, rewardName)
+		if ok then
+			scheduleCriticalPetSave(player, "OpenLuckyBlock")
+			if luckyEvent and luckyEvent:IsA("RemoteEvent") then
+				luckyEvent:FireClient(player, "Reveal", {
+					finalReward = rewardName,
+				})
+			end
+		else
+			notifyConversion(player, "error", ("❌ Failed to grant LuckyBlock reward: %s"):format(tostring(petOrReason)))
+		end
+	end)
+	return true
 end
 
 local function canPlayerDropCarriedPetAtCurrentPosition(player, carriedPet)
@@ -474,6 +633,9 @@ local function dropCarriedPet(player, options)
 	if not state then return false end
 	if state.ownerUserId and tostring(state.ownerUserId) ~= tostring(player.UserId) then return false end
 	if options.blockWildDrop and state.wild then return false end
+	if isLuckyBlockPet(carriedPet, state) then
+		return openLuckyBlockForPlayer(player, carriedPet, state)
+	end
 
 	if countActiveOwnedWanderingPets(player.UserId) >= MAX_ACTIVE_WANDERING_PETS then
 		notifyWanderingLimitReached(player)
@@ -622,6 +784,9 @@ local function dropPetFromTool(player, petUid)
 	end
 	if tostring(state.ownerUserId) ~= tostring(player.UserId) then
 		return false
+	end
+	if isLuckyBlockPet(petModel, state) then
+		return openLuckyBlockForPlayer(player, petModel, state)
 	end
 
 	if countActiveOwnedWanderingPets(player.UserId) >= MAX_ACTIVE_WANDERING_PETS then
@@ -818,20 +983,17 @@ local function buildPetToolHandle(petModel)
 			PetStandManager:UpdateIncomeBillboard(petModel)
 		end)
 
+		local bestVolume = -1
 		for _, candidate in ipairs(petModel:GetDescendants()) do
-			if candidate:IsA("MeshPart") and candidate.Transparency < 0.95 then
-				sourcePart = candidate
-				break
-			end
-		end
-		if not sourcePart then
-			for _, candidate in ipairs(petModel:GetDescendants()) do
-				if candidate:IsA("BasePart")
-					and candidate.Transparency < 0.95
-					and candidate.Name ~= "HumanoidRootPart"
-				then
+			if candidate:IsA("BasePart")
+				and candidate.Transparency < 0.95
+				and candidate.Name ~= "HumanoidRootPart"
+			then
+				local size = candidate.Size
+				local volume = size.X * size.Y * size.Z
+				if volume > bestVolume then
+					bestVolume = volume
 					sourcePart = candidate
-					break
 				end
 			end
 		end
@@ -1019,6 +1181,9 @@ createPetPickupTool = function(player, petModel, state)
 	tool:SetAttribute("PetUID", petUid)
 	tool:SetAttribute("TemplateName", petName)
 	tool:SetAttribute("SkipToolSave", true)
+	if isLuckyBlockPet(petModel, state) then
+		tool:SetAttribute("IsLuckyBlock", true)
+	end
 	tool:SetAttribute("ActivationReadyAt", os.clock() + PET_TOOL_ACTIVATION_GRACE_SECONDS)
 	local toolTextureId = resolvePetToolTextureId(petModel, petName)
 	if toolTextureId then
@@ -1359,7 +1524,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-saveManager = PetSaveManager:Initialize("PetData126", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+saveManager = PetSaveManager:Initialize("PetData127", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1729,7 +1894,7 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-	stowActiveInteractionPetsForPlayer(player)
+	--stowActiveInteractionPetsForPlayer(player)
 	if saveManager then
 		saveManager:SavePlayerPets(player, { force = true, reason = "PlayerRemoving" })
 		stashedPetModelsByUserId[player.UserId] = nil
