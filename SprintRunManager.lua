@@ -610,6 +610,20 @@ function SprintRunManager:_startHeartbeat()
 
 			if state._hitbox then
 				state._hitbox.CFrame = root.CFrame * CFrame.new(0, 0, -3)
+				if state.jumping and self.WildPetManager then
+					local overlap = OverlapParams.new()
+					overlap.FilterType = Enum.RaycastFilterType.Exclude
+					overlap.FilterDescendantsInstances = { player.Character, state._hitbox }
+					local hits = workspace:GetPartBoundsInBox(state._hitbox.CFrame, state._hitbox.Size, overlap)
+					for _, part in ipairs(hits) do
+						local model = part and part:FindFirstAncestorOfClass("Model")
+						if model then
+							if self.WildPetManager:TryAutoPickupWildPet(player, model) then
+								break
+							end
+						end
+					end
+				end
 			end
 
 			self:_tryBeginWallBreak(player, state, root)
@@ -1318,13 +1332,7 @@ function SprintRunManager:_createCatchHitbox(player)
 	hitbox.CFrame = root.CFrame * CFrame.new(0, 0, -3)
 
 	state._hitbox = hitbox
-	state._hitboxConn = hitbox.Touched:Connect(function(otherPart)
-		if not state.active or not state.jumping then return end
-		if not self.WildPetManager then return end
-		local model = otherPart:FindFirstAncestorOfClass("Model")
-		if not model then return end
-		self.WildPetManager:TryAutoPickupWildPet(player, model)
-	end)
+	state._hitboxConn = nil
 end
 
 function SprintRunManager:StartRunning(player, startLine)
