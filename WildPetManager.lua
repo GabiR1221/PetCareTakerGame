@@ -354,8 +354,9 @@ function WildPetManager:BindRebirthResetEvent()
 	end)
 end
 
-function WildPetManager:ClearPlayerPetsForRebirth(player)
+function WildPetManager:ClearPlayerPetsForRebirth(player, options)
 	if not player then return end
+	options = type(options) == "table" and options or {}
 
 	if self.carryingPetByUserId[player.UserId] then
 		self.carryingPetByUserId[player.UserId] = nil
@@ -395,8 +396,8 @@ function WildPetManager:ClearPlayerPetsForRebirth(player)
 	end
 
 	self:UpdateOwnedPetRegistryForPlayer(player)
-	if self.SaveManager then
-		self.SaveManager:ScheduleSave(player, { urgent = true, reason = "ClearPlayerPetsForRebirth" })
+	if self.SaveManager and options.skipSave ~= true then
+		self.SaveManager:ScheduleSave(player, { urgent = true, reason = options.reason or "ClearPlayerPetsForRebirth" })
 	end
 end
 
@@ -1194,6 +1195,11 @@ end
 
 
 function WildPetManager:PlacePetOnGround(pet, position)
+	if not pet or not position then return end
+	self.PetRigManager:SetModelPrimaryIfMissing(pet)
+	local primary = pet.PrimaryPart
+	if not primary then return end
+
 	-- Raycast to find ground
 	local raycastParams = RaycastParams.new()
 	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1203,12 +1209,14 @@ function WildPetManager:PlacePetOnGround(pet, position)
 	local rayDirection = Vector3.new(0, -20, 0)
 
 	local result = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+	local yOffset = tonumber(pet:GetAttribute("GroundYOffset")) or 0
+	local halfHeight = math.max(0.2, primary.Size.Y * 0.5)
 	if result and result.Instance then
 		local groundY = result.Position.Y
-		pet:SetPrimaryPartCFrame(CFrame.new(position.X, groundY + 2, position.Z))
+		pet:SetPrimaryPartCFrame(CFrame.new(position.X, groundY + halfHeight + yOffset, position.Z))
 	else
 		-- Fallback: place at original position but ensure it's above ground
-		pet:SetPrimaryPartCFrame(CFrame.new(position + Vector3.new(0, 3, 0)))
+		pet:SetPrimaryPartCFrame(CFrame.new(position + Vector3.new(0, halfHeight + yOffset, 0)))
 	end
 end
 
