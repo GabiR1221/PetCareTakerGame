@@ -4,12 +4,12 @@ local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
-local SAVE_DEBOUNCE_SECONDS = 8
-local URGENT_SAVE_DEBOUNCE_SECONDS = 2
+local SAVE_DEBOUNCE_SECONDS = 12
+local URGENT_SAVE_DEBOUNCE_SECONDS = 6
 local FORCE_SAVE_AFTER_SECONDS = 60
 local AUTOSAVE_INTERVAL_SECONDS = 120
 local MAX_SAVE_RETRIES = 3
-local MIN_SECONDS_BETWEEN_SAVES = 20
+local MIN_SECONDS_BETWEEN_SAVES = 45
 local WRITE_BUDGET_MINIMUM = 1
 
 local function waitForWriteBudget()
@@ -180,7 +180,16 @@ function PetSaveManager:SavePlayerPets(player, options)
 	if not player or not player:IsA("Player") then return false end
 
 	local userId = tostring(player.UserId)
-	local forceSave = type(options) == "table" and options.force == true
+	options = type(options) == "table" and options or {}
+	if options.forceIfDirty == true then
+		local lastSaveAt = self.lastSaveAtByUserId[userId] or 0
+		local isDirty = self.dirtyByUserId[userId] == true
+		local stale = (os.clock() - lastSaveAt) >= FORCE_SAVE_AFTER_SECONDS
+		if not isDirty and not stale then
+			return true
+		end
+	end
+	local forceSave = options.force == true
 	local now = os.clock()
 
 	if not forceSave then
@@ -217,6 +226,11 @@ function PetSaveManager:SavePlayerPets(player, options)
 
 	print(("[PetSaveManager] Saved %d pets for %s"):format(#petData, player.Name))
 	return true
+end
+
+function PetSaveManager:MarkDirty(player)
+	if not player or not player:IsA("Player") then return end
+	self.dirtyByUserId[tostring(player.UserId)] = true
 end
 
 function PetSaveManager:LoadPlayerPets(player)
@@ -272,7 +286,7 @@ function PetSaveManager:ScheduleSave(player, options)
 	self.saveTokenByUserId[userId] = token
 
 	local delaySeconds = urgent and URGENT_SAVE_DEBOUNCE_SECONDS or SAVE_DEBOUNCE_SECONDS
-	local saveOptions = urgent and { force = true, reason = options.reason or "UrgentScheduledSave" } or options
+	local saveOptions = urgent and { force = false, bypassMinInterval = false, reason = options.reason or "UrgentScheduledSave" } or options
 	local lastSaveAt = self.lastSaveAtByUserId[userId]
 	if not urgent and options.force ~= true and options.bypassMinInterval ~= true and lastSaveAt then
 		local elapsed = os.clock() - lastSaveAt
