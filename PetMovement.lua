@@ -2,6 +2,7 @@
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
 local Players = game:GetService("Players")
+local ServerStorage = game:GetService("ServerStorage")
 
 local PetMovement = {}
 
@@ -19,9 +20,8 @@ local FLOOR_PADDING = 1.8
 local OBSTACLE_CLEARANCE = Vector3.new(2.8, 3.4, 2.8)
 local TARGET_SAMPLE_ATTEMPTS = 8
 
-local WALK_ANIM_BASE_SPEED = 6.5
-local TURN_RESPONSE = 10 -- smaller = smoother/slower turning
-local TURN_MAX_TORQUE = 100000
+local WALK_ANIM_BASE_SPEED = 12
+local TURN_RESPONSE = 14 -- higher = snappier turning for CFrame movement
 
 local IDLE_PAUSE_CHANCE = 0.55
 local IDLE_PAUSE_MIN = 0.7
@@ -35,9 +35,10 @@ local FLEE_START_MAX_WAIT = 0.3
 local FLEE_SPEED_MIN = 6.5
 local FLEE_SPEED_MAX = 10
 local FLEE_INTERRUPT_CHECK_INTERVAL = 0.20
-local OWNED_MOVE_POLL_INTERVAL = 0.10
-local WILD_MOVE_POLL_INTERVAL = 0.06
-local MOVE_REISSUE_INTERVAL = 0.70
+local OWNED_MOVE_POLL_INTERVAL = 0.02
+local WILD_MOVE_POLL_INTERVAL = 0.02
+local GROUND_SNAP_INTERVAL = 0.10
+local USE_PATHFINDING_FOR_WILD = false
 
 local FLOOR_NAME_CANDIDATES = {
 	"Floor",
@@ -237,18 +238,24 @@ local function getRig(pet)
 	if not pet then return nil end
 	local humanoid = pet:FindFirstChildOfClass("Humanoid")
 	local hrp = pet.PrimaryPart
-	if not humanoid or not hrp then
+	if not hrp then
 		return nil
 	end
 	return humanoid, hrp
 end
 
-local function getAnimator(humanoid)
-	if not humanoid then return nil end
-	local animator = humanoid:FindFirstChildOfClass("Animator")
+local function getAnimator(pet, humanoid)
+	if not pet then return nil end
+	local host = humanoid or pet:FindFirstChildOfClass("AnimationController")
+	if not host then
+		host = Instance.new("AnimationController")
+		host.Name = "PetAnimationController"
+		host.Parent = pet
+	end
+	local animator = host:FindFirstChildOfClass("Animator")
 	if not animator then
 		animator = Instance.new("Animator")
-		animator.Parent = humanoid
+		animator.Parent = host
 	end
 	return animator
 end
@@ -306,13 +313,23 @@ local function loadTracks(state)
 		fleeStart = {},
 	}
 
-	local folder = findAnimationsFolder(state.pet)
-	if not folder then
+	local animator = state.animator
+	if not animator then
 		return
 	end
 
-	local animator = state.animator
-	if not animator then
+	local folder = findAnimationsFolder(state.pet)
+	if not folder then
+		local animRoot = ServerStorage:FindFirstChild("PetAnimations")
+		local templateName = state.pet:GetAttribute("TemplateName") or state.pet.Name
+		if animRoot and templateName then
+			local candidate = animRoot:FindFirstChild(templateName)
+			if candidate and (candidate:IsA("Folder") or candidate:IsA("Model")) then
+				folder = candidate
+			end
+		end
+	end
+	if not folder then
 		return
 	end
 
@@ -354,38 +371,12 @@ local function loadTracks(state)
 	end
 end
 
-local function ensureGyro(state)
-	if state.gyro and state.gyro.Parent then
-		return state.gyro
-	end
-
-	local hrp = state.hrp
-	if not hrp then return nil end
-
-	local gyro = hrp:FindFirstChild("PetTurnGyro")
-	if not gyro then
-		gyro = Instance.new("BodyGyro")
-		gyro.Name = "PetTurnGyro"
-		gyro.MaxTorque = Vector3.new(0, TURN_MAX_TORQUE, 0)
-		gyro.P = 2500
-		gyro.D = 120
-		gyro.Parent = hrp
-	end
-
-	state.gyro = gyro
-	return gyro
-end
-
 local function setFacingTarget(state, targetPos)
 	if not state or not state.hrp or not targetPos then return end
 	local hrp = state.hrp
 	local flat = Vector3.new(targetPos.X - hrp.Position.X, 0, targetPos.Z - hrp.Position.Z)
 	if flat.Magnitude < 0.05 then return end
-
-	local gyro = ensureGyro(state)
-	if gyro then
-		gyro.CFrame = CFrame.new(hrp.Position, hrp.Position + flat.Unit)
-	end
+	state.lookVector = flat.Unit
 end
 
 local function playRandomFromList(list, fadeTime)
@@ -470,7 +461,7 @@ local function setMode(state, mode, speed)
 end
 
 local function moveToPositionSmooth(state, targetPos, speed, interruptCheck)
-	if not state or not state.humanoid or not state.hrp or not targetPos then
+	if not state or not state.hrp or not targetPos then
 		return false, nil
 	end
 
@@ -478,16 +469,25 @@ local function moveToPositionSmooth(state, targetPos, speed, interruptCheck)
 	local hrp = state.hrp
 
 	speed = speed or WALK_SPEED_MIN
-	humanoid.WalkSpeed = speed
-
+	if humanoid then humanoid.WalkSpeed = speed end
+	state.pet:SetAttribute("PetMoveSpeed", speed)
 	setMode(state, "Walk", speed)
-	humanoid:MoveTo(targetPos)
 
 	local startTime = os.clock()
-	local lastReissue = 0
 	local lastInterruptCheck = 0
+	local lastGroundSnapAt = 0
+	local cachedGroundY = nil
+	local rayParams = RaycastParams.new()
+	local boundsFloor = state.bounds and state.bounds.floorPart
+	if boundsFloor then
+		rayParams.FilterType = Enum.RaycastFilterType.Include
+		rayParams.FilterDescendantsInstances = { boundsFloor }
+	else
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		rayParams.FilterDescendantsInstances = { state.pet }
+	end
 
-	while state.wanderRunning and humanoid.Parent and hrp.Parent do
+	while state.wanderRunning and hrp.Parent do
 		local flatTarget = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
 		local dist = (flatTarget - hrp.Position).Magnitude
 
@@ -503,19 +503,35 @@ local function moveToPositionSmooth(state, targetPos, speed, interruptCheck)
 			lastInterruptCheck = os.clock()
 			local shouldInterrupt, reason = interruptCheck()
 			if shouldInterrupt then
-				humanoid:Move(Vector3.zero, true)
 				return false, reason or "interrupt"
 			end
 		end
 
 		setFacingTarget(state, targetPos)
 
-		if os.clock() - lastReissue >= MOVE_REISSUE_INTERVAL then
-			humanoid:MoveTo(targetPos)
-			lastReissue = os.clock()
-		end
-
 		local pollInterval = state.pet:GetAttribute("WildPet") == true and WILD_MOVE_POLL_INTERVAL or OWNED_MOVE_POLL_INTERVAL
+		local dir = Vector3.new(targetPos.X - hrp.Position.X, 0, targetPos.Z - hrp.Position.Z)
+		if dir.Magnitude > 0.001 then
+			local step = math.min(speed * pollInterval, dir.Magnitude)
+			local nextPos = hrp.Position + dir.Unit * step
+			local halfHeight = math.max(0.2, (hrp.Size.Y * 0.5))
+			local yOffset = tonumber(state.pet:GetAttribute("GroundYOffset")) or 0
+			local now = os.clock()
+			if (now - lastGroundSnapAt) >= GROUND_SNAP_INTERVAL then
+				lastGroundSnapAt = now
+				local groundCastOrigin = nextPos + Vector3.new(0, 14, 0)
+				local groundCast = workspace:Raycast(groundCastOrigin, Vector3.new(0, -40, 0), rayParams)
+				if groundCast and groundCast.Position then
+					cachedGroundY = groundCast.Position.Y
+				end
+			end
+			if cachedGroundY ~= nil then
+				nextPos = Vector3.new(nextPos.X, cachedGroundY + halfHeight + yOffset, nextPos.Z)
+			end
+			local look = state.lookVector or dir.Unit
+			local targetCf = CFrame.lookAt(nextPos, nextPos + look)
+			state.pet:PivotTo(hrp.CFrame:Lerp(targetCf, math.clamp(pollInterval * TURN_RESPONSE, 0, 1)))
+		end
 		task.wait(pollInterval)
 	end
 
@@ -755,13 +771,6 @@ local function cleanupState(pet)
 		state.ancestryConn = nil
 	end
 
-	if state.gyro then
-		pcall(function()
-			state.gyro:Destroy()
-		end)
-		state.gyro = nil
-	end
-
 	if state.tracks then
 		if state.tracks.walk then stopTrack(state.tracks.walk, 0.05) end
 		for _, tr in ipairs(state.tracks.idles or {}) do stopTrack(tr, 0.05) end
@@ -798,7 +807,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 	options = options or {}
 
 	local humanoid, hrp = getRig(pet)
-	if not humanoid or not hrp then return end
+	if not hrp then return end
 
 	local state = petTasks[pet]
 	if state and state.wanderRunning then
@@ -809,7 +818,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 	state.pet = pet
 	state.humanoid = humanoid
 	state.hrp = hrp
-	state.animator = getAnimator(humanoid)
+	state.animator = getAnimator(pet, humanoid)
 	state.wanderRunning = true
 	state.mode = "Idle"
 	state.tracksLoaded = false
@@ -837,6 +846,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 	if bounds and bounds.floorPart then
 		spawnPos = clampPointToPartXZ(bounds.floorPart, spawnPos, FLOOR_PADDING)
 	end
+	state.bounds = bounds
 
 	state.ancestryConn = pet.AncestryChanged:Connect(function(_, parent)
 		if not parent then
@@ -851,7 +861,8 @@ local function startWanderingInternal(pet, spawnPos, options)
 				break
 			end
 
-			if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
+			local isWild = pet:GetAttribute("WildPet") == true
+			if isWild and tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
 				task.wait(0.05)
 				continue
 			end
@@ -860,8 +871,9 @@ local function startWanderingInternal(pet, spawnPos, options)
 			local target = sampleWanderTarget(spawnPos, wanderRadius, bounds)
 			local moveSpeed = WALK_SPEED_MIN + (math.random() * (WALK_SPEED_MAX - WALK_SPEED_MIN))
 
-			local useSimpleOwnedMovement = ownerUserId ~= nil and pet:GetAttribute("WildPet") ~= true
-			if useSimpleOwnedMovement then
+			local useSimpleOwnedMovement = ownerUserId ~= nil and (not isWild)
+			local usePathMovement = isWild and USE_PATHFINDING_FOR_WILD
+			if useSimpleOwnedMovement or (not usePathMovement) then
 				if bounds and bounds.floorPart then
 					target = clampPointToPartXZ(bounds.floorPart, target, FLOOR_PADDING)
 				end
@@ -892,7 +904,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 							goal = clampPointToPartXZ(bounds.floorPart, goal, FLOOR_PADDING)
 						end
 
-						if tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
+						if isWild and tryFleeFromNearbyPlayer(currentState, hrp, wanderRadius, bounds) then
 							break
 						end
 
@@ -903,11 +915,7 @@ local function startWanderingInternal(pet, spawnPos, options)
 							break
 						end
 
-						if wp.Action == Enum.PathWaypointAction.Jump then
-							pcall(function()
-								humanoid.Jump = true
-							end)
-						end
+						-- Jump waypoints are ignored for CFrame movement.
 
 						if not reached then
 							break
@@ -950,16 +958,18 @@ function PetMovement.StartWandering(pet, origin, wanderRadius, ownerUserId, cons
 	end
 
 	local humanoid, hrp = getRig(pet)
-	if not humanoid or not hrp then
+	if not hrp then
 		return
 	end
 
-	pcall(function()
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
-	end)
+	if humanoid then
+		pcall(function()
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+		end)
+	end
 
 	startWanderingInternal(pet, spawnPos, {
 		wanderRadius = tonumber(wanderRadius) or DEFAULT_WANDER_RADIUS,
