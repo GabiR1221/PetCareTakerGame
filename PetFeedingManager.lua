@@ -379,7 +379,11 @@ function PetFeedingManager:StartHungerDecayLoop()
 
 						local owner = self.Players:GetPlayerByUserId(state.ownerUserId)
 						if owner and self.SaveManager then
-							self.SaveManager:ScheduleSave(owner)
+							if type(self.SaveManager.MarkDirty) == "function" then
+								self.SaveManager:MarkDirty(owner)
+							else
+								self.SaveManager:ScheduleSave(owner)
+							end
 						end
 					end
 				end
