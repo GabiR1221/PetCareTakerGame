@@ -3,6 +3,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DataStoreService = game:GetService("DataStoreService")
 --// Server Modules
 
 local MainFolder = script.Parent
@@ -10,6 +11,29 @@ local Datastore = require(MainFolder.Datastore)
 local Values = require(MainFolder.Datastore.Values)
 
 if game.PrivateServerId ~= "" and game.PrivateServerOwnerId == 0 then return end
+
+local function waitForSaveBudget()
+	while DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.UpdateAsync) < 1 do
+		task.wait(0.25)
+	end
+end
+
+local function trySavePlayerData(plr, isFinalSave)
+	if not plr or not plr.Parent then return end
+	if not plr:FindFirstChild("Loaded") or plr.Loaded.Value ~= true then return end
+	local now = os.clock()
+	local lastSavedAt = plr:GetAttribute("LastMainDataSaveAt")
+	if type(lastSavedAt) == "number" and (now - lastSavedAt) < 8 then
+		return
+	end
+	waitForSaveBudget()
+	pcall(function()
+		Datastore.SaveData(plr, isFinalSave == true)
+	end)
+	pcall(function()
+		plr:SetAttribute("LastMainDataSaveAt", now)
+	end)
+end
 
 local forcePlayerDataSaveFunction = ReplicatedStorage:FindFirstChild("ForcePlayerDataSave")
 if not forcePlayerDataSaveFunction or not forcePlayerDataSaveFunction:IsA("BindableFunction") then
@@ -55,25 +79,23 @@ end)
 
 --// Save data when a player leaves
 Players.PlayerRemoving:Connect(function(plr)
-	pcall(function() Datastore.SaveData(plr, true) end)
+	trySavePlayerData(plr, true)
 end)
 
 game:BindToClose(function()
 	for _,v in Players:GetPlayers() do
-		pcall(function() Datastore.SaveData(v, true) end)
+		trySavePlayerData(v, true)
+		task.wait(0.2)
 	end
 end)
 
 
 --// Autosave
-local AutoSaveTime = 60 -- autosave once per minute; 1-second datastore writes cause load/save contention and lag
+local AutoSaveTime = 180 -- spread datastore pressure over time to avoid queue spikes
 
 while task.wait(AutoSaveTime) do
 	for _, plr in (Players:GetChildren()) do
-		if not plr:FindFirstChild("Loaded") or not plr.Loaded.Value then continue end
-
-		pcall(function()
-			Datastore.SaveData(plr, false)
-		end)
+		trySavePlayerData(plr, false)
+		task.wait(0.35)
 	end
 end
