@@ -197,6 +197,7 @@ function PetAttachmentManager:AttachWildPetToPlayer(petModel, player, opts)
 		if bp:IsA("BasePart") then
 			pcall(function() bp.CanCollide = false end)
 			pcall(function() bp.Massless = true end)
+			pcall(function() bp.Anchored = false end)
 		end
 	end
 
@@ -271,6 +272,7 @@ function PetAttachmentManager:AttachPetToPlayer(petModel, player, opts)
 		if bp:IsA("BasePart") then
 			pcall(function() bp.CanCollide = false end)
 			pcall(function() bp.Massless = true end)
+			pcall(function() bp.Anchored = false end)
 		end
 	end
 
