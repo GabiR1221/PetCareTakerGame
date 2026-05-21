@@ -793,7 +793,11 @@ function ToyHappinessManager:_startHappinessDecayLoop()
 						self.PetStateManager:SendStateToOwner(petModel)
 						local owner = self.Players:GetPlayerByUserId(st.ownerUserId)
 						if owner and self.PetSaveManager then
-							self.PetSaveManager:ScheduleSave(owner)
+							if type(self.PetSaveManager.MarkDirty) == "function" then
+								self.PetSaveManager:MarkDirty(owner)
+							else
+								self.PetSaveManager:ScheduleSave(owner)
+							end
 						end
 					end
 				end
@@ -821,13 +825,13 @@ function ToyHappinessManager:_startAutoToyPlayLoop()
 
 	task.spawn(function()
 		while true do
-			task.wait(3)
+			task.wait(8)
 
 			for _, rootName in ipairs({"Tycoon", "Tycoons"}) do
 				local root = workspace:FindFirstChild(rootName)
 				if not root then continue end
 
-				for _, tycoonModel in ipairs(root:GetDescendants()) do
+				for _, tycoonModel in ipairs(root:GetChildren()) do
 					if not (tycoonModel:IsA("Model") or tycoonModel:IsA("Folder")) then continue end
 					local essentials = self.TycoonUtils:FindEssentialsInModel(tycoonModel)
 					if not essentials then continue end
