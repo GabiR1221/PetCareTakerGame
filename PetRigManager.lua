@@ -35,7 +35,7 @@ function PetRigManager:EnsurePetRig(pet)
 		pcall(function() hrp.Name = "HumanoidRootPart" end)
 	end
 	pet.PrimaryPart = hrp
-	pcall(function() hrp.Anchored = false end)
+	pcall(function() hrp.Anchored = true end)
 
 	for _, obj in ipairs(pet:GetDescendants()) do
 		if obj:IsA("Weld") or obj:IsA("WeldConstraint") or obj:IsA("AlignPosition") or 
@@ -46,20 +46,23 @@ function PetRigManager:EnsurePetRig(pet)
 	end
 
 	local humanoid = pet:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		humanoid = Instance.new("Humanoid")
-		humanoid.Parent = pet
+	if humanoid then
+		pcall(function()
+			pet:SetAttribute("StoredBaseHipHeight", tonumber(humanoid.HipHeight) or 0)
+		end)
+		humanoid:Destroy()
 	end
-	humanoid.WalkSpeed = 6
-	humanoid.AutoRotate = true
-	humanoid.PlatformStand = false
-	
-	local storedBaseHip = pet:GetAttribute("StoredBaseHipHeight")
-	if type(storedBaseHip) == "number" and storedBaseHip > 0 then
-		humanoid:SetAttribute("BaseHipHeight", storedBaseHip)
-		humanoid.HipHeight = storedBaseHip
-	elseif type(humanoid:GetAttribute("BaseHipHeight")) ~= "number" then
-		humanoid:SetAttribute("BaseHipHeight", tonumber(humanoid.HipHeight) or 0)
+
+	local controller = pet:FindFirstChildOfClass("AnimationController")
+	if not controller then
+		controller = Instance.new("AnimationController")
+		controller.Name = "PetAnimationController"
+		controller.Parent = pet
+	end
+	local animator = controller:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = controller
 	end
 
 	for _, part in ipairs(pet:GetDescendants()) do
@@ -81,7 +84,7 @@ function PetRigManager:EnsurePetRig(pet)
 		end
 	end
 
-	pcall(function() hrp.CanCollide = true end)
+	pcall(function() hrp.CanCollide = false end)
 	pcall(function() hrp.Massless = true end)
 	pcall(function() hrp.CollisionGroup = self.PET_COLLISION_GROUP end)
 
