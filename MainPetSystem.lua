@@ -1524,7 +1524,7 @@ ShowerDryerManager:Initialize(petState, carryingPetByUserId, Players, PetMovemen
 AccessoryManager:Initialize(petState, carryingPetByUserId, Players, accessoryEvent, ServerStorage, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden)
 PetGroundManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, petGroundConnected, petGroundXPTasks, petGroundDirtinessTasks, petPickupPromptConns)
 
-saveManager = PetSaveManager:Initialize("PetData127", petState, carryingPetByUserId) ----------------------------------------Changingggggg
+saveManager = PetSaveManager:Initialize("PetData130", petState, carryingPetByUserId) ----------------------------------------Changingggggg
 PetStandManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, saveManager, Config, resolvePlayerInteractionPet, stowPetAsToolForPlayer, setInteractionUiHidden, removePetToolForPlacedPet)
 WildPetManager:Initialize(petState, carryingPetByUserId, Players, PetMovement, Config, saveManager)
 PetFeedingManager:Initialize(petState, Players, PetStateManager, saveManager, PetMovement)
@@ -1802,16 +1802,22 @@ AccessoryManager:ScanAndConnectAll()
 
 -- Periodic scan for interactables
 task.spawn(function()
+	local scanPhase = 0
 	while true do
 		pcall(function()
-			ShowerDryerManager:ScanAndConnectAll()
-			AccessoryManager:ScanAndConnectAll()
-			PetGroundManager:ScanAndConnectAll()
-			PetStandManager:ScanAndConnectAll()
-			WildPetManager:ScanAndConnectAdoptionMats()
-			ToyHappinessManager:ScanAndConnectAll()
+			scanPhase = (scanPhase % 3) + 1
+			if scanPhase == 1 then
+				ShowerDryerManager:ScanAndConnectAll()
+				AccessoryManager:ScanAndConnectAll()
+			elseif scanPhase == 2 then
+				PetGroundManager:ScanAndConnectAll()
+				PetStandManager:ScanAndConnectAll()
+			else
+				WildPetManager:ScanAndConnectAdoptionMats()
+				ToyHappinessManager:ScanAndConnectAll()
+			end
 		end)
-		task.wait(6)
+		task.wait(8)
 	end
 end)
 
@@ -1896,11 +1902,33 @@ end)
 Players.PlayerRemoving:Connect(function(player)
 	--stowActiveInteractionPetsForPlayer(player)
 	if saveManager then
-		saveManager:SavePlayerPets(player, { force = true, reason = "PlayerRemoving" })
-		stashedPetModelsByUserId[player.UserId] = nil
+		saveManager:SavePlayerPets(player, { forceIfDirty = true, reason = "PlayerRemoving" })
 	else
 		warn("[PetSystem] saveManager is nil, cannot save pets for", player.Name)
 	end
+
+	-- Always cleanup runtime pet instances for this player's plot/session so
+	-- tycoon reset does not leave orphan pets behind.
+	pcall(function()
+		WildPetManager:ClearPlayerPetsForRebirth(player, {
+			skipSave = true,
+			reason = "PlayerRemovingCleanup",
+		})
+	end)
+
+	-- Cleanup inventory-stashed runtime models for this player
+	local stashedByUid = stashedPetModelsByUserId[player.UserId]
+	if stashedByUid then
+		for _, model in pairs(stashedByUid) do
+			if model and model.Parent then
+				pcall(function() model:Destroy() end)
+			end
+		end
+		stashedPetModelsByUserId[player.UserId] = nil
+	else
+		stashedPetModelsByUserId[player.UserId] = nil
+	end
 end)
+
 
 print("[PetSystem] Initialized successfully.")
