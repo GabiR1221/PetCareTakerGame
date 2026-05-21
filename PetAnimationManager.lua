@@ -60,13 +60,20 @@ end
 
 function PetAnimationManager:SetupAnimatorForPet(pet)
 	if not pet or not pet:IsA("Model") then return nil end
-	local humanoid = pet:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return nil end
+	local animatorHost = pet:FindFirstChildOfClass("Humanoid")
+	if not animatorHost then
+		animatorHost = pet:FindFirstChildOfClass("AnimationController")
+		if not animatorHost then
+			animatorHost = Instance.new("AnimationController")
+			animatorHost.Name = "PetAnimationController"
+			animatorHost.Parent = pet
+		end
+	end
 
-	local animator = humanoid:FindFirstChildWhichIsA("Animator")
+	local animator = animatorHost:FindFirstChildWhichIsA("Animator")
 	if not animator then
 		animator = Instance.new("Animator")
-		animator.Parent = humanoid
+		animator.Parent = animatorHost
 	end
 
 	local animObject = self:GetAnimationObjectForPet(pet, "Walk")
@@ -80,7 +87,7 @@ function PetAnimationManager:SetupAnimatorForPet(pet)
 
 	petAnimatorTasks[pet] = petAnimatorTasks[pet] or {}
 	petAnimatorTasks[pet].walkTrack = track
-	petAnimatorTasks[pet].humanoid = humanoid
+	petAnimatorTasks[pet].animatorHost = animatorHost
 	petAnimatorTasks[pet].hrp = pet.PrimaryPart
 	petAnimatorTasks[pet].animationName = animObject.Name
 	petAnimatorTasks[pet].animationSource = animObject:GetFullName()
@@ -129,8 +136,7 @@ function PetAnimationManager:StartAnimationMonitor()
 
 					if speed >= ANIM_VELOCITY_THRESHOLD then
 						if not track.IsPlaying then pcall(function() track:Play() end) end
-						local humanoid = state.humanoid
-						local refSpeed = (humanoid and humanoid.WalkSpeed) or 6
+						local refSpeed = tonumber(pet:GetAttribute("PetMoveSpeed")) or 6
 						local speedScale = math.clamp(speed / math.max(refSpeed, 0.0001), 0.3, 2.5)
 						pcall(function() track:AdjustSpeed(speedScale) end)
 					else
