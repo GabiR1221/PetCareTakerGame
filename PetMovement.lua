@@ -35,10 +35,12 @@ local FLEE_START_MAX_WAIT = 0.3
 local FLEE_SPEED_MIN = 6.5
 local FLEE_SPEED_MAX = 10
 local FLEE_INTERRUPT_CHECK_INTERVAL = 0.20
-local OWNED_MOVE_POLL_INTERVAL = 0.02
-local WILD_MOVE_POLL_INTERVAL = 0.02
-local GROUND_SNAP_INTERVAL = 0.10
-local USE_PATHFINDING_FOR_WILD = false
+local OWNED_MOVE_POLL_INTERVAL = 0.05
+local WILD_MOVE_POLL_INTERVAL = 0.045
+local GROUND_SNAP_INTERVAL = 0.20
+local MAX_SERVER_SIM_RATE = 20 -- target max movement steps/sec per pet
+local LOAD_ADAPTIVE_STEP_SCALE = 0.015 -- +15ms per additional active wanderer
+local USE_PATHFINDING_FOR_WILD = true
 
 local FLOOR_NAME_CANDIDATES = {
 	"Floor",
@@ -55,6 +57,25 @@ local FLOOR_NAME_CANDIDATES = {
 --   walkTrack, idleTracks, pauseTracks, turnTrack
 -- }
 local petTasks = {}
+
+local function countActiveWanderers()
+	local active = 0
+	for _, st in pairs(petTasks) do
+		if st and st.wanderRunning then
+			active += 1
+		end
+	end
+	return active
+end
+
+local function getAdaptivePollInterval(baseInterval)
+	local active = countActiveWanderers()
+	if active <= 1 then
+		return math.max(baseInterval, 1 / MAX_SERVER_SIM_RATE)
+	end
+	local scaled = baseInterval + ((active - 1) * LOAD_ADAPTIVE_STEP_SCALE)
+	return math.clamp(scaled, 1 / MAX_SERVER_SIM_RATE, 0.12)
+end
 
 local function optimizeRuntimePetParts(pet)
 	if not pet or not pet.GetDescendants then return end
@@ -509,7 +530,8 @@ local function moveToPositionSmooth(state, targetPos, speed, interruptCheck)
 
 		setFacingTarget(state, targetPos)
 
-		local pollInterval = state.pet:GetAttribute("WildPet") == true and WILD_MOVE_POLL_INTERVAL or OWNED_MOVE_POLL_INTERVAL
+		local basePollInterval = state.pet:GetAttribute("WildPet") == true and WILD_MOVE_POLL_INTERVAL or OWNED_MOVE_POLL_INTERVAL
+		local pollInterval = getAdaptivePollInterval(basePollInterval)
 		local dir = Vector3.new(targetPos.X - hrp.Position.X, 0, targetPos.Z - hrp.Position.Z)
 		if dir.Magnitude > 0.001 then
 			local step = math.min(speed * pollInterval, dir.Magnitude)
