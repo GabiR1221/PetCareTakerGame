@@ -7,6 +7,10 @@ local ServerStorage = game:GetService("ServerStorage")
 local FAME_LOOP_INTERVAL_SECONDS = 5
 local STAND_VISUAL_UPDATE_INTERVAL_SECONDS = 5
 local INCOME_BILLBOARD_UPDATE_INTERVAL_SECONDS = 5
+local PET_STATE_CLEANUP_INTERVAL_SECONDS = 10
+local ENABLE_FAME_NPCS = true
+local STAND_BILLBOARD_MAX_DISTANCE = 50
+local ENABLE_STAND_MULTIPLIERS_BILLBOARD = false
 
 local function getStandEffectNames(actionName)
 	local baseName = tostring(actionName or "")
@@ -69,6 +73,7 @@ function PetStandManager:Initialize(stateTable, carryingTable, playersService, p
 	self.lastStateSendAtByPet = {}     -- [petModel] = os.clock timestamp for throttled UI sync
 	self.lastStandVisualUpdateAtByPet = {} -- [petModel] = os.clock timestamp for billboard/NPC refresh throttling
 	self.lastIncomeBillboardUpdateAtByPet = {} -- [petModel] = os.clock timestamp for income-loop cosmetic refresh
+	self._lastPetStateCleanupAt = 0
 
 	self.PetAttachmentManager = require(script.Parent.PetAttachmentManager)
 	self.PetStateManager = require(script.Parent.PetStateManager)
@@ -110,6 +115,39 @@ function PetStandManager:OptimizeStandPetParts(petModel)
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
 			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 		end)
+	end
+end
+
+function PetStandManager:ReleasePetRuntimeTracking(petModel)
+	if not petModel then return end
+	self:StopIncomeLoop(petModel)
+	if self.standPickupPromptConns[petModel] then
+		pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
+		self.standPickupPromptConns[petModel] = nil
+	end
+	self.lastStateSendAtByPet[petModel] = nil
+	self.lastStandVisualUpdateAtByPet[petModel] = nil
+	self.lastIncomeBillboardUpdateAtByPet[petModel] = nil
+end
+
+function PetStandManager:CleanupStalePetStateEntries(now)
+	now = now or os.clock()
+	if (now - (self._lastPetStateCleanupAt or 0)) < PET_STATE_CLEANUP_INTERVAL_SECONDS then
+		return
+	end
+	self._lastPetStateCleanupAt = now
+
+	for petModel, state in pairs(self.petState) do
+		local isInvalid = (typeof(petModel) ~= "Instance")
+			or (not petModel:IsA("Model"))
+			or (petModel.Parent == nil)
+		if isInvalid then
+			if state and state.petstandRoot then
+				self:DestroyStandFameNpcs(state.petstandRoot)
+			end
+			self:ReleasePetRuntimeTracking(petModel)
+			self.petState[petModel] = nil
+		end
 	end
 end
 
@@ -609,6 +647,7 @@ function PetStandManager:EnsureFameBillboard(petModel)
 		billboard.Size = UDim2.new(0.9, 0, 0.9, 0)
 		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.8, 0)
 		billboard.AlwaysOnTop = true
+		billboard.MaxDistance = STAND_BILLBOARD_MAX_DISTANCE
 		billboard.Parent = adornee
 
 		local bg = Instance.new("Frame")
@@ -627,6 +666,7 @@ function PetStandManager:EnsureFameBillboard(petModel)
 	end
 
 	billboard.Adornee = adornee
+	billboard.MaxDistance = STAND_BILLBOARD_MAX_DISTANCE
 	if billboard.Parent ~= adornee then
 		billboard.Parent = adornee
 	end
@@ -651,6 +691,17 @@ end
 
 function PetStandManager:UpdateIncomeBillboard(petModel)
 	if not petModel then return end
+	local mainBillboards = {}
+	for _, desc in ipairs(petModel:GetDescendants()) do
+		if desc:IsA("BillboardGui") and desc.Name == "MainBillboard" then
+			table.insert(mainBillboards, desc)
+		end
+	end
+	if #mainBillboards > 1 then
+		for i = 2, #mainBillboards do
+			pcall(function() mainBillboards[i]:Destroy() end)
+		end
+	end
 	local mainBillboard = petModel:FindFirstChild("MainBillboard", true)
 	if not mainBillboard then
 		local templateName = tostring(petModel:GetAttribute("TemplateName") or petModel.Name or "")
@@ -675,6 +726,7 @@ function PetStandManager:UpdateIncomeBillboard(petModel)
 	if mainBillboard and mainBillboard:IsA("BillboardGui") then
 		mainBillboard.Enabled = true
 		mainBillboard.AlwaysOnTop = true
+		mainBillboard.MaxDistance = STAND_BILLBOARD_MAX_DISTANCE
 		local adornee = petModel.PrimaryPart or petModel:FindFirstChildWhichIsA("BasePart")
 		if adornee then
 			mainBillboard.Adornee = adornee
@@ -715,6 +767,10 @@ function PetStandManager:UpdatePetToolIncomeBillboards(petModel)
 end
 
 function PetStandManager:UpdateStandMultipliersBillboard(petModel)
+	if not ENABLE_STAND_MULTIPLIERS_BILLBOARD then
+		self:DestroyStandMultipliersBillboard(petModel)
+		return
+	end
 	if not petModel then return end
 	local state = self.petState[petModel]
 	if not state or state.wild == true then return end
@@ -731,6 +787,7 @@ function PetStandManager:UpdateStandMultipliersBillboard(petModel)
 	end
 	runtimeGui.Enabled = true
 	runtimeGui.AlwaysOnTop = true
+	runtimeGui.MaxDistance = STAND_BILLBOARD_MAX_DISTANCE
 
 	if adornee then
 		runtimeGui.Adornee = adornee
@@ -1018,6 +1075,13 @@ function PetStandManager:SpawnFameNpc(standRoot, index)
 end
 
 function PetStandManager:UpdateStandFameNpcs(petModel)
+	if not ENABLE_FAME_NPCS then
+		local stateNoNpc = petModel and self.petState[petModel]
+		if stateNoNpc and stateNoNpc.petstandRoot then
+			self:DestroyStandFameNpcs(stateNoNpc.petstandRoot)
+		end
+		return
+	end
 	if not petModel then return end
 	local state = self.petState[petModel]
 	local standRoot = state and state.petstandRoot
@@ -1076,6 +1140,7 @@ function PetStandManager:StartFameLoop()
 		local lastTick = os.clock()
 		while true do
 			local now = os.clock()
+			self:CleanupStalePetStateEntries(now)
 			local elapsed = math.max(0.01, now - lastTick)
 			lastTick = now
 			local fameCfg = self:GetFameConfig()
@@ -1397,11 +1462,8 @@ function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standP
 			self.petState[petModel].petstand = nil
 			self.petState[petModel].petstandRoot = nil
 			self:DestroyStandBillboards(petModel)
+			self:ReleasePetRuntimeTracking(petModel)
 			pcall(function() helper:Destroy() end)
-			if self.standPickupPromptConns[petModel] then
-				pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
-				self.standPickupPromptConns[petModel] = nil
-			end
 		else
 			if player.Character and player.Character.PrimaryPart and not self.carryingPetByUserId[player.UserId] then
 				local ok, err = pcall(function()
@@ -1412,11 +1474,8 @@ function PetStandManager:CreatePlacedPetPickupPrompt(petModel, standRoot, standP
 					self.petState[petModel].petstand = nil
 					self.petState[petModel].petstandRoot = nil
 					self:DestroyStandBillboards(petModel)
+					self:ReleasePetRuntimeTracking(petModel)
 					pcall(function() helper:Destroy() end)
-					if self.standPickupPromptConns[petModel] then
-						pcall(function() self.standPickupPromptConns[petModel]:Disconnect() end)
-						self.standPickupPromptConns[petModel] = nil
-					end
 				else
 					warn("[PetStandManager] Failed to pick pet back up:", err)
 				end
