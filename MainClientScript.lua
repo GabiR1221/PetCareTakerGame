@@ -1026,7 +1026,7 @@ local HoverGuiController = (function()
 		end
 	end)
 
-	local function bind(guiObject, petInstance, hoverFrameName, customNameResolver, customDetailResolver)
+	local function bind(guiObject, petInstance, hoverFrameName, customNameResolver, customDetailResolver, customDetail2Resolver)
 		if not guiObject or not guiObject:IsA("GuiObject") then return end
 		local function showHover()
 			local frameToUse = hoverFrame
@@ -1037,11 +1037,16 @@ local HoverGuiController = (function()
 			activeHoverFrame = guiObject
 			local localNameLabel = frameToUse:FindFirstChild("NameFrame") and frameToUse.NameFrame:FindFirstChild("Name")
 			local localPowerLabel = frameToUse:FindFirstChild("PowerFrame") and frameToUse.PowerFrame:FindFirstChild("Power")
+			local localPowerLabel2 = frameToUse:FindFirstChild("PowerFrame") and frameToUse.PowerFrame:FindFirstChild("Power2")
+			local detailText = customDetailResolver and customDetailResolver(petInstance, getPetTemplate(petInstance)) or getPetPowerText(petInstance)
 			if localNameLabel then
 				localNameLabel.Text = customNameResolver and customNameResolver(petInstance, getPetTemplate(petInstance)) or getPetDisplayName(petInstance)
 			end
 			if localPowerLabel then
-				localPowerLabel.Text = customDetailResolver and customDetailResolver(petInstance, getPetTemplate(petInstance)) or getPetPowerText(petInstance)
+				localPowerLabel.Text = detailText
+			end
+			if localPowerLabel2 then
+				localPowerLabel2.Text = customDetail2Resolver and customDetail2Resolver(petInstance, getPetTemplate(petInstance)) or detailText
 			end
 			frameToUse.Visible = true
 			currentHoverFrame = frameToUse
@@ -1406,6 +1411,7 @@ function populateStandBoostsSide(rows)
 		if imageLabel then
 			local hoverName = tostring(row.hoverName or row.key or "Boost")
 			local hoverPower = tostring(row.hoverPower or row.text or "")
+			local hoverPower2 = tostring(row.text or "")
 			HoverGuiController.bind(
 				imageLabel,
 				nil,
@@ -1415,6 +1421,9 @@ function populateStandBoostsSide(rows)
 				end,
 				function()
 					return hoverPower
+				end,
+				function()
+					return hoverPower2
 				end
 			)
 		end
