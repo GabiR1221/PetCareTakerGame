@@ -123,8 +123,9 @@ function PetAttachmentManager:DetachPetFromPlayer(petModel)
 	return true
 end
 
-function PetAttachmentManager:AttachPetToPart(petModel, part)
+function PetAttachmentManager:AttachPetToPart(petModel, part, opts)
 	if not petModel or not part or not part:IsA("BasePart") then return false end
+	opts = opts or {}
 	self:SetModelPrimaryIfMissing(petModel)
 	local ppart = petModel.PrimaryPart
 	if not ppart then return false end
@@ -132,8 +133,16 @@ function PetAttachmentManager:AttachPetToPart(petModel, part)
 	self:ClearWeldsOnPart(ppart)
 	petModel.Parent = workspace
 
-	local yOff = (part.Size.Y / 2) + (ppart.Size.Y / 2)
-	petModel:SetPrimaryPartCFrame(part.CFrame * CFrame.new(0, yOff, 0))
+	local targetCFrame = nil
+	local standAttachment = opts.standAttachment
+	local petAttachment = opts.petAttachment
+	if standAttachment and standAttachment:IsA("Attachment") and petAttachment and petAttachment:IsA("Attachment") then
+		targetCFrame = standAttachment.WorldCFrame * petAttachment.CFrame:Inverse()
+	else
+		local yOff = (part.Size.Y / 2) + (ppart.Size.Y / 2)
+		targetCFrame = part.CFrame * CFrame.new(0, yOff, 0)
+	end
+	petModel:SetPrimaryPartCFrame(targetCFrame)
 	ppart.CanCollide = false
 
 	pcall(function() self:WeldParts(ppart, part) end)
