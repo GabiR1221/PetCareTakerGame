@@ -3631,14 +3631,15 @@ end
 local function openFoodShop()
 	if not FoodShopFrame then return end
 	if not FoodShopFrame.Visible then
-		Utilities.ButtonHandler.OnClick(FoodShopFrame, FOOD_OPEN_POSITION)
+		Utilities.ButtonHandler.OnClick(FoodShopFrame, BaseSize.FoodShop or FOOD_OPEN_POSITION)
 	end
 end
 
 local function closeFoodShop()
 	if not FoodShopFrame or not FoodShopFrame.Visible then return end
-	Utilities.ButtonHandler.OnClick(FoodShopFrame, FOOD_OPEN_POSITION)
+	Utilities.ButtonHandler.OnClick(FoodShopFrame, BaseSize.FoodShop or FOOD_OPEN_POSITION)
 end
+
 
 if foodUi then
 	if foodUi.exitButton then
