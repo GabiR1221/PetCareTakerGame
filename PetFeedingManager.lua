@@ -424,7 +424,31 @@ function PetFeedingManager:HandleFeedRequest(player, petModel)
 		self.SaveManager:ScheduleSave(player)
 	end
 
+	local consumedToolName = tool.Name
 	tool:Destroy()
+
+	-- Remove only one persisted mirror copy so stacks are decremented by exactly 1.
+	local function removeSingleToolByName(container)
+		if not container then return false end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child.Name == consumedToolName then
+				child:Destroy()
+				return true
+			end
+		end
+		return false
+	end
+
+	if not removeSingleToolByName(player:FindFirstChild("StarterGear")) then
+		local inventoryStash = player:FindFirstChild("InventoryStash")
+		if inventoryStash then
+			for _, tabFolder in ipairs(inventoryStash:GetChildren()) do
+				if removeSingleToolByName(tabFolder) then
+					break
+				end
+			end
+		end
+	end
 end
 
 return PetFeedingManager
