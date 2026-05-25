@@ -1584,7 +1584,12 @@ function PetStandManager:ConnectStandPrompt(standRoot)
 		self.PetAttachmentManager:ClearWeldsOnPart(pet.PrimaryPart)
 		self.PetAttachmentManager:DetachPetFromPlayer(pet)
 
-		local ok = self.PetAttachmentManager:AttachPetToPart(pet, standPart)
+		local standAttachment = standPart:FindFirstChild("StandAttachment")
+		local petAttachment = pet:FindFirstChild("StandAttachment", true)
+		local ok = self.PetAttachmentManager:AttachPetToPart(pet, standPart, {
+			standAttachment = standAttachment,
+			petAttachment = petAttachment,
+		})
 		if not ok then
 			warn("[PetStandManager] Failed to attach pet to stand")
 			return
@@ -1662,7 +1667,12 @@ function PetStandManager:RestorePetToStand(petModel, player, standId, storedMone
 	self.PetAttachmentManager:ClearDirectModelWelds(petModel)
 	self.PetAttachmentManager:ClearWeldsOnPart(petModel.PrimaryPart)
 
-	local ok = self.PetAttachmentManager:AttachPetToPart(petModel, standPart)
+	local standAttachment = standPart:FindFirstChild("StandAttachment")
+	local petAttachment = petModel:FindFirstChild("StandAttachment", true)
+	local ok = self.PetAttachmentManager:AttachPetToPart(petModel, standPart, {
+		standAttachment = standAttachment,
+		petAttachment = petAttachment,
+	})
 	if not ok then
 		return false
 	end
