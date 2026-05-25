@@ -1,5 +1,5 @@
 local dss = game:GetService("DataStoreService")
-local toolsDS = dss:GetDataStore("ToolsData10")
+local toolsDS = dss:GetDataStore("ToolsData138")
 
 local toolsFolder = game.ServerStorage.ToolsFolder
 
@@ -35,7 +35,6 @@ end)
 game.Players.PlayerRemoving:Connect(function(plr)
 
 	local toolsOwned = {}
-	local seen = {}
 
 	local function collectTools(container)
 		if not container then return end
@@ -43,16 +42,17 @@ game.Players.PlayerRemoving:Connect(function(plr)
 			if item:IsA("Tool")
 				and item:GetAttribute("PetTool") ~= true
 				and item:GetAttribute("SkipToolSave") ~= true
-				and not seen[item.Name]
 			then
-				seen[item.Name] = true
 				table.insert(toolsOwned, item.Name)
 			end
 		end
 	end
 
+	-- StarterGear mirrors tools for respawn; saving both Backpack and StarterGear
+	-- causes count inflation/duplication across rejoins. Backpack is authoritative.
 	collectTools(plr:FindFirstChild("Backpack"))
-	collectTools(plr:FindFirstChild("StarterGear"))
+	local character = plr.Character
+	collectTools(character)
 	local inventoryStash = plr:FindFirstChild("InventoryStash")
 	if inventoryStash then
 		for _, tabFolder in ipairs(inventoryStash:GetChildren()) do
@@ -66,3 +66,4 @@ game.Players.PlayerRemoving:Connect(function(plr)
 	end)
 	if errormsg then warn(errormsg) end
 end)
+
