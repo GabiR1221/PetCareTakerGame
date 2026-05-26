@@ -63,6 +63,21 @@ local function normalizePetDataList(petData)
 	return normalized, changed or #normalized ~= #petData
 end
 
+local function deepCopyPetDataList(petData)
+	if type(petData) ~= "table" then
+		return {}
+	end
+	local out = table.create(#petData)
+	for index, petInfo in ipairs(petData) do
+		if type(petInfo) == "table" then
+			out[index] = table.clone(petInfo)
+		else
+			out[index] = petInfo
+		end
+	end
+	return out
+end
+
 function PetSaveManager:Initialize(dataStoreName, stateTable, carryingTable)
 	self.petState = stateTable or {}
 	self.carryingPetByUserId = carryingTable or {}
@@ -74,6 +89,7 @@ function PetSaveManager:Initialize(dataStoreName, stateTable, carryingTable)
 	self.dirtyByUserId = {} -- userId(string) -> true if data changed since last successful save
 	self.lastSavedSignatureByUserId = {}
 	self.lastSaveAtByUserId = {}
+	self.lastLoadedPetDataByUserId = {}
 	self._autoSaveStarted = false
 	self:_startAutoSaveLoop()
 	return self
@@ -202,6 +218,12 @@ function PetSaveManager:SavePlayerPets(player, options)
 	end
 
 	local petData = self:_collectPetDataForPlayer(player)
+	local cachedLoadedPetData = self.lastLoadedPetDataByUserId[userId]
+	if #petData == 0 and type(cachedLoadedPetData) == "table" and #cachedLoadedPetData > 0 and options.allowEmpty ~= true then
+		warn(("[PetSaveManager] Prevented empty save for %s; using last known pet snapshot (%d pets)")
+			:format(player.Name, #cachedLoadedPetData))
+		petData = deepCopyPetDataList(cachedLoadedPetData)
+	end
 	local signature = safeEncodeSignature(petData)
 
 	if not forceSave then
@@ -223,6 +245,7 @@ function PetSaveManager:SavePlayerPets(player, options)
 	if signature ~= nil then
 		self.lastSavedSignatureByUserId[userId] = signature
 	end
+	self.lastLoadedPetDataByUserId[userId] = deepCopyPetDataList(petData)
 
 	print(("[PetSaveManager] Saved %d pets for %s"):format(#petData, player.Name))
 	return true
@@ -246,6 +269,7 @@ function PetSaveManager:LoadPlayerPets(player)
 		if normalizedChanged then
 			self.dirtyByUserId[userId] = true
 		end
+		self.lastLoadedPetDataByUserId[userId] = deepCopyPetDataList(petData)
 		local signature = safeEncodeSignature(petData)
 		if signature ~= nil then
 			self.lastSavedSignatureByUserId[userId] = signature
@@ -262,6 +286,7 @@ function PetSaveManager:LoadPlayerPets(player)
 	else
 		print(("[PetSaveManager] No data found for %s"):format(player.Name))
 	end
+	self.lastLoadedPetDataByUserId[userId] = {}
 	return {}
 end
 
