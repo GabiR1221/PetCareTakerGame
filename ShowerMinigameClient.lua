@@ -25,6 +25,7 @@ local CLIENT_TOOL_SURFACE_OFFSET_MAX = 0.4
 local CLIENT_SHOWERHEAD_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
 local CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE = 6
 local CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS = 32
+local CLIENT_TOOL_MOVE_SMOOTHNESS_HIT = 22
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
@@ -191,11 +192,195 @@ local localPetRubOffset = Vector3.zero
 local localPetRubTilt = Vector3.zero
 local lastLocalRubWorldPos = nil
 local lastLocalRubAt = nil
+local petSquishRig = nil
 local localToolEffects = {}
 local spongeRubbingActive = false
 local showerHeadEffectActive = false
 local showerHeadFixedRight = nil
 local showerHeadFixedUp = nil
+
+local MAX_SQUISH_BONE_COUNT = 20
+local DEFAULT_SQUISH_STRENGTH = 2
+local SQUISH_CONTACT_MAX_DISTANCE = 4
+local SQUISH_FAR_BONE_MIN_WEIGHT = 0.1
+local SQUISH_CENTER_MAX_WEIGHT = 0.35
+local DEFAULT_PET_SWAY_POSITION_STRENGTH = 1
+local DEFAULT_PET_SWAY_TILT_STRENGTH = 1
+local DEFAULT_SQUISH_IN_SPEED = 26
+local DEFAULT_SQUISH_OUT_SPEED = 14
+local DEFAULT_SQUISH_CENTER_FOLLOW_SPEED = 18
+local CENTER_BONE_NAMES = {
+	["Root"] = true,
+	["center"] = true,
+	["centre"] = true,
+	["core"] = true,
+}
+
+local function lowerName(value)
+	return string.lower(tostring(value or ""))
+end
+
+local function resetPetSquishRig()
+	if not petSquishRig then return end
+	for bone, originalTransform in pairs(petSquishRig.originalTransforms) do
+		if bone and bone.Parent then
+			bone.Transform = originalTransform
+		end
+	end
+	petSquishRig = nil
+end
+
+local function cachePetSquishRig(petModel)
+	resetPetSquishRig()
+	if not petModel or not petModel.Parent then return nil end
+
+	local allBones = {}
+	for _, inst in ipairs(petModel:GetDescendants()) do
+		if inst:IsA("Bone") then
+			table.insert(allBones, inst)
+		end
+	end
+	if #allBones == 0 then return nil end
+	local squishStrength = tonumber(petModel:GetAttribute("ShowerSquishStrength")) or DEFAULT_SQUISH_STRENGTH
+	squishStrength = math.clamp(squishStrength, 0.5, 6)
+
+	local centerBone = nil
+	for _, bone in ipairs(allBones) do
+		local nameKey = lowerName(bone.Name)
+		if CENTER_BONE_NAMES[nameKey] or string.find(nameKey, "root", 1, true) or string.find(nameKey, "center", 1, true) then
+			centerBone = bone
+			break
+		end
+	end
+	-- Fallback for rigs that use generic names (ex: Bone.001..Bone.006): choose
+	-- the bone closest to model pivot center as "center".
+	if not centerBone then
+		local modelCenter = petModel:GetPivot().Position
+		local bestBone = nil
+		local bestDist = math.huge
+		for _, bone in ipairs(allBones) do
+			local dist = (bone.WorldPosition - modelCenter).Magnitude
+			if dist < bestDist then
+				bestDist = dist
+				bestBone = bone
+			end
+		end
+		centerBone = bestBone or allBones[1]
+	end
+
+	local outerBones = {}
+	for _, bone in ipairs(allBones) do
+		if bone ~= centerBone then
+			table.insert(outerBones, bone)
+		end
+	end
+	table.sort(outerBones, function(a, b)
+		return a.Name < b.Name
+	end)
+	while #outerBones > MAX_SQUISH_BONE_COUNT do
+		table.remove(outerBones)
+	end
+
+	local originalTransforms = {}
+	originalTransforms[centerBone] = centerBone.Transform
+	for _, bone in ipairs(outerBones) do
+		originalTransforms[bone] = bone.Transform
+	end
+
+	petSquishRig = {
+		centerBone = centerBone,
+		outerBones = outerBones,
+		originalTransforms = originalTransforms,
+		centerCompression = 0,
+		outerCompression = 0,
+		centerWorldPos = centerBone.WorldPosition,
+		squishStrength = squishStrength,
+		recentContactWorldPos = nil,
+	}
+	return petSquishRig
+end
+
+local function applyPetSquish(targetSurfacePos, targetSurfaceNormal, isTouchingPet)
+	local rig = petSquishRig
+	if not rig then return end
+	local now = tick()
+	local dt = math.clamp(now - (lastLocalRubAt or now), 1 / 240, 1 / 20)
+	local targetCompression = 0
+	local dragIntensity = 0
+
+	if isTouchingPet and typeof(targetSurfacePos) == "Vector3" then
+		rig.recentContactWorldPos = targetSurfacePos
+		dragIntensity = 0.55
+		if lastLocalRubWorldPos then
+			dragIntensity = math.clamp(((targetSurfacePos - lastLocalRubWorldPos).Magnitude / dt) / 22, 0.35, 1)
+		end
+		targetCompression = math.clamp((0.12 + (0.22 * dragIntensity)) * (rig.squishStrength or 1), 0, 1.2)
+	else
+		targetSurfacePos = rig.recentContactWorldPos
+	end
+
+	local inSpeed = tonumber((currentPet and currentPet:GetAttribute("ShowerSquishInSpeed")) or DEFAULT_SQUISH_IN_SPEED) or DEFAULT_SQUISH_IN_SPEED
+	local outSpeed = tonumber((currentPet and currentPet:GetAttribute("ShowerSquishOutSpeed")) or DEFAULT_SQUISH_OUT_SPEED) or DEFAULT_SQUISH_OUT_SPEED
+	local centerFollowSpeed = tonumber((currentPet and currentPet:GetAttribute("ShowerSquishCenterFollowSpeed")) or DEFAULT_SQUISH_CENTER_FOLLOW_SPEED) or DEFAULT_SQUISH_CENTER_FOLLOW_SPEED
+	inSpeed = math.clamp(inSpeed, 1, 80)
+	outSpeed = math.clamp(outSpeed, 1, 80)
+	centerFollowSpeed = math.clamp(centerFollowSpeed, 1, 80)
+	local inAlpha = 1 - math.exp(-dt * inSpeed)
+	local outAlpha = 1 - math.exp(-dt * outSpeed)
+	local blendAlpha = targetCompression > rig.outerCompression and inAlpha or outAlpha
+
+	rig.outerCompression += (targetCompression - rig.outerCompression) * blendAlpha
+	rig.centerCompression += ((rig.outerCompression * 0.58) - rig.centerCompression) * (1 - math.exp(-dt * centerFollowSpeed))
+
+	local normal = targetSurfaceNormal
+	if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
+		normal = Vector3.new(0, 1, 0)
+	else
+		normal = normal.Unit
+	end
+	local centerPush = -normal * (rig.centerCompression * 1.05)
+	local centerWeight = SQUISH_CENTER_MAX_WEIGHT
+	if typeof(targetSurfacePos) == "Vector3" and rig.centerBone then
+		local centerDistance = (rig.centerBone.WorldPosition - targetSurfacePos).Magnitude
+		local centerNormalized = math.clamp(centerDistance / SQUISH_CONTACT_MAX_DISTANCE, 0, 1)
+		centerWeight = SQUISH_CENTER_MAX_WEIGHT * ((1 - centerNormalized) * (1 - centerNormalized))
+	end
+	centerPush *= centerWeight
+
+	local centerBone = rig.centerBone
+	local centerBase = rig.originalTransforms[centerBone]
+	if centerBone and centerBase then
+		centerBone.Transform = centerBase * CFrame.new(centerPush)
+	end
+
+	for _, bone in ipairs(rig.outerBones) do
+		local base = rig.originalTransforms[bone]
+		if base then
+			local centerWorld = (rig.centerBone and rig.centerBone.WorldPosition) or rig.centerWorldPos or bone.WorldPosition
+			local delta = bone.WorldPosition - centerWorld
+			local dir = delta.Magnitude > 1e-4 and delta.Unit or Vector3.new(1, 0, 0)
+			local facing = math.clamp(dir:Dot(normal), -1, 1)
+			local compressWeight = math.max(0, facing)
+			local sideWeight = 1 - compressWeight
+			local distanceWeight = 1
+			if typeof(targetSurfacePos) == "Vector3" then
+				local distance = (bone.WorldPosition - targetSurfacePos).Magnitude
+				local normalized = math.clamp(distance / SQUISH_CONTACT_MAX_DISTANCE, 0, 1)
+				-- Quadratic falloff: near bones react strongly, far bones barely move.
+				distanceWeight = math.max(SQUISH_FAR_BONE_MIN_WEIGHT, (1 - normalized) * (1 - normalized))
+			end
+			local weightedCompression = rig.outerCompression * distanceWeight
+			-- Inward push for bones facing contact normal + slight lateral swell for side bones.
+			local inward = -dir * (weightedCompression * (0.9 + (compressWeight * 1.35)))
+			local lateral = dir * (weightedCompression * 0.25 * sideWeight)
+			local axisPush = inward + lateral
+			local localHit = targetSurfacePos and bone.CFrame:PointToObjectSpace(targetSurfacePos) or Vector3.zero
+			local tiltX = math.clamp(-localHit.Z * 0.016 * weightedCompression, -0.18, 0.18)
+			local tiltZ = math.clamp(localHit.X * 0.016 * weightedCompression, -0.18, 0.18)
+			bone.Transform = base * CFrame.new(axisPush) * CFrame.Angles(tiltX, 0, tiltZ)
+		end
+	end
+end
 
 local function clearCameraFollow()
 	if cameraConn then
@@ -688,11 +873,17 @@ local function applyLocalPetRub(targetSurfacePos, targetSurfaceNormal, isTouchin
 		lastLocalRubAt = now
 
 		localPetRubOffset = localPetRubOffset:Lerp(-normal * (0.07 + (0.05 * dragIntensity)), 0.48)
+		local swayPositionStrength = tonumber(currentPet:GetAttribute("ShowerPetSwayPositionStrength")) or DEFAULT_PET_SWAY_POSITION_STRENGTH
+		swayPositionStrength = math.clamp(swayPositionStrength, 0, 2)
+		localPetRubOffset *= swayPositionStrength
 		local petPivot = currentPet:GetPivot()
 		local localHit = petPivot:PointToObjectSpace(targetSurfacePos)
 		local tiltX = math.clamp(-localHit.Z * 0.011, -0.06, 0.06)
 		local tiltZ = math.clamp(localHit.X * 0.011, -0.06, 0.06)
 		localPetRubTilt = localPetRubTilt:Lerp(Vector3.new(tiltX, 0, tiltZ), 0.4)
+		local swayTiltStrength = tonumber(currentPet:GetAttribute("ShowerPetSwayTiltStrength")) or DEFAULT_PET_SWAY_TILT_STRENGTH
+		swayTiltStrength = math.clamp(swayTiltStrength, 0, 2)
+		localPetRubTilt *= swayTiltStrength
 	else
 		lastLocalRubWorldPos = nil
 		lastLocalRubAt = now
@@ -701,6 +892,7 @@ local function applyLocalPetRub(targetSurfacePos, targetSurfaceNormal, isTouchin
 	end
 
 	currentPet:PivotTo(localPetBasePivot * CFrame.new(localPetRubOffset) * CFrame.Angles(localPetRubTilt.X, 0, localPetRubTilt.Z))
+	applyPetSquish(targetSurfacePos, targetSurfaceNormal, isTouchingPet)
 end
 
 local function suppressLocalServerShowerLoop(animationId)
@@ -744,6 +936,7 @@ local function endShowerView()
 	cameraPart = nil
 	controlWall = nil
 	currentPet = nil
+	resetPetSquishRig()
 	gui.Enabled = false
 	exitButton.Visible = false
 end
@@ -931,7 +1124,11 @@ local function startCursorTracking()
 			)
 			local desiredPos = movePoint.hitPet and (worldPos + (normal * toolOffset)) or worldPos
 			if lastLocalToolPos then
-				local smoothness = movePoint.hitPet and 22 or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS
+				local hitSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolHitSmoothness")) or CLIENT_TOOL_MOVE_SMOOTHNESS_HIT) or CLIENT_TOOL_MOVE_SMOOTHNESS_HIT
+				local airSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolAirSmoothness")) or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS) or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS
+				hitSmoothness = math.clamp(hitSmoothness, 1, 80)
+				airSmoothness = math.clamp(airSmoothness, 1, 80)
+				local smoothness = movePoint.hitPet and hitSmoothness or airSmoothness
 				local alpha = 1 - math.exp(-math.clamp(tonumber(dt) or (1 / 60), 0, 0.1) * smoothness)
 				desiredPos = lastLocalToolPos:Lerp(desiredPos, alpha)
 			end
@@ -1099,6 +1296,7 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		controlWall = payload.controlWall
 		currentPet = payload.pet
 		localPetBasePivot = currentPet and currentPet:GetPivot() or nil
+		cachePetSquishRig(currentPet)
 		setupLocalShowerVisuals(payload)
 		task.defer(suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
 		task.delay(0.25, suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
@@ -1139,6 +1337,7 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		pointerScreenPos = nil
 		activeTouch = nil
 		isTouchDragging = false
+		resetPetSquishRig()
 	end
 end)
 
@@ -1146,3 +1345,4 @@ player.CharacterAdded:Connect(function()
 	task.wait(0.2)
 	endShowerView()
 end)
+
