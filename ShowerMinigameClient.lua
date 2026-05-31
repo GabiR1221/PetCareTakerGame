@@ -25,7 +25,7 @@ local CLIENT_TOOL_SURFACE_OFFSET_MAX = 0.4
 local CLIENT_SHOWERHEAD_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
 local CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE = 6
 local CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS = 32
-local CLIENT_TOOL_MOVE_SMOOTHNESS_HIT = 22
+local CLIENT_TOOL_MOVE_SMOOTHNESS_HIT = 27
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
@@ -199,13 +199,13 @@ local showerHeadEffectActive = false
 local showerHeadFixedRight = nil
 local showerHeadFixedUp = nil
 
-local MAX_SQUISH_BONE_COUNT = 20
-local DEFAULT_SQUISH_STRENGTH = 2
-local SQUISH_CONTACT_MAX_DISTANCE = 4
+local MAX_SQUISH_BONE_COUNT = 50
+local DEFAULT_SQUISH_STRENGTH = 2.5
+local SQUISH_CONTACT_MAX_DISTANCE = 2.7
 local SQUISH_FAR_BONE_MIN_WEIGHT = 0.1
 local SQUISH_CENTER_MAX_WEIGHT = 0.35
-local DEFAULT_PET_SWAY_POSITION_STRENGTH = 1
-local DEFAULT_PET_SWAY_TILT_STRENGTH = 1
+local DEFAULT_PET_SWAY_POSITION_STRENGTH = 0.75
+local DEFAULT_PET_SWAY_TILT_STRENGTH = 0.75
 local DEFAULT_SQUISH_IN_SPEED = 26
 local DEFAULT_SQUISH_OUT_SPEED = 14
 local DEFAULT_SQUISH_CENTER_FOLLOW_SPEED = 18
@@ -302,82 +302,67 @@ end
 
 local function applyPetSquish(targetSurfacePos, targetSurfaceNormal, isTouchingPet)
 	local rig = petSquishRig
-	if not rig then return end
+	if not rig or not rig.centerBone then return end
 	local now = tick()
 	local dt = math.clamp(now - (lastLocalRubAt or now), 1 / 240, 1 / 20)
 	local targetCompression = 0
-	local dragIntensity = 0
 
 	if isTouchingPet and typeof(targetSurfacePos) == "Vector3" then
 		rig.recentContactWorldPos = targetSurfacePos
-		dragIntensity = 0.55
-		if lastLocalRubWorldPos then
-			dragIntensity = math.clamp(((targetSurfacePos - lastLocalRubWorldPos).Magnitude / dt) / 22, 0.35, 1)
-		end
-		targetCompression = math.clamp((0.12 + (0.22 * dragIntensity)) * (rig.squishStrength or 1), 0, 1.2)
+		targetCompression = math.clamp(0.45 * (rig.squishStrength or 1), 0, 2.5)
 	else
 		targetSurfacePos = rig.recentContactWorldPos
 	end
 
-	local inSpeed = tonumber((currentPet and currentPet:GetAttribute("ShowerSquishInSpeed")) or DEFAULT_SQUISH_IN_SPEED) or DEFAULT_SQUISH_IN_SPEED
-	local outSpeed = tonumber((currentPet and currentPet:GetAttribute("ShowerSquishOutSpeed")) or DEFAULT_SQUISH_OUT_SPEED) or DEFAULT_SQUISH_OUT_SPEED
-	local centerFollowSpeed = tonumber((currentPet and currentPet:GetAttribute("ShowerSquishCenterFollowSpeed")) or DEFAULT_SQUISH_CENTER_FOLLOW_SPEED) or DEFAULT_SQUISH_CENTER_FOLLOW_SPEED
-	inSpeed = math.clamp(inSpeed, 1, 80)
-	outSpeed = math.clamp(outSpeed, 1, 80)
-	centerFollowSpeed = math.clamp(centerFollowSpeed, 1, 80)
-	local inAlpha = 1 - math.exp(-dt * inSpeed)
-	local outAlpha = 1 - math.exp(-dt * outSpeed)
+	local inAlpha = 1 - math.exp(-dt * DEFAULT_SQUISH_IN_SPEED)
+	local outAlpha = 1 - math.exp(-dt * DEFAULT_SQUISH_OUT_SPEED)
 	local blendAlpha = targetCompression > rig.outerCompression and inAlpha or outAlpha
-
 	rig.outerCompression += (targetCompression - rig.outerCompression) * blendAlpha
-	rig.centerCompression += ((rig.outerCompression * 0.58) - rig.centerCompression) * (1 - math.exp(-dt * centerFollowSpeed))
 
-	local normal = targetSurfaceNormal
-	if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
-		normal = Vector3.new(0, 1, 0)
-	else
-		normal = normal.Unit
-	end
-	local centerPush = -normal * (rig.centerCompression * 1.05)
-	local centerWeight = SQUISH_CENTER_MAX_WEIGHT
-	if typeof(targetSurfacePos) == "Vector3" and rig.centerBone then
-		local centerDistance = (rig.centerBone.WorldPosition - targetSurfacePos).Magnitude
-		local centerNormalized = math.clamp(centerDistance / SQUISH_CONTACT_MAX_DISTANCE, 0, 1)
-		centerWeight = SQUISH_CENTER_MAX_WEIGHT * ((1 - centerNormalized) * (1 - centerNormalized))
-	end
-	centerPush *= centerWeight
+	-- Păstrăm osul central nemișcat
+	rig.centerBone.Transform = rig.originalTransforms[rig.centerBone]
 
-	local centerBone = rig.centerBone
-	local centerBase = rig.originalTransforms[centerBone]
-	if centerBone and centerBase then
-		centerBone.Transform = centerBase * CFrame.new(centerPush)
+	local petCenter = rig.centerBone.WorldPosition
+
+	local hitDir = Vector3.zero
+	if targetSurfacePos then
+		hitDir = (targetSurfacePos - petCenter).Unit
 	end
 
 	for _, bone in ipairs(rig.outerBones) do
 		local base = rig.originalTransforms[bone]
 		if base then
-			local centerWorld = (rig.centerBone and rig.centerBone.WorldPosition) or rig.centerWorldPos or bone.WorldPosition
-			local delta = bone.WorldPosition - centerWorld
-			local dir = delta.Magnitude > 1e-4 and delta.Unit or Vector3.new(1, 0, 0)
-			local facing = math.clamp(dir:Dot(normal), -1, 1)
-			local compressWeight = math.max(0, facing)
-			local sideWeight = 1 - compressWeight
-			local distanceWeight = 1
-			if typeof(targetSurfacePos) == "Vector3" then
-				local distance = (bone.WorldPosition - targetSurfacePos).Magnitude
-				local normalized = math.clamp(distance / SQUISH_CONTACT_MAX_DISTANCE, 0, 1)
-				-- Quadratic falloff: near bones react strongly, far bones barely move.
-				distanceWeight = math.max(SQUISH_FAR_BONE_MIN_WEIGHT, (1 - normalized) * (1 - normalized))
+			local bonePos = bone.WorldPosition
+			local weight = 0
+			local boneDir = (bonePos - petCenter).Unit
+
+			-- VERIFICAREA NOUĂ: Calculăm distanța și direcția DOAR dacă avem o poziție de contact
+			if targetSurfacePos then
+				
+				local distToHit = (bonePos - targetSurfacePos).Magnitude
+
+				if distToHit < SQUISH_CONTACT_MAX_DISTANCE then
+					weight = 1 - (distToHit / SQUISH_CONTACT_MAX_DISTANCE)
+					weight = weight * weight -- Efect localizat mai agresiv
+				end
+
+				local sideDot = 0
+				if hitDir ~= Vector3.zero then
+					sideDot = boneDir:Dot(hitDir)
+				end
+
+				if sideDot > 0 then
+					weight = weight * sideDot
+				else
+					weight = 0
+				end
 			end
-			local weightedCompression = rig.outerCompression * distanceWeight
-			-- Inward push for bones facing contact normal + slight lateral swell for side bones.
-			local inward = -dir * (weightedCompression * (0.9 + (compressWeight * 1.35)))
-			local lateral = dir * (weightedCompression * 0.25 * sideWeight)
-			local axisPush = inward + lateral
-			local localHit = targetSurfacePos and bone.CFrame:PointToObjectSpace(targetSurfacePos) or Vector3.zero
-			local tiltX = math.clamp(-localHit.Z * 0.016 * weightedCompression, -0.18, 0.18)
-			local tiltZ = math.clamp(localHit.X * 0.016 * weightedCompression, -0.18, 0.18)
-			bone.Transform = base * CFrame.new(axisPush) * CFrame.Angles(tiltX, 0, tiltZ)
+
+			local compression = rig.outerCompression * weight
+			local inwardDisplacement = -boneDir * compression
+			local localDisp = bone.CFrame:VectorToObjectSpace(inwardDisplacement)
+
+			bone.Transform = base * CFrame.new(localDisp)
 		end
 	end
 end
