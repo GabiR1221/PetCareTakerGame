@@ -295,6 +295,71 @@ function ShowerDryerManager:_getDirtPartsForPet(pet)
 	return dirtParts
 end
 
+local DIRT_DECAL_NAME_MARKERS = { "dirt", "dirty", "mud", "stain", "grime", "soil" }
+local DIRT_DECAL_EXCLUDE_MARKERS = { "face", "eye", "mouth", "smile", "cheek", "blush", "sad", "happy" }
+
+local function nameHasAnyMarker(inst, markers)
+	local name = string.lower(tostring((inst and inst.Name) or ""))
+	for _, marker in ipairs(markers) do
+		if string.find(name, marker, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function hierarchyHasAnyNameMarker(inst, markers)
+	local current = inst
+	while current do
+		if nameHasAnyMarker(current, markers) then
+			return true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+function ShowerDryerManager:_getDirtDecalsForPet(pet, dirtParts)
+	local dirtDecals = {}
+	if not pet or not pet:IsA("Model") then return dirtDecals end
+
+	local dirtFolder = pet:FindFirstChild("Dirt")
+	local allDecals = {}
+	local explicitDecals = {}
+	for _, item in ipairs(pet:GetDescendants()) do
+		if item:IsA("Decal") or item:IsA("Texture") then
+			table.insert(allDecals, item)
+			local isInDirtFolder = dirtFolder and item:IsDescendantOf(dirtFolder)
+			local isMarked = item:GetAttribute("ShowerDirt") == true or item:GetAttribute("IsDirt") == true or item:GetAttribute("CleanInShower") == true
+			local hasDirtName = hierarchyHasAnyNameMarker(item, DIRT_DECAL_NAME_MARKERS)
+			local isCosmetic = nameHasAnyMarker(item, DIRT_DECAL_EXCLUDE_MARKERS)
+			if isInDirtFolder or isMarked or (hasDirtName and not isCosmetic) then
+				table.insert(explicitDecals, item)
+			end
+		end
+	end
+
+	if #explicitDecals > 0 then
+		return explicitDecals
+	end
+
+	-- If there are no old dirt parts and no explicitly named/marked dirt decals,
+	-- support pets that were authored with only a few shower dirt decals directly
+	-- under the MeshPart. We still avoid common face/cosmetic decal names.
+	if #(dirtParts or {}) == 0 and #allDecals > 0 and #allDecals <= 12 then
+		for _, decal in ipairs(allDecals) do
+			if not nameHasAnyMarker(decal, DIRT_DECAL_EXCLUDE_MARKERS) then
+				table.insert(dirtDecals, decal)
+			end
+		end
+	end
+
+	return dirtDecals
+end
+
+function ShowerDryerManager:_getSessionDirtVisualCount(session)
+	return #((session and session.dirtParts) or {}) + #((session and session.dirtDecals) or {})
+end
 
 function ShowerDryerManager:_getNearestDirtPart(session, handle)
 	if not session or not handle then return nil end
@@ -453,12 +518,32 @@ function ShowerDryerManager:_updateDirtVisualForSession(session)
 			dirtPart.Transparency = math.clamp(targetTransparency, 0, 1)
 		end
 	end
+
+	local coverageStage1 = session.coverageStage1Progress or 0
+	local coverageStage2 = session.coverageStage2Progress or 0
+	local decalCleanProgress = math.clamp((0.55 * coverageStage1) + (0.45 * coverageStage2), 0, 1)
+	for _, dirtDecal in ipairs(session.dirtDecals or {}) do
+		if dirtDecal and dirtDecal.Parent then
+			local startTransparency = dirtDecal:GetAttribute("ShowerStartTransparency")
+			if startTransparency == nil then
+				startTransparency = dirtDecal.Transparency
+				dirtDecal:SetAttribute("ShowerStartTransparency", startTransparency)
+			end
+			local targetTransparency = startTransparency + ((1 - startTransparency) * decalCleanProgress)
+			dirtDecal.Transparency = math.clamp(targetTransparency, 0, 1)
+		end
+	end
 end
 
 function ShowerDryerManager:_clearDirtSessionAttributes(session)
 	for _, dirtPart in ipairs((session and session.dirtParts) or {}) do
 		if dirtPart and dirtPart.Parent then
 			dirtPart:SetAttribute("ShowerStartTransparency", nil)
+		end
+	end
+	for _, dirtDecal in ipairs((session and session.dirtDecals) or {}) do
+		if dirtDecal and dirtDecal.Parent then
+			dirtDecal:SetAttribute("ShowerStartTransparency", nil)
 		end
 	end
 end
@@ -580,6 +665,109 @@ function ShowerDryerManager:_snapPositionToPetSurface(session, worldPos)
 	end
 
 	return worldPos, Vector3.new(0, 1, 0)
+end
+
+function ShowerDryerManager:_getCoverageCellSize(session)
+	local pet = session and session.pet
+	local value = tonumber(pet and pet:GetAttribute("ShowerCoverageCellSize")) or 0.9
+	return math.clamp(value, 0.35, 3)
+end
+
+function ShowerDryerManager:_getRequiredCoverageCells(session)
+	if not session then return 30 end
+	if session.requiredCoverageCells then return session.requiredCoverageCells end
+	local pet = session.pet
+	local attr = tonumber(pet and pet:GetAttribute("ShowerCoverageRequiredCells"))
+	if attr then
+		session.requiredCoverageCells = math.clamp(math.floor(attr), 8, 160)
+		return session.requiredCoverageCells
+	end
+	local extents = pet and pet:GetExtentsSize() or Vector3.new(6, 4, 6)
+	local areaGuess = math.max(12, (extents.X * extents.Y) + (extents.Y * extents.Z) + (extents.X * extents.Z))
+	local cellSize = self:_getCoverageCellSize(session)
+	session.requiredCoverageCells = math.clamp(math.floor(areaGuess / math.max(cellSize * cellSize * 1.15, 0.1)), 24, 120)
+	return session.requiredCoverageCells
+end
+
+function ShowerDryerManager:_getCoverageKeyAndLocal(session, surfacePos, surfaceNormal)
+	if not session or not session.pet or typeof(surfacePos) ~= "Vector3" then return nil end
+	local pivot = session.serverPetBasePivot or session.pet:GetPivot()
+	local localPos = pivot:PointToObjectSpace(surfacePos)
+	local cellSize = self:_getCoverageCellSize(session)
+	local qx = math.floor((localPos.X / cellSize) + 0.5)
+	local qy = math.floor((localPos.Y / cellSize) + 0.5)
+	local qz = math.floor((localPos.Z / cellSize) + 0.5)
+	local key = tostring(qx) .. ":" .. tostring(qy) .. ":" .. tostring(qz)
+	local normal = surfaceNormal
+	if typeof(normal) ~= "Vector3" or normal.Magnitude < 1e-4 then
+		normal = Vector3.new(0, 1, 0)
+	else
+		normal = normal.Unit
+	end
+	return key, localPos, pivot:VectorToObjectSpace(normal)
+end
+
+function ShowerDryerManager:_findNearestStageOneCoverageKey(session, localPos)
+	if not session or typeof(localPos) ~= "Vector3" then return nil end
+	local stageOneCells = session.coverageStage1Cells or {}
+	local rinsedCells = session.coverageStage2Cells or {}
+	local maxDistance = self:_getCoverageCellSize(session) * 1.55
+	local bestKey = nil
+	local bestDistance = maxDistance
+	for key, cell in pairs(stageOneCells) do
+		if not rinsedCells[key] then
+			local cellPos = cell.localPos
+			if typeof(cellPos) == "Vector3" then
+				local dist = (cellPos - localPos).Magnitude
+				if dist <= bestDistance then
+					bestDistance = dist
+					bestKey = key
+				end
+			end
+		end
+	end
+	return bestKey
+end
+
+function ShowerDryerManager:_sendFoamPatch(session, mode, key, localPos, localNormal)
+	if not self.showerRemote or not session or not session.player or not key then return end
+	self.showerRemote:FireClient(session.player, "FoamPatch", {
+		mode = mode,
+		key = key,
+		localPos = localPos,
+		localNormal = localNormal,
+	})
+end
+
+function ShowerDryerManager:_markCoverage(session, surfacePos, surfaceNormal)
+	local key, localPos, localNormal = self:_getCoverageKeyAndLocal(session, surfacePos, surfaceNormal)
+	if not key then return false end
+	session.coverageStage1Cells = session.coverageStage1Cells or {}
+	session.coverageStage2Cells = session.coverageStage2Cells or {}
+	if session.stage == 1 then
+		if session.coverageStage1Cells[key] then return false end
+		session.coverageStage1Cells[key] = { localPos = localPos, localNormal = localNormal }
+		session.coverageStage1Count = (session.coverageStage1Count or 0) + 1
+		self:_sendFoamPatch(session, "Add", key, localPos, localNormal)
+		return true
+	end
+
+	local rinseKey = self:_findNearestStageOneCoverageKey(session, localPos)
+	if not rinseKey or session.coverageStage2Cells[rinseKey] then return false end
+	session.coverageStage2Cells[rinseKey] = true
+	session.coverageStage2Count = (session.coverageStage2Count or 0) + 1
+	local cell = session.coverageStage1Cells[rinseKey]
+	self:_sendFoamPatch(session, "Clear", rinseKey, cell and cell.localPos or localPos, cell and cell.localNormal or localNormal)
+	return true
+end
+
+function ShowerDryerManager:_getCoverageProgress(session, stage)
+	local required = self:_getRequiredCoverageCells(session)
+	if stage == 1 then
+		return math.clamp((session.coverageStage1Count or 0) / required, 0, 1)
+	end
+	local stageOneCount = math.max(session.coverageStage1Count or 0, 1)
+	return math.clamp((session.coverageStage2Count or 0) / stageOneCount, 0, 1)
 end
 
 function ShowerDryerManager:_startPlayerToolPose(session)
@@ -1366,7 +1554,7 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		return
 	end
 
-	self:_advanceShowerSession(session, 0.065, touchedPart)
+	self:_advanceShowerSession(session, 0.065, touchedPart, targetSurfacePos, targetSurfaceNormal)
 end
 
 function ShowerDryerManager:_handleExitFromClient(player)
@@ -1689,9 +1877,15 @@ function ShowerDryerManager:_clampToWall(session, worldPos)
 	return wall.CFrame:PointToWorldSpace(Vector3.new(x, y, z))
 end
 
-function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart)
+function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart, targetSurfacePos, targetSurfaceNormal)
 	if not session then return end
 	local hasDirtParts = #(session.dirtParts or {}) > 0
+	local usesCoverage = not hasDirtParts
+	local coverageAdvanced = false
+	if usesCoverage then
+		coverageAdvanced = self:_markCoverage(session, targetSurfacePos, targetSurfaceNormal)
+		if not coverageAdvanced then return end
+	end
 	if touchedPart and touchedPart.Parent then
 		local stainState = self:_getStainState(session, touchedPart)
 		if session.stage == 1 then
@@ -1705,7 +1899,8 @@ function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart)
 		if hasDirtParts then
 			session.progress = self:_getStageProgressFromStains(session, 1)
 		else
-			session.progress = math.clamp((session.progress or 0) + amount, 0, 1)
+			session.progress = self:_getCoverageProgress(session, 1)
+			session.coverageStage1Progress = session.progress
 		end
 		local stageOneFloorDirtiness = tonumber(session.stageOneFloorDirtiness) or math.min(46, session.startingDirtiness)
 		local reducedDirt = math.floor(session.startingDirtiness - ((session.startingDirtiness - stageOneFloorDirtiness) * session.progress))
@@ -1739,7 +1934,8 @@ function ShowerDryerManager:_advanceShowerSession(session, amount, touchedPart)
 		if hasDirtParts then
 			session.progress = self:_getStageProgressFromStains(session, 2)
 		else
-			session.progress = math.clamp((session.progress or 0) + amount, 0, 1)
+			session.progress = self:_getCoverageProgress(session, 2)
+			session.coverageStage2Progress = session.progress
 		end
 		self.petState[session.pet] = self.petState[session.pet] or {}
 		local stageOneFloorDirtiness = tonumber(session.stageOneFloorDirtiness) or 46
@@ -1773,6 +1969,7 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 	local showerHeadTool = self:_findObjectNearShower(showerPart, "ShowerHeadPart")
 	local controlWallPart = self:_findPartNearShower(showerPart, "ShowerControlWall")
 	local dirtParts = self:_getDirtPartsForPet(pet)
+	local dirtDecals = self:_getDirtDecalsForPet(pet, dirtParts)
 
 	local session = {
 		player = player,
@@ -1783,6 +1980,7 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 		showerHeadTool = showerHeadTool,
 		controlWallPart = controlWallPart,
 		dirtParts = dirtParts,
+		dirtDecals = dirtDecals,
 		stage = 1,
 		progress = 0,
 		startingDirtiness = math.clamp(tonumber((self.petState[pet] or {}).dirtiness) or 0, 0, 100),
