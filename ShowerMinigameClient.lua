@@ -17,7 +17,7 @@ local DEFAULT_CAMERA_PART_FORWARD_OFFSET = 2
 -- Owner-client local tool tuning. Edit these for how far the local tools sit off
 -- the pet surface and how the showerhead is rotated during rinse mode.
 ---z = y  
-local CLIENT_SPONGE_SURFACE_OFFSET_SCALE = 0.65
+local CLIENT_SPONGE_SURFACE_OFFSET_SCALE = 1.5
 local CLIENT_SPONGE_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
 local CLIENT_SHOWERHEAD_SURFACE_OFFSET_SCALE = 0.65
 local CLIENT_TOOL_SURFACE_OFFSET_MIN = 0.18
@@ -26,6 +26,17 @@ local CLIENT_SHOWERHEAD_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
 local CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE = 6
 local CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS = 32
 local CLIENT_TOOL_MOVE_SMOOTHNESS_HIT = 27
+local CLIENT_TOOL_SURFACE_SMOOTHNESS_HIT = 18
+local CLIENT_TOOL_NORMAL_SMOOTHNESS_HIT = 12
+local CLIENT_TOOL_MAX_SURFACE_STEP = 0.9
+local CLIENT_TOOL_CONTROL_WALL_PADDING = 0.08
+local CLIENT_TOOL_RECENT_SURFACE_GRACE = 0.35
+local CLIENT_TOOL_SURFACE_RAY_STICK_RADIUS = 1.25
+local CLIENT_TOOL_MIN_SURFACE_CLEARANCE = 0.08
+local CLIENT_TOOL_SURFACE_RAY_STICK_MAX_AGE = 0.65
+local LOCAL_FOAM_PATCH_SIZE = 0.85
+local LOCAL_FOAM_PATCH_TRANSPARENCY = 0.28
+
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
@@ -181,7 +192,10 @@ local localShowerHeadOriginal = nil
 local originalVisualSnapshots = {}
 local lastLocalToolPos = nil
 local lastLocalToolNormal = nil
+local lastLocalSurfaceHitAt = nil
 local lastLocalToolRight = nil
+local lastLocalSurfacePos = nil
+local lastLocalSurfaceNormal = nil
 local lastLocalToolHitPet = false
 local localArmPose = nil
 local localCharacterTransparencySnapshots = {}
@@ -198,12 +212,25 @@ local spongeRubbingActive = false
 local showerHeadEffectActive = false
 local showerHeadFixedRight = nil
 local showerHeadFixedUp = nil
+local localFoamPatches = {}
+local localFoamUpdateConn = nil
 
 local MAX_SQUISH_BONE_COUNT = 50
 local DEFAULT_SQUISH_STRENGTH = 2.5
+-- Squish tuning can also be overridden per pet model with attributes:
+-- ShowerSquishStrength: total dent depth. Raise for stronger squash, lower if the pet caves in too much.
+-- ShowerSquishRadius: world-space radius around the brush/shower hit that is affected. Raise for bigger pets/bones farther apart.
+-- ShowerSquishFalloffPower: higher values make the dent tighter around the hit point; lower values spread it out.
+-- ShowerSquishSurfaceFollow: how much the visible tool follows the deformed surface so it does not float/clip.
+-- ShowerToolSurfaceSmoothness / ShowerToolNormalSmoothness: raise to make the tool react faster; lower to reduce bumpy-mesh jitter.
+-- ShowerToolMaxSurfaceStep: maximum per-frame visual surface jump; lower if forehead/face bumps still make the sponge pop.
+-- ShowerToolRecentSurfaceGrace: keeps the local tool on the last valid pet surface for short raycast misses instead of snapping to the control wall.
+-- ShowerToolSurfaceRayStickRadius: if the cursor ray is still near the last pet surface, keep the local sponge there during raycast misses.
+-- ShowerToolMinSurfaceClearance: minimum visible gap from the original pet surface after squish-follow, preventing the tool from being pulled through the pet/wall.
+-- ShowerToolSurfaceRayStickMaxAge: hard timeout for ray-stick fallback so the sponge cannot get stuck.
 local SQUISH_CONTACT_MAX_DISTANCE = 2.7
-local SQUISH_FAR_BONE_MIN_WEIGHT = 0.1
-local SQUISH_CENTER_MAX_WEIGHT = 0.35
+local DEFAULT_SQUISH_FALLOFF_POWER = 1.7
+local DEFAULT_SQUISH_SURFACE_FOLLOW = 0.9
 local DEFAULT_PET_SWAY_POSITION_STRENGTH = 0.75
 local DEFAULT_PET_SWAY_TILT_STRENGTH = 0.75
 local DEFAULT_SQUISH_IN_SPEED = 26
@@ -218,6 +245,22 @@ local CENTER_BONE_NAMES = {
 
 local function lowerName(value)
 	return string.lower(tostring(value or ""))
+end
+
+local function getSafeUnit(vector, fallback)
+	if typeof(vector) == "Vector3" and vector.Magnitude > 1e-4 then
+		return vector.Unit
+	end
+	if typeof(fallback) == "Vector3" and fallback.Magnitude > 1e-4 then
+		return fallback.Unit
+	end
+	return Vector3.new(0, 1, 0)
+end
+
+local function getPetNumberAttribute(petModel, name, defaultValue, minValue, maxValue)
+	local value = petModel and petModel:GetAttribute(name)
+	value = tonumber(value) or defaultValue
+	return math.clamp(value, minValue, maxValue)
 end
 
 local function resetPetSquishRig()
@@ -283,21 +326,130 @@ local function cachePetSquishRig(petModel)
 
 	local originalTransforms = {}
 	originalTransforms[centerBone] = centerBone.Transform
+	local originalCenterWorldPos = centerBone.WorldPosition
+	local originalCenterWorldCFrame = centerBone.WorldCFrame
+	local outerBoneData = {}
 	for _, bone in ipairs(outerBones) do
+		local originalWorldPos = bone.WorldPosition
+		local fromCenter = originalWorldPos - originalCenterWorldPos
 		originalTransforms[bone] = bone.Transform
+		outerBoneData[bone] = {
+			centerLocalCFrame = originalCenterWorldCFrame:ToObjectSpace(bone.WorldCFrame),
+			centerLocalPosition = originalCenterWorldCFrame:PointToObjectSpace(originalWorldPos),
+			restWorldCFrame = bone.WorldCFrame,
+			restWorldPos = originalWorldPos,
+			restDirFromCenter = getSafeUnit(fromCenter, Vector3.new(0, 1, 0)),
+			originalDistanceFromCenter = fromCenter.Magnitude,
+		}
 	end
 
 	petSquishRig = {
 		centerBone = centerBone,
 		outerBones = outerBones,
+		outerBoneData = outerBoneData,
 		originalTransforms = originalTransforms,
 		centerCompression = 0,
 		outerCompression = 0,
-		centerWorldPos = centerBone.WorldPosition,
+		centerWorldPos = originalCenterWorldPos,
+		centerWorldCFrame = originalCenterWorldCFrame,
 		squishStrength = squishStrength,
+		squishRadius = getPetNumberAttribute(petModel, "ShowerSquishRadius", SQUISH_CONTACT_MAX_DISTANCE, 0.5, 12),
+		squishFalloffPower = getPetNumberAttribute(petModel, "ShowerSquishFalloffPower", DEFAULT_SQUISH_FALLOFF_POWER, 0.5, 5),
+		squishSurfaceFollow = getPetNumberAttribute(petModel, "ShowerSquishSurfaceFollow", DEFAULT_SQUISH_SURFACE_FOLLOW, 0, 1.4),
 		recentContactWorldPos = nil,
+		recentContactNormal = nil,
 	}
 	return petSquishRig
+end
+
+local function getPetSquishTargetCompression(rig, isTouchingPet)
+	if isTouchingPet then
+		return math.clamp(0.45 * (rig.squishStrength or 1), 0, 2.5)
+	end
+	return 0
+end
+
+local function updatePetSquishRestPose(rig)
+	if not rig or not rig.centerBone then return end
+	rig.centerWorldPos = rig.centerBone.WorldPosition
+	rig.centerWorldCFrame = rig.centerBone.WorldCFrame
+	for _, bone in ipairs(rig.outerBones) do
+		local boneData = rig.outerBoneData and rig.outerBoneData[bone]
+		if boneData and boneData.centerLocalCFrame then
+			local restWorldCFrame = rig.centerWorldCFrame * boneData.centerLocalCFrame
+			local restWorldPos = restWorldCFrame.Position
+			boneData.restWorldCFrame = restWorldCFrame
+			boneData.restWorldPos = restWorldPos
+			boneData.restDirFromCenter = getSafeUnit(restWorldPos - rig.centerWorldPos, boneData.restDirFromCenter)
+		elseif boneData and boneData.centerLocalPosition then
+			local restWorldPos = rig.centerWorldCFrame:PointToWorldSpace(boneData.centerLocalPosition)
+			boneData.restWorldPos = restWorldPos
+			boneData.restDirFromCenter = getSafeUnit(restWorldPos - rig.centerWorldPos, boneData.restDirFromCenter)
+		end
+	end
+end
+
+local function getPetSquishHitFrame(rig, targetSurfacePos, targetSurfaceNormal)
+	local petCenter = (rig and rig.centerWorldPos) or Vector3.zero
+	local outward = nil
+	if typeof(targetSurfaceNormal) == "Vector3" and targetSurfaceNormal.Magnitude > 1e-4 then
+		outward = targetSurfaceNormal.Unit
+	elseif typeof(targetSurfacePos) == "Vector3" then
+		outward = getSafeUnit(targetSurfacePos - petCenter, Vector3.new(0, 1, 0))
+	else
+		outward = Vector3.new(0, 1, 0)
+	end
+	local hitDir = outward
+	if typeof(targetSurfacePos) == "Vector3" then
+		hitDir = getSafeUnit(targetSurfacePos - petCenter, outward)
+	end
+	return hitDir, -outward
+end
+
+local function getPetSquishWeight(rig, boneData, targetSurfacePos, hitDir)
+	if not rig or not boneData or typeof(targetSurfacePos) ~= "Vector3" then return 0 end
+	local radius = rig.squishRadius or SQUISH_CONTACT_MAX_DISTANCE
+	local restWorldPos = boneData.restWorldPos or targetSurfacePos
+	local distToHit = (restWorldPos - targetSurfacePos).Magnitude
+	if distToHit >= radius then return 0 end
+
+	local distanceWeight = 1 - (distToHit / radius)
+	local falloffPower = rig.squishFalloffPower or DEFAULT_SQUISH_FALLOFF_POWER
+	distanceWeight = math.pow(math.clamp(distanceWeight, 0, 1), falloffPower)
+
+	-- Only bones on the same side as the contact should move. Using the cached
+	-- rest-pose direction prevents left/right bones from being pushed along their
+	-- already-deformed CFrame, which was the source of sideways stretching.
+	local restDirFromCenter = boneData.restDirFromCenter or Vector3.new(0, 1, 0)
+	local sideWeight = math.clamp(restDirFromCenter:Dot(hitDir), 0, 1)
+	return distanceWeight * sideWeight
+end
+
+local function getSquishedSurfacePosition(targetSurfacePos, targetSurfaceNormal, isTouchingPet, compressionOverride)
+	local rig = petSquishRig
+	if not rig or typeof(targetSurfacePos) ~= "Vector3" then
+		return targetSurfacePos, targetSurfaceNormal
+	end
+	local compression = compressionOverride
+	if compression == nil then
+		compression = rig.outerCompression or 0
+	end
+	if not isTouchingPet or compression <= 0 then
+		return targetSurfacePos, targetSurfaceNormal
+	end
+
+	updatePetSquishRestPose(rig)
+	local hitDir, inward = getPetSquishHitFrame(rig, targetSurfacePos, targetSurfaceNormal)
+	local strongestWeight = 0
+	for _, bone in ipairs(rig.outerBones) do
+		local weight = getPetSquishWeight(rig, rig.outerBoneData and rig.outerBoneData[bone], targetSurfacePos, hitDir)
+		if weight > strongestWeight then
+			strongestWeight = weight
+		end
+	end
+	local follow = rig.squishSurfaceFollow or DEFAULT_SQUISH_SURFACE_FOLLOW
+	local visualOffset = inward * compression * strongestWeight * follow
+	return targetSurfacePos + visualOffset, targetSurfaceNormal
 end
 
 local function applyPetSquish(targetSurfacePos, targetSurfaceNormal, isTouchingPet)
@@ -309,9 +461,11 @@ local function applyPetSquish(targetSurfacePos, targetSurfaceNormal, isTouchingP
 
 	if isTouchingPet and typeof(targetSurfacePos) == "Vector3" then
 		rig.recentContactWorldPos = targetSurfacePos
-		targetCompression = math.clamp(0.45 * (rig.squishStrength or 1), 0, 2.5)
+		rig.recentContactNormal = targetSurfaceNormal
+		targetCompression = getPetSquishTargetCompression(rig, true)
 	else
 		targetSurfacePos = rig.recentContactWorldPos
+		targetSurfaceNormal = rig.recentContactNormal
 	end
 
 	local inAlpha = 1 - math.exp(-dt * DEFAULT_SQUISH_IN_SPEED)
@@ -319,49 +473,35 @@ local function applyPetSquish(targetSurfacePos, targetSurfaceNormal, isTouchingP
 	local blendAlpha = targetCompression > rig.outerCompression and inAlpha or outAlpha
 	rig.outerCompression += (targetCompression - rig.outerCompression) * blendAlpha
 
-	-- Păstrăm osul central nemișcat
+	-- Keep the center/root bone stable so deformation is an inward dent instead
+	-- of a whole-rig translation.
 	rig.centerBone.Transform = rig.originalTransforms[rig.centerBone]
 
-	local petCenter = rig.centerBone.WorldPosition
-
-	local hitDir = Vector3.zero
-	if targetSurfacePos then
-		hitDir = (targetSurfacePos - petCenter).Unit
+	if typeof(targetSurfacePos) ~= "Vector3" then
+		for _, bone in ipairs(rig.outerBones) do
+			local base = rig.originalTransforms[bone]
+			if base then
+				bone.Transform = base
+			end
+		end
+		return
 	end
 
+	updatePetSquishRestPose(rig)
+	local hitDir, inward = getPetSquishHitFrame(rig, targetSurfacePos, targetSurfaceNormal)
 	for _, bone in ipairs(rig.outerBones) do
 		local base = rig.originalTransforms[bone]
-		if base then
-			local bonePos = bone.WorldPosition
-			local weight = 0
-			local boneDir = (bonePos - petCenter).Unit
-
-			-- VERIFICAREA NOUĂ: Calculăm distanța și direcția DOAR dacă avem o poziție de contact
-			if targetSurfacePos then
-				
-				local distToHit = (bonePos - targetSurfacePos).Magnitude
-
-				if distToHit < SQUISH_CONTACT_MAX_DISTANCE then
-					weight = 1 - (distToHit / SQUISH_CONTACT_MAX_DISTANCE)
-					weight = weight * weight -- Efect localizat mai agresiv
-				end
-
-				local sideDot = 0
-				if hitDir ~= Vector3.zero then
-					sideDot = boneDir:Dot(hitDir)
-				end
-
-				if sideDot > 0 then
-					weight = weight * sideDot
-				else
-					weight = 0
-				end
-			end
-
+		local boneData = rig.outerBoneData and rig.outerBoneData[bone]
+		if base and boneData then
+			local weight = getPetSquishWeight(rig, boneData, targetSurfacePos, hitDir)
 			local compression = rig.outerCompression * weight
-			local inwardDisplacement = -boneDir * compression
-			local localDisp = bone.CFrame:VectorToObjectSpace(inwardDisplacement)
+			local inwardDisplacement = inward * compression
+			local restWorldCFrame = boneData.restWorldCFrame or bone.WorldCFrame
+			local localDisp = restWorldCFrame:VectorToObjectSpace(inwardDisplacement)
 
+			-- Bone.Transform translation is evaluated in the bone's own rest/world
+			-- frame, so convert the inward world-space dent to that frame. This keeps
+			-- a front-face press moving away from the camera instead of bulging out.
 			bone.Transform = base * CFrame.new(localDisp)
 		end
 	end
@@ -666,7 +806,96 @@ local function updateLocalArmPose(toolWorldPos, toolNormal)
 	localArmPose.targetPart.CFrame = CFrame.lookAt(targetPos, targetPos + normal.Unit)
 end
 
+local function getLocalFoamCFrame(localPos, localNormal)
+	if not currentPet or not currentPet.Parent or typeof(localPos) ~= "Vector3" then
+		return nil
+	end
+	local petPivot = currentPet:GetPivot()
+	local worldPos = petPivot:PointToWorldSpace(localPos)
+	local worldNormal = petPivot:VectorToWorldSpace(getSafeUnit(localNormal, Vector3.new(0, 1, 0)))
+	worldNormal = getSafeUnit(worldNormal, Vector3.new(0, 1, 0))
+	local cameraRight = camera and camera.CFrame.RightVector or Vector3.new(1, 0, 0)
+	local tangent = cameraRight - (worldNormal * cameraRight:Dot(worldNormal))
+	if tangent.Magnitude < 1e-4 then
+		tangent = Vector3.new(0, 1, 0):Cross(worldNormal)
+	end
+	if tangent.Magnitude < 1e-4 then
+		tangent = Vector3.new(1, 0, 0):Cross(worldNormal)
+	end
+	tangent = tangent.Unit
+	-- Cylinder parts are thick along local X, so use the surface normal as X to
+	-- make the circular face lie flat on the pet surface.
+	return CFrame.fromMatrix(worldPos + (worldNormal * 0.035), worldNormal, tangent)
+end
+
+local function clearLocalFoamPatches()
+	if localFoamUpdateConn then
+		localFoamUpdateConn:Disconnect()
+		localFoamUpdateConn = nil
+	end
+	for _, patch in pairs(localFoamPatches) do
+		if patch.part then
+			pcall(function() patch.part:Destroy() end)
+		end
+	end
+	localFoamPatches = {}
+end
+
+local function ensureLocalFoamUpdater()
+	if localFoamUpdateConn then return end
+	localFoamUpdateConn = RunService.RenderStepped:Connect(function()
+		if not gui.Enabled or not currentPet or not currentPet.Parent then return end
+		for _, patch in pairs(localFoamPatches) do
+			if patch.part and patch.part.Parent then
+				local cf = getLocalFoamCFrame(patch.localPos, patch.localNormal)
+				if cf then
+					patch.part.CFrame = cf
+				end
+			end
+		end
+	end)
+end
+
+local function addLocalFoamPatch(key, localPos, localNormal)
+	if not key or typeof(localPos) ~= "Vector3" then return end
+	local existing = localFoamPatches[key]
+	if existing and existing.part then return end
+	local cf = getLocalFoamCFrame(localPos, localNormal)
+	if not cf then return end
+	local foam = Instance.new("Part")
+	foam.Name = "LocalShowerFoamPatch"
+	foam.Anchored = true
+	foam.CanCollide = false
+	foam.CanQuery = false
+	foam.CanTouch = false
+	foam.CastShadow = false
+	foam.Material = Enum.Material.SmoothPlastic
+	foam.Color = Color3.fromRGB(245, 255, 255)
+	foam.Transparency = LOCAL_FOAM_PATCH_TRANSPARENCY
+	foam.Shape = Enum.PartType.Cylinder
+	foam.Size = Vector3.new(0.035, LOCAL_FOAM_PATCH_SIZE, LOCAL_FOAM_PATCH_SIZE)
+	foam.CFrame = cf
+	foam.Parent = workspace.CurrentCamera or workspace
+	localFoamPatches[key] = { part = foam, localPos = localPos, localNormal = localNormal }
+	ensureLocalFoamUpdater()
+end
+
+local function clearLocalFoamPatch(key)
+	local patch = key and localFoamPatches[key]
+	if not patch then return end
+	localFoamPatches[key] = nil
+	if patch.part then
+		local part = patch.part
+		local tween = TweenService:Create(part, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 1 })
+		tween:Play()
+		task.delay(0.15, function()
+			if part and part.Parent then part:Destroy() end
+		end)
+	end
+end
+
 local function cleanupLocalShowerVisuals()
+	clearLocalFoamPatches()
 	for _, effect in pairs(localToolEffects) do
 		if effect then pcall(function() effect:Destroy() end) end
 	end
@@ -688,7 +917,10 @@ local function cleanupLocalShowerVisuals()
 	originalVisualSnapshots = {}
 	lastLocalToolPos = nil
 	lastLocalToolNormal = nil
+	lastLocalSurfaceHitAt = nil
 	lastLocalToolRight = nil
+	lastLocalSurfacePos = nil
+	lastLocalSurfaceNormal = nil
 	lastLocalToolHitPet = false
 	localPetBasePivot = nil
 	localPetRubOffset = Vector3.zero
@@ -870,7 +1102,10 @@ local function applyLocalPetRub(targetSurfacePos, targetSurfaceNormal, isTouchin
 		swayTiltStrength = math.clamp(swayTiltStrength, 0, 2)
 		localPetRubTilt *= swayTiltStrength
 	else
+		lastLocalSurfacePos = nil
+		lastLocalSurfaceNormal = nil
 		lastLocalRubWorldPos = nil
+		lastLocalSurfaceHitAt = nil
 		lastLocalRubAt = now
 		localPetRubOffset = localPetRubOffset:Lerp(Vector3.zero, 0.22)
 		localPetRubTilt = localPetRubTilt:Lerp(Vector3.zero, 0.18)
@@ -975,15 +1210,33 @@ local function updateBar(progress)
 	percentLabel.Text = ("%d%%"):format(math.floor(progress * 100 + 0.5))
 end
 
+local function getControlWallIntersectionForRay(ray)
+	if not controlWall or not controlWall:IsA("BasePart") then return nil end
+	local wallCf = controlWall.CFrame
+	local normal = wallCf.LookVector
+	local rayDir = ray.Direction.Unit
+	local originToWall = wallCf.Position - ray.Origin
+	local denom = rayDir:Dot(normal)
+	if math.abs(denom) <= 1e-4 then return nil end
+	local distance = originToWall:Dot(normal) / denom
+	if distance <= 0 then return nil end
+	if distance < CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE then
+		distance = CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE
+	end
+	return ray.Origin + (rayDir * distance), normal, distance
+end
+
 local function getMovePoint(screenPos)
 	local x = (screenPos and screenPos.X) or mouse.X
 	local y = (screenPos and screenPos.Y) or mouse.Y
 	local ray = camera:ViewportPointToRay(x, y)
+	local rayDir = ray.Direction.Unit
+	local wallPos, wallNormal, wallDistance = getControlWallIntersectionForRay(ray)
 	if currentPet and currentPet.Parent then
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Include
 		params.FilterDescendantsInstances = {currentPet}
-		local hitPet = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+		local hitPet = workspace:Raycast(ray.Origin, rayDir * 500, params)
 		if hitPet then
 			local surfaceNormal = hitPet.Normal
 			local toCamera = ray.Origin - hitPet.Position
@@ -994,38 +1247,124 @@ local function getMovePoint(screenPos)
 				worldPos = hitPet.Position + (surfaceNormal * 0.02),
 				hitPet = true,
 				surfaceNormal = surfaceNormal,
+				rayOrigin = ray.Origin,
+				rayDirection = rayDir,
+				wallDistance = wallDistance,
 			}
 		end
 	end
 
-	if controlWall and controlWall:IsA("BasePart") then
-		local wallCf = controlWall.CFrame
-		local normal = wallCf.LookVector
-		local originToWall = wallCf.Position - ray.Origin
-		local denom = ray.Direction:Dot(normal)
-		if math.abs(denom) > 1e-4 then
-			local distance = originToWall:Dot(normal) / denom
-			if distance > 0 then
-				local wallPos = ray.Origin + (ray.Direction * distance)
-				local cameraDistance = (wallPos - ray.Origin).Magnitude
-				if cameraDistance < CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE then
-					wallPos = ray.Origin + (ray.Direction.Unit * CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE)
-				end
-				return {
-					worldPos = wallPos,
-					hitPet = false,
-					surfaceNormal = normal,
-				}
-			end
-		end
+	if wallPos then
+		return {
+			worldPos = wallPos,
+			hitPet = false,
+			surfaceNormal = wallNormal,
+			rayOrigin = ray.Origin,
+			rayDirection = rayDir,
+			wallDistance = wallDistance,
+		}
 	end
 
 	local fallbackDistance = CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE
 	return {
-		worldPos = ray.Origin + (ray.Direction.Unit * fallbackDistance),
+		worldPos = ray.Origin + (rayDir * fallbackDistance),
 		hitPet = false,
 		surfaceNormal = camera and camera.CFrame.LookVector or Vector3.new(0, 0, -1),
+		rayOrigin = ray.Origin,
+		rayDirection = rayDir,
+		wallDistance = fallbackDistance,
 	}
+end
+
+local function smoothLocalToolSurface(worldPos, normal, hitPet, dt, refreshHitTime)
+	if not hitPet or typeof(worldPos) ~= "Vector3" then
+		lastLocalSurfacePos = nil
+		lastLocalSurfaceNormal = nil
+		lastLocalSurfaceHitAt = nil
+		return worldPos, normal
+	end
+	local surfaceSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolSurfaceSmoothness")) or CLIENT_TOOL_SURFACE_SMOOTHNESS_HIT) or CLIENT_TOOL_SURFACE_SMOOTHNESS_HIT
+	local normalSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolNormalSmoothness")) or CLIENT_TOOL_NORMAL_SMOOTHNESS_HIT) or CLIENT_TOOL_NORMAL_SMOOTHNESS_HIT
+	local maxSurfaceStep = tonumber((currentPet and currentPet:GetAttribute("ShowerToolMaxSurfaceStep")) or CLIENT_TOOL_MAX_SURFACE_STEP) or CLIENT_TOOL_MAX_SURFACE_STEP
+	surfaceSmoothness = math.clamp(surfaceSmoothness, 1, 80)
+	normalSmoothness = math.clamp(normalSmoothness, 1, 80)
+	maxSurfaceStep = math.clamp(maxSurfaceStep, 0.05, 5)
+
+	local frameDt = math.clamp(tonumber(dt) or (1 / 60), 0, 0.1)
+	local smoothedPos = worldPos
+	if lastLocalSurfacePos then
+		local surfaceAlpha = 1 - math.exp(-frameDt * surfaceSmoothness)
+		smoothedPos = lastLocalSurfacePos:Lerp(worldPos, surfaceAlpha)
+		local step = smoothedPos - lastLocalSurfacePos
+		if step.Magnitude > maxSurfaceStep then
+			smoothedPos = lastLocalSurfacePos + (step.Unit * maxSurfaceStep)
+		end
+	end
+
+	local smoothedNormal = getSafeUnit(normal, lastLocalSurfaceNormal or Vector3.new(0, 1, 0))
+	if lastLocalSurfaceNormal and lastLocalSurfaceNormal.Magnitude > 1e-4 then
+		local targetNormal = smoothedNormal
+		if targetNormal:Dot(lastLocalSurfaceNormal.Unit) < -0.35 then
+			targetNormal = lastLocalSurfaceNormal
+		end
+		local normalAlpha = 1 - math.exp(-frameDt * normalSmoothness)
+		smoothedNormal = getSafeUnit(lastLocalSurfaceNormal:Lerp(targetNormal, normalAlpha), targetNormal)
+	end
+
+	lastLocalSurfacePos = smoothedPos
+	lastLocalSurfaceNormal = smoothedNormal
+	if refreshHitTime then
+		lastLocalSurfaceHitAt = tick()
+	end
+	return smoothedPos, smoothedNormal
+end
+
+local function getRecentLocalSurfaceGrace()
+	local grace = tonumber((currentPet and currentPet:GetAttribute("ShowerToolRecentSurfaceGrace")) or CLIENT_TOOL_RECENT_SURFACE_GRACE) or CLIENT_TOOL_RECENT_SURFACE_GRACE
+	return math.clamp(grace, 0, 0.5)
+end
+
+local function getLocalToolSurfaceRayStickRadius()
+	local radius = tonumber((currentPet and currentPet:GetAttribute("ShowerToolSurfaceRayStickRadius")) or CLIENT_TOOL_SURFACE_RAY_STICK_RADIUS) or CLIENT_TOOL_SURFACE_RAY_STICK_RADIUS
+	return math.clamp(radius, 0, 5)
+end
+
+local function getLocalToolSurfaceRayStickMaxAge()
+	local maxAge = tonumber((currentPet and currentPet:GetAttribute("ShowerToolSurfaceRayStickMaxAge")) or CLIENT_TOOL_SURFACE_RAY_STICK_MAX_AGE) or CLIENT_TOOL_SURFACE_RAY_STICK_MAX_AGE
+	return math.clamp(maxAge, 0, 1.5)
+end
+
+local function getLocalToolMinSurfaceClearance()
+	local clearance = tonumber((currentPet and currentPet:GetAttribute("ShowerToolMinSurfaceClearance")) or CLIENT_TOOL_MIN_SURFACE_CLEARANCE) or CLIENT_TOOL_MIN_SURFACE_CLEARANCE
+	return math.clamp(clearance, 0, CLIENT_TOOL_SURFACE_OFFSET_MAX)
+end
+
+local function keepLocalToolOutsideSurface(desiredPos, surfacePos, surfaceNormal)
+	if typeof(desiredPos) ~= "Vector3" or typeof(surfacePos) ~= "Vector3" then return desiredPos end
+	local normal = getSafeUnit(surfaceNormal, lastLocalSurfaceNormal or Vector3.new(0, 1, 0))
+	local minClearance = getLocalToolMinSurfaceClearance()
+	local clearance = (desiredPos - surfacePos):Dot(normal)
+	if clearance < minClearance then
+		desiredPos += normal * (minClearance - clearance)
+	end
+	return desiredPos
+end
+
+local function clampLocalToolToControlWall(desiredPos, movePoint)
+	if typeof(desiredPos) ~= "Vector3" or not movePoint then return desiredPos end
+	local rayOrigin = movePoint.rayOrigin
+	local rayDirection = movePoint.rayDirection
+	local wallDistance = movePoint.wallDistance
+	if typeof(rayOrigin) ~= "Vector3" or typeof(rayDirection) ~= "Vector3" or not wallDistance then
+		return desiredPos
+	end
+	local rayDir = getSafeUnit(rayDirection, Vector3.new(0, 0, -1))
+	local maxDistance = math.max(CLIENT_CONTROL_WALL_MIN_CAMERA_DISTANCE, wallDistance - CLIENT_TOOL_CONTROL_WALL_PADDING)
+	local desiredDistance = (desiredPos - rayOrigin):Dot(rayDir)
+	if desiredDistance > maxDistance then
+		desiredPos -= rayDir * (desiredDistance - maxDistance)
+	end
+	return desiredPos
 end
 
 local function startCursorTracking()
@@ -1080,6 +1419,31 @@ local function startCursorTracking()
 				normal = lastLocalToolNormal or Vector3.new(0, 1, 0)
 			end
 			normal = normal.Unit
+			local toolSurfacePos = worldPos
+			local visualHitPet = movePoint.hitPet == true
+			if not visualHitPet and activeOriginalTool == localSpongeOriginal and lastLocalSurfacePos then
+				local surfaceAge = lastLocalSurfaceHitAt and (now - lastLocalSurfaceHitAt) or math.huge
+				local recentGrace = getRecentLocalSurfaceGrace()
+				local maxStickAge = getLocalToolSurfaceRayStickMaxAge()
+				local isRecentSurface = surfaceAge <= recentGrace
+				local rayStickRadius = getLocalToolSurfaceRayStickRadius()
+				local rayOrigin = movePoint.rayOrigin
+				local rayDirection = movePoint.rayDirection
+				local isStillAimingAtSurface = false
+				if typeof(rayOrigin) == "Vector3" and typeof(rayDirection) == "Vector3" and rayStickRadius > 0 then
+					local rayDir = getSafeUnit(rayDirection, Vector3.new(0, 0, -1))
+					local toSurface = lastLocalSurfacePos - rayOrigin
+					local closestPoint = rayOrigin + (rayDir * math.max(toSurface:Dot(rayDir), 0))
+					isStillAimingAtSurface = (lastLocalSurfacePos - closestPoint).Magnitude <= rayStickRadius
+				end
+				if isRecentSurface or (isStillAimingAtSurface and surfaceAge <= maxStickAge) then
+					visualHitPet = true
+					toolSurfacePos = lastLocalSurfacePos
+					normal = getSafeUnit(lastLocalSurfaceNormal, normal)
+				end
+			end
+			toolSurfacePos, normal = smoothLocalToolSurface(toolSurfacePos, normal, visualHitPet, dt, movePoint.hitPet == true)
+			local surfaceNormalForClearance = normal
 			if activeOriginalTool == localShowerHeadOriginal and currentStage ~= 1 then
 				if not showerHeadFixedUp then
 					local camCf = camera and camera.CFrame or CFrame.new()
@@ -1087,16 +1451,6 @@ local function startCursorTracking()
 					showerHeadFixedUp = (camCf * CLIENT_SHOWERHEAD_ROTATION_OFFSET).UpVector
 				end
 				normal = showerHeadFixedUp
-			elseif movePoint.hitPet == true and lastLocalToolHitPet and typeof(lastLocalToolNormal) == "Vector3" and lastLocalToolNormal.Magnitude > 1e-4 then
-				local targetNormal = normal
-				if targetNormal:Dot(lastLocalToolNormal.Unit) < -0.35 then
-					targetNormal = lastLocalToolNormal
-				end
-				local normalAlpha = 1 - math.exp(-math.clamp(tonumber(dt) or (1 / 60), 0, 0.1) * 18)
-				normal = lastLocalToolNormal:Lerp(targetNormal, normalAlpha)
-				if normal.Magnitude > 1e-4 then
-					normal = normal.Unit
-				end
 			end
 
 			local offsetScale = (activeOriginalTool == localShowerHeadOriginal and currentStage ~= 1)
@@ -1107,22 +1461,38 @@ local function startCursorTracking()
 				CLIENT_TOOL_SURFACE_OFFSET_MIN,
 				CLIENT_TOOL_SURFACE_OFFSET_MAX
 			)
-			local desiredPos = movePoint.hitPet and (worldPos + (normal * toolOffset)) or worldPos
+			local predictedCompression = petSquishRig and math.max(
+				petSquishRig.outerCompression or 0,
+				getPetSquishTargetCompression(petSquishRig, visualHitPet)
+			) or 0
+			local visualSurfacePos = toolSurfacePos
+			if visualHitPet then
+				visualSurfacePos = getSquishedSurfacePosition(toolSurfacePos, surfaceNormalForClearance, true, predictedCompression)
+			end
+			local desiredPos = visualHitPet and (visualSurfacePos + (normal * toolOffset)) or worldPos
+			if visualHitPet then
+				desiredPos = keepLocalToolOutsideSurface(desiredPos, toolSurfacePos, surfaceNormalForClearance)
+			end
+			desiredPos = clampLocalToolToControlWall(desiredPos, movePoint)
 			if lastLocalToolPos then
 				local hitSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolHitSmoothness")) or CLIENT_TOOL_MOVE_SMOOTHNESS_HIT) or CLIENT_TOOL_MOVE_SMOOTHNESS_HIT
 				local airSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolAirSmoothness")) or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS) or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS
 				hitSmoothness = math.clamp(hitSmoothness, 1, 80)
 				airSmoothness = math.clamp(airSmoothness, 1, 80)
-				local smoothness = movePoint.hitPet and hitSmoothness or airSmoothness
+				local smoothness = visualHitPet and hitSmoothness or airSmoothness
 				local alpha = 1 - math.exp(-math.clamp(tonumber(dt) or (1 / 60), 0, 0.1) * smoothness)
 				desiredPos = lastLocalToolPos:Lerp(desiredPos, alpha)
+				if visualHitPet then
+					desiredPos = keepLocalToolOutsideSurface(desiredPos, toolSurfacePos, surfaceNormalForClearance)
+				end
+				desiredPos = clampLocalToolToControlWall(desiredPos, movePoint)
 			end
 			lastLocalToolPos = desiredPos
 			lastLocalToolNormal = normal
 			lastLocalToolHitPet = movePoint.hitPet == true
 			moveLocalToolToPosition(activeOriginalTool, desiredPos, normal)
-			applyLocalPetRub(worldPos, normal, movePoint.hitPet == true)
-			local spongeActive = (currentStage == 1 and movePoint.hitPet == true)
+			applyLocalPetRub(toolSurfacePos, surfaceNormalForClearance, visualHitPet)
+			local spongeActive = (currentStage == 1 and visualHitPet)
 			if spongeActive ~= spongeRubbingActive then
 				spongeRubbingActive = spongeActive
 				setLocalToolEffectActive(localSpongeOriginal, spongeRubbingActive)
@@ -1302,6 +1672,9 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 		lastLocalToolPos = nil
 		lastLocalToolNormal = nil
 		lastLocalToolRight = nil
+		lastLocalSurfacePos = nil
+		lastLocalSurfaceHitAt = nil
+		lastLocalSurfaceNormal = nil
 		showerHeadFixedRight = nil
 		showerHeadFixedUp = nil
 		updateLocalToolStageVisibility()
@@ -1317,6 +1690,15 @@ showerRemote.OnClientEvent:Connect(function(action, payload)
 			task.delay(0.25, suppressLocalServerShowerLoop, payload.serverLoopAnimationId)
 		end
 		updateBar(payload.progress or 0)
+	elseif action == "FoamPatch" then
+		local key = payload.key and tostring(payload.key) or nil
+		if payload.mode == "Clear" then
+			clearLocalFoamPatch(key)
+		elseif payload.mode == "ClearAll" then
+			clearLocalFoamPatches()
+		else
+			addLocalFoamPatch(key, payload.localPos, payload.localNormal)
+		end
 	elseif action == "End" then
 		endShowerView()
 		pointerScreenPos = nil
