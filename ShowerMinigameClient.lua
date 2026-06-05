@@ -36,7 +36,7 @@ local CLIENT_TOOL_MIN_SURFACE_CLEARANCE = 0.08
 local CLIENT_TOOL_SURFACE_RAY_STICK_MAX_AGE = 0.65
 local LOCAL_FOAM_PATCH_SIZE = 0.85
 local LOCAL_FOAM_PATCH_TRANSPARENCY = 0.28
-
+local LOCAL_FOAM_SURFACE_OFFSET = 0.16
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
@@ -810,10 +810,15 @@ local function getLocalFoamCFrame(localPos, localNormal)
 	if not currentPet or not currentPet.Parent or typeof(localPos) ~= "Vector3" then
 		return nil
 	end
-	local petPivot = currentPet:GetPivot()
-	local worldPos = petPivot:PointToWorldSpace(localPos)
+	local petPivot = localPetBasePivot or currentPet:GetPivot()
+	local baseWorldPos = petPivot:PointToWorldSpace(localPos)
 	local worldNormal = petPivot:VectorToWorldSpace(getSafeUnit(localNormal, Vector3.new(0, 1, 0)))
 	worldNormal = getSafeUnit(worldNormal, Vector3.new(0, 1, 0))
+	local compression = petSquishRig and petSquishRig.outerCompression or 0
+	local squishedWorldPos = getSquishedSurfacePosition(baseWorldPos, worldNormal, compression > 0, compression)
+	local currentPivot = currentPet:GetPivot()
+	local petMotionOffset = currentPivot.Position - petPivot.Position
+	local worldPos = squishedWorldPos + petMotionOffset
 	local cameraRight = camera and camera.CFrame.RightVector or Vector3.new(1, 0, 0)
 	local tangent = cameraRight - (worldNormal * cameraRight:Dot(worldNormal))
 	if tangent.Magnitude < 1e-4 then
@@ -825,7 +830,9 @@ local function getLocalFoamCFrame(localPos, localNormal)
 	tangent = tangent.Unit
 	-- Cylinder parts are thick along local X, so use the surface normal as X to
 	-- make the circular face lie flat on the pet surface.
-	return CFrame.fromMatrix(worldPos + (worldNormal * 0.035), worldNormal, tangent)
+	local foamOffset = tonumber(currentPet:GetAttribute("ShowerFoamSurfaceOffset")) or LOCAL_FOAM_SURFACE_OFFSET
+	foamOffset = math.clamp(foamOffset, 0.04, 0.45)
+	return CFrame.fromMatrix(worldPos + (worldNormal * foamOffset), worldNormal, tangent)
 end
 
 local function clearLocalFoamPatches()
