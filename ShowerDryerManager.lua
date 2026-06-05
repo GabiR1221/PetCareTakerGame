@@ -9,6 +9,10 @@ local SERVER_SPONGE_HAND_OFFSET = CFrame.new(0, 0.5, 0)
 local SERVER_SPONGE_ROTATION_OFFSET = CFrame.Angles(0, 0, 0)
 local SERVER_SHOWERHEAD_HAND_OFFSET = CFrame.new(0, 0.3, 1)
 local SERVER_SHOWERHEAD_ROTATION_OFFSET = CFrame.Angles(math.rad(-25), math.rad(15), 0)
+local DEFAULT_STAIN_PROGRESS_AMOUNT = 0.12
+local DEFAULT_COVERAGE_CELL_SIZE = 1.15
+local DEFAULT_COVERAGE_MIN_CELLS = 16
+local DEFAULT_COVERAGE_MAX_CELLS = 80
 
 local function getShowerEffectNames(actionName)
 	if tostring(actionName or "") == "Place" then
@@ -519,9 +523,15 @@ function ShowerDryerManager:_updateDirtVisualForSession(session)
 		end
 	end
 
-	local coverageStage1 = session.coverageStage1Progress or 0
-	local coverageStage2 = session.coverageStage2Progress or 0
-	local decalCleanProgress = math.clamp((0.55 * coverageStage1) + (0.45 * coverageStage2), 0, 1)
+	local stageOneProgress = session.coverageStage1Progress
+	if stageOneProgress == nil then
+		stageOneProgress = (session.stage == 1) and (session.progress or 0) or 1
+	end
+	local stageTwoProgress = session.coverageStage2Progress
+	if stageTwoProgress == nil then
+		stageTwoProgress = (session.stage == 2) and (session.progress or 0) or 0
+	end
+	local decalCleanProgress = math.clamp((0.55 * stageOneProgress) + (0.45 * stageTwoProgress), 0, 1)
 	for _, dirtDecal in ipairs(session.dirtDecals or {}) do
 		if dirtDecal and dirtDecal.Parent then
 			local startTransparency = dirtDecal:GetAttribute("ShowerStartTransparency")
@@ -669,7 +679,7 @@ end
 
 function ShowerDryerManager:_getCoverageCellSize(session)
 	local pet = session and session.pet
-	local value = tonumber(pet and pet:GetAttribute("ShowerCoverageCellSize")) or 0.9
+	local value = tonumber(pet and pet:GetAttribute("ShowerCoverageCellSize")) or DEFAULT_COVERAGE_CELL_SIZE
 	return math.clamp(value, 0.35, 3)
 end
 
@@ -685,7 +695,7 @@ function ShowerDryerManager:_getRequiredCoverageCells(session)
 	local extents = pet and pet:GetExtentsSize() or Vector3.new(6, 4, 6)
 	local areaGuess = math.max(12, (extents.X * extents.Y) + (extents.Y * extents.Z) + (extents.X * extents.Z))
 	local cellSize = self:_getCoverageCellSize(session)
-	session.requiredCoverageCells = math.clamp(math.floor(areaGuess / math.max(cellSize * cellSize * 1.15, 0.1)), 24, 120)
+	session.requiredCoverageCells = math.clamp(math.floor(areaGuess / math.max(cellSize * cellSize * 1.25, 0.1)), DEFAULT_COVERAGE_MIN_CELLS, DEFAULT_COVERAGE_MAX_CELLS)
 	return session.requiredCoverageCells
 end
 
@@ -1554,7 +1564,9 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		return
 	end
 
-	self:_advanceShowerSession(session, 0.065, touchedPart, targetSurfacePos, targetSurfaceNormal)
+	local progressAmount = tonumber(session.pet and session.pet:GetAttribute("ShowerStainProgressAmount")) or DEFAULT_STAIN_PROGRESS_AMOUNT
+	progressAmount = math.clamp(progressAmount, 0.04, 0.35)
+	self:_advanceShowerSession(session, progressAmount, touchedPart, targetSurfacePos, targetSurfaceNormal)
 end
 
 function ShowerDryerManager:_handleExitFromClient(player)
