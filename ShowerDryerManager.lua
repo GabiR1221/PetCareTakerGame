@@ -323,6 +323,16 @@ local function hierarchyHasAnyNameMarker(inst, markers)
 	return false
 end
 
+local function getDirtTransparencyFromDirtiness(dirtiness)
+	local d = math.clamp(tonumber(dirtiness) or 0, 0, 100)
+	if d <= 10 then
+		return 1
+	end
+	local normalized = (d - 10) / 90
+	local visibilityBoost = normalized ^ 0.6
+	return math.clamp(1 - visibilityBoost, 0, 1)
+end
+
 function ShowerDryerManager:_getDirtDecalsForPet(pet, dirtParts)
 	local dirtDecals = {}
 	if not pet or not pet:IsA("Model") then return dirtDecals end
@@ -337,7 +347,13 @@ function ShowerDryerManager:_getDirtDecalsForPet(pet, dirtParts)
 			local isMarked = item:GetAttribute("ShowerDirt") == true or item:GetAttribute("IsDirt") == true or item:GetAttribute("CleanInShower") == true
 			local hasDirtName = hierarchyHasAnyNameMarker(item, DIRT_DECAL_NAME_MARKERS)
 			local isCosmetic = nameHasAnyMarker(item, DIRT_DECAL_EXCLUDE_MARKERS)
-			if isInDirtFolder or isMarked or (hasDirtName and not isCosmetic) then
+			local parent = item.Parent
+			local wasDetected = item:GetAttribute("DetectedMeshDirtDecal") == true
+			local isHiddenMeshDecal = parent and parent:IsA("BasePart") and item.Transparency >= 0.95 and not isCosmetic
+			if isHiddenMeshDecal then
+				item:SetAttribute("DetectedMeshDirtDecal", true)
+			end
+			if isInDirtFolder or isMarked or wasDetected or (hasDirtName and not isCosmetic) or isHiddenMeshDecal then
 				table.insert(explicitDecals, item)
 			end
 		end
@@ -359,6 +375,33 @@ function ShowerDryerManager:_getDirtDecalsForPet(pet, dirtParts)
 	end
 
 	return dirtDecals
+end
+
+function ShowerDryerManager:_resolveDirtVisualStartTransparency(item, session)
+	if not item or not item.Parent then
+		return 1
+	end
+
+	local currentTransparency = math.clamp(tonumber(item.Transparency) or 0, 0, 1)
+	if currentTransparency < 0.99 then
+		return currentTransparency
+	end
+
+	local baseTransparency = item:GetAttribute("BaseDirtTransparency")
+	if baseTransparency == nil then
+		local configuredBase = item:GetAttribute("DirtyBaseTransparency")
+		if configuredBase ~= nil then
+			baseTransparency = math.clamp(tonumber(configuredBase) or 0, 0, 1)
+		else
+			baseTransparency = 0
+		end
+		item:SetAttribute("BaseDirtTransparency", baseTransparency)
+	else
+		baseTransparency = math.clamp(tonumber(baseTransparency) or 0, 0, 1)
+	end
+
+	local dirtinessTransparency = getDirtTransparencyFromDirtiness(session and session.startingDirtiness)
+	return math.clamp(math.max(baseTransparency, dirtinessTransparency), 0, 1)
 end
 
 function ShowerDryerManager:_getSessionDirtVisualCount(session)
@@ -513,7 +556,7 @@ function ShowerDryerManager:_updateDirtVisualForSession(session)
 		if dirtPart and dirtPart.Parent then
 			local startTransparency = dirtPart:GetAttribute("ShowerStartTransparency")
 			if startTransparency == nil then
-				startTransparency = dirtPart.Transparency
+				startTransparency = self:_resolveDirtVisualStartTransparency(dirtPart, session)
 				dirtPart:SetAttribute("ShowerStartTransparency", startTransparency)
 			end
 			local stainState = self:_getStainState(session, dirtPart)
@@ -536,7 +579,7 @@ function ShowerDryerManager:_updateDirtVisualForSession(session)
 		if dirtDecal and dirtDecal.Parent then
 			local startTransparency = dirtDecal:GetAttribute("ShowerStartTransparency")
 			if startTransparency == nil then
-				startTransparency = dirtDecal.Transparency
+				startTransparency = self:_resolveDirtVisualStartTransparency(dirtDecal, session)
 				dirtDecal:SetAttribute("ShowerStartTransparency", startTransparency)
 			end
 			local targetTransparency = startTransparency + ((1 - startTransparency) * decalCleanProgress)
@@ -1484,14 +1527,16 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	local worldPos = payload.worldPos
 	if typeof(worldPos) ~= "Vector3" then return end
 	if worldPos.X ~= worldPos.X or worldPos.Y ~= worldPos.Y or worldPos.Z ~= worldPos.Z then return end
+	local clientHitPet = payload.hitPet == true
 
 	local activeTool = (session.stage == 1) and session.spongeTool or session.showerHeadTool
 	if not activeTool then return end
 
 	local clientClampedPos = self:_clampToWall(session, worldPos)
+	local validationPos = clientHitPet and worldPos or clientClampedPos
 
 	if session.showerPart and session.showerPart:IsA("BasePart") then
-		local showerDistance = (clientClampedPos - session.showerPart.Position).Magnitude
+		local showerDistance = (validationPos - session.showerPart.Position).Magnitude
 		if showerDistance > 20 then
 			return
 		end
@@ -1501,17 +1546,17 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 	local lastMoveAt = session.lastClientMoveAt
 	if session.lastClientMovePos and lastMoveAt then
 		local dt = math.max(nowForMove - lastMoveAt, 1 / 240)
-		local speed = (clientClampedPos - session.lastClientMovePos).Magnitude / dt
+		local speed = (validationPos - session.lastClientMovePos).Magnitude / dt
 		if speed > 180 then
 			session.lastClientMoveAt = nowForMove
-			session.lastClientMovePos = clientClampedPos
+			session.lastClientMovePos = validationPos
 			return
 		end
 	end
 	session.lastClientMoveAt = nowForMove
-	session.lastClientMovePos = clientClampedPos
+	session.lastClientMovePos = validationPos
 
-	local serverContactPos = self:_mapClientPresentedPointToServerPet(session, clientClampedPos)
+	local serverContactPos = self:_mapClientPresentedPointToServerPet(session, validationPos)
 	local surfacePos, surfaceNormal = self:_snapPositionToPetSurface(session, serverContactPos)
 	if typeof(surfacePos) ~= "Vector3" then return end
 	if typeof(surfaceNormal) ~= "Vector3" or surfaceNormal.Magnitude < 1e-4 then
@@ -1528,7 +1573,6 @@ function ShowerDryerManager:_handleToolMoveFromClient(player, payload)
 		useSnappedSurface = snapDistance <= snapEnterDistance
 	end
 	session.surfaceSnapActive = useSnappedSurface
-	local clientHitPet = payload.hitPet == true
 	if not useSnappedSurface or not clientHitPet then
 		return
 	end
@@ -2010,6 +2054,7 @@ function ShowerDryerManager:_startShowerMinigame(player, pet, showerPart)
 	self.activeShowerSessions[player.UserId] = session
 	self:_startPlayerShowerStance(session)
 	self:_bindPetToShowerWeld(session)
+	self:_updateDirtVisualForSession(session)
 	-- Server now shows a lightweight looping shower animation for other players.
 	-- The detailed minigame camera/tool feedback stays on the showering player's client.
 
