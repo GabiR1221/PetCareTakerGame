@@ -284,8 +284,51 @@ function PetMoodVisualManager:_getDirtTransparencyFromDirtiness(dirtiness)
 	return math.clamp(1 - visibilityBoost, 0, 1)
 end
 
+local DIRT_DECAL_NAME_MARKERS = { "dirt", "dirty", "mud", "stain", "grime", "soil" }
+local DIRT_DECAL_EXCLUDE_MARKERS = { "face", "eye", "mouth", "smile", "cheek", "blush", "sad", "happy" }
+
+local function nameHasAnyMarker(inst, markers)
+	local name = string.lower(tostring((inst and inst.Name) or ""))
+	for _, marker in ipairs(markers) do
+		if string.find(name, marker, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function hierarchyHasAnyNameMarker(inst, markers)
+	local current = inst
+	while current do
+		if nameHasAnyMarker(current, markers) then
+			return true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+function PetMoodVisualManager:_isDirtDecalVisual(item, dirtFolder)
+	if not item or not (item:IsA("Decal") or item:IsA("Texture")) then
+		return false
+	end
+
+	local isInDirtFolder = dirtFolder and item:IsDescendantOf(dirtFolder)
+	local isMarked = item:GetAttribute("ShowerDirt") == true or item:GetAttribute("IsDirt") == true or item:GetAttribute("CleanInShower") == true
+	local isCosmetic = nameHasAnyMarker(item, DIRT_DECAL_EXCLUDE_MARKERS)
+	local hasDirtName = hierarchyHasAnyNameMarker(item, DIRT_DECAL_NAME_MARKERS)
+	local parent = item.Parent
+	local wasDetected = item:GetAttribute("DetectedMeshDirtDecal") == true
+	local isHiddenMeshDecal = parent and parent:IsA("BasePart") and item.Transparency >= 0.95 and not isCosmetic
+	if isHiddenMeshDecal then
+		item:SetAttribute("DetectedMeshDirtDecal", true)
+	end
+
+	return isInDirtFolder or isMarked or wasDetected or (hasDirtName and not isCosmetic) or isHiddenMeshDecal
+end
+
 function PetMoodVisualManager:_resolveBaseDirtTransparency(item)
-	if not item or not item:IsA("BasePart") then
+	if not item or not (item:IsA("BasePart") or item:IsA("Decal") or item:IsA("Texture")) then
 		return 0
 	end
 
@@ -313,16 +356,24 @@ function PetMoodVisualManager:_applyDirtVisuals(petModel, state)
 	if not petModel or not state then return end
 	if state.location == "shower" then return end
 	local dirtFolder = petModel:FindFirstChild("Dirt")
-	if not dirtFolder then return end
 
 	local targetTransparency = self:_getDirtTransparencyFromDirtiness(state.dirtiness)
 
-	for _, item in ipairs(dirtFolder:GetDescendants()) do
-		if item:IsA("BasePart") then
+	if dirtFolder then
+		for _, item in ipairs(dirtFolder:GetDescendants()) do
+			if item:IsA("BasePart") then
+				local baseTransparency = self:_resolveBaseDirtTransparency(item)
+				item.Transparency = math.clamp(math.max(baseTransparency, targetTransparency), 0, 1)
+			end
+		end
+	end
+
+	for _, item in ipairs(petModel:GetDescendants()) do
+		if self:_isDirtDecalVisual(item, dirtFolder) then
+			item.Transparency = targetTransparency
+		elseif item:IsA("BasePart") and dirtFolder and item:IsDescendantOf(dirtFolder) then
 			local baseTransparency = self:_resolveBaseDirtTransparency(item)
 			item.Transparency = math.clamp(math.max(baseTransparency, targetTransparency), 0, 1)
-		elseif item:IsA("Decal") or item:IsA("Texture") then
-			item.Transparency = targetTransparency
 		end
 	end
 end
