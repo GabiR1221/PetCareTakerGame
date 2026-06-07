@@ -30,13 +30,13 @@ local CLIENT_TOOL_SURFACE_SMOOTHNESS_HIT = 18
 local CLIENT_TOOL_NORMAL_SMOOTHNESS_HIT = 12
 local CLIENT_TOOL_MAX_SURFACE_STEP = 0.9
 local CLIENT_TOOL_CONTROL_WALL_PADDING = 0.08
-local CLIENT_TOOL_RECENT_SURFACE_GRACE = 0.35
-local CLIENT_TOOL_SURFACE_RAY_STICK_RADIUS = 1.25
-local CLIENT_TOOL_MIN_SURFACE_CLEARANCE = 0.08
-local CLIENT_TOOL_SURFACE_RAY_STICK_MAX_AGE = 0.65
+local CLIENT_TOOL_RECENT_SURFACE_GRACE = 0.14
+local CLIENT_TOOL_SURFACE_RAY_STICK_RADIUS = 0.65
+local CLIENT_TOOL_MIN_SURFACE_CLEARANCE = 0.12
+local CLIENT_TOOL_SURFACE_RAY_STICK_MAX_AGE = 0.22
 local LOCAL_FOAM_PATCH_SIZE = 0.85
 local LOCAL_FOAM_PATCH_TRANSPARENCY = 0.28
-local LOCAL_FOAM_SURFACE_OFFSET = 0.16
+local LOCAL_FOAM_SURFACE_OFFSET = 0.22
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "ShowerMinigameGui"
@@ -810,15 +810,13 @@ local function getLocalFoamCFrame(localPos, localNormal)
 	if not currentPet or not currentPet.Parent or typeof(localPos) ~= "Vector3" then
 		return nil
 	end
-	local petPivot = localPetBasePivot or currentPet:GetPivot()
-	local baseWorldPos = petPivot:PointToWorldSpace(localPos)
-	local worldNormal = petPivot:VectorToWorldSpace(getSafeUnit(localNormal, Vector3.new(0, 1, 0)))
+	local currentPivot = currentPet:GetPivot()
+	local baseWorldPos = currentPivot:PointToWorldSpace(localPos)
+	local worldNormal = currentPivot:VectorToWorldSpace(getSafeUnit(localNormal, Vector3.new(0, 1, 0)))
 	worldNormal = getSafeUnit(worldNormal, Vector3.new(0, 1, 0))
 	local compression = petSquishRig and petSquishRig.outerCompression or 0
 	local squishedWorldPos = getSquishedSurfacePosition(baseWorldPos, worldNormal, compression > 0, compression)
-	local currentPivot = currentPet:GetPivot()
-	local petMotionOffset = currentPivot.Position - petPivot.Position
-	local worldPos = squishedWorldPos + petMotionOffset
+	local worldPos = squishedWorldPos
 	local cameraRight = camera and camera.CFrame.RightVector or Vector3.new(1, 0, 0)
 	local tangent = cameraRight - (worldNormal * cameraRight:Dot(worldNormal))
 	if tangent.Magnitude < 1e-4 then
@@ -835,40 +833,57 @@ local function getLocalFoamCFrame(localPos, localNormal)
 	return CFrame.fromMatrix(worldPos + (worldNormal * foamOffset), worldNormal, tangent)
 end
 
-local function clearLocalFoamPatches()
-	if localFoamUpdateConn then
-		localFoamUpdateConn:Disconnect()
-		localFoamUpdateConn = nil
+local function findLocalFoamTemplate()
+	local effectsFolder = getEffectsFolder()
+	local names = { "ShowerFoamPatch", "FoamPatch", "FoamPart" }
+	for _, name in ipairs(names) do
+		local template = effectsFolder and effectsFolder:FindFirstChild(name)
+		if template then return template end
 	end
-	for _, patch in pairs(localFoamPatches) do
-		if patch.part then
-			pcall(function() patch.part:Destroy() end)
-		end
+	for _, name in ipairs(names) do
+		local template = ReplicatedStorage:FindFirstChild(name)
+		if template then return template end
 	end
-	localFoamPatches = {}
+	return nil
 end
 
-local function ensureLocalFoamUpdater()
-	if localFoamUpdateConn then return end
-	localFoamUpdateConn = RunService.RenderStepped:Connect(function()
-		if not gui.Enabled or not currentPet or not currentPet.Parent then return end
-		for _, patch in pairs(localFoamPatches) do
-			if patch.part and patch.part.Parent then
-				local cf = getLocalFoamCFrame(patch.localPos, patch.localNormal)
-				if cf then
-					patch.part.CFrame = cf
-				end
-			end
+local function prepareLocalFoamInstance(instance)
+	local function prepare(inst)
+		if inst:IsA("BasePart") then
+			inst.Anchored = true
+			inst.CanCollide = false
+			inst.CanQuery = false
+			inst.CanTouch = false
+			inst.CastShadow = false
+			inst.LocalTransparencyModifier = 0
+		elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Light") then
+			inst.Enabled = true
 		end
-	end)
+	end
+	prepare(instance)
+	for _, d in ipairs(instance:GetDescendants()) do
+		prepare(d)
+	end
+	if instance:IsA("Model") and not instance.PrimaryPart then
+		local part = instance:FindFirstChildWhichIsA("BasePart", true)
+		if part then
+			pcall(function() instance.PrimaryPart = part end)
+		end
+	end
 end
 
-local function addLocalFoamPatch(key, localPos, localNormal)
-	if not key or typeof(localPos) ~= "Vector3" then return end
-	local existing = localFoamPatches[key]
-	if existing and existing.part then return end
-	local cf = getLocalFoamCFrame(localPos, localNormal)
-	if not cf then return end
+local function setLocalFoamInstanceCFrame(instance, cf)
+	if not instance or not cf then return end
+	if instance:IsA("BasePart") then
+		instance.CFrame = cf
+	elseif instance:IsA("Model") then
+		instance:PivotTo(cf)
+	elseif instance:IsA("Attachment") then
+		instance.WorldCFrame = cf
+	end
+end
+
+local function createFallbackFoamPart(cf)
 	local foam = Instance.new("Part")
 	foam.Name = "LocalShowerFoamPatch"
 	foam.Anchored = true
@@ -882,8 +897,95 @@ local function addLocalFoamPatch(key, localPos, localNormal)
 	foam.Shape = Enum.PartType.Cylinder
 	foam.Size = Vector3.new(0.035, LOCAL_FOAM_PATCH_SIZE, LOCAL_FOAM_PATCH_SIZE)
 	foam.CFrame = cf
+	return foam
+end
+
+local function createLocalFoamInstance(cf)
+	local template = findLocalFoamTemplate()
+	local foam = nil
+	if template and (template:IsA("ParticleEmitter") or template:IsA("Trail") or template:IsA("Beam") or template:IsA("Light")) then
+		foam = createFallbackFoamPart(cf)
+		foam.Transparency = 1
+		local effect = template:Clone()
+		if effect:IsA("ParticleEmitter") or effect:IsA("Trail") or effect:IsA("Beam") then
+			local attachment = Instance.new("Attachment")
+			attachment.Name = "FoamEffectAttachment"
+			attachment.Parent = foam
+			effect.Parent = attachment
+		else
+			effect.Parent = foam
+		end
+	else
+		foam = template and template:Clone() or createFallbackFoamPart(cf)
+	end
+	foam.Name = "LocalShowerFoamPatch"
+	prepareLocalFoamInstance(foam)
+	setLocalFoamInstanceCFrame(foam, cf)
 	foam.Parent = workspace.CurrentCamera or workspace
-	localFoamPatches[key] = { part = foam, localPos = localPos, localNormal = localNormal }
+	return foam
+end
+
+local function fadeAndDestroyLocalFoamInstance(instance)
+	if not instance then return end
+	local tweens = {}
+	local function fade(inst)
+		if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Light") then
+			inst.Enabled = false
+		elseif inst:IsA("BasePart") or inst:IsA("Decal") or inst:IsA("Texture") then
+			local ok, tween = pcall(function()
+				return TweenService:Create(inst, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 1 })
+			end)
+			if ok and tween then
+				table.insert(tweens, tween)
+				tween:Play()
+			end
+		end
+	end
+	fade(instance)
+	for _, d in ipairs(instance:GetDescendants()) do
+		fade(d)
+	end
+	task.delay(#tweens > 0 and 0.15 or 0.05, function()
+		if instance and instance.Parent then instance:Destroy() end
+	end)
+end
+
+local function clearLocalFoamPatches()
+	if localFoamUpdateConn then
+		localFoamUpdateConn:Disconnect()
+		localFoamUpdateConn = nil
+	end
+	for _, patch in pairs(localFoamPatches) do
+		if patch.instance then
+			pcall(function() patch.instance:Destroy() end)
+		end
+	end
+	localFoamPatches = {}
+end
+
+local function ensureLocalFoamUpdater()
+	if localFoamUpdateConn then return end
+	localFoamUpdateConn = RunService.RenderStepped:Connect(function()
+		if not gui.Enabled or not currentPet or not currentPet.Parent then return end
+		for _, patch in pairs(localFoamPatches) do
+			if patch.instance and patch.instance.Parent then
+				local cf = getLocalFoamCFrame(patch.localPos, patch.localNormal)
+				if cf then
+					setLocalFoamInstanceCFrame(patch.instance, cf)
+				end
+			end
+		end
+	end)
+end
+
+local function addLocalFoamPatch(key, localPos, localNormal)
+	if not key or typeof(localPos) ~= "Vector3" then return end
+	local existing = localFoamPatches[key]
+	if existing and existing.instance then return end
+	local cf = getLocalFoamCFrame(localPos, localNormal)
+	if not cf then return end
+	local foam = createLocalFoamInstance(cf)
+	localFoamPatches[key] = { instance = foam, localPos = localPos, localNormal = localNormal }
 	ensureLocalFoamUpdater()
 end
 
@@ -891,13 +993,8 @@ local function clearLocalFoamPatch(key)
 	local patch = key and localFoamPatches[key]
 	if not patch then return end
 	localFoamPatches[key] = nil
-	if patch.part then
-		local part = patch.part
-		local tween = TweenService:Create(part, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 1 })
-		tween:Play()
-		task.delay(0.15, function()
-			if part and part.Parent then part:Destroy() end
-		end)
+	if patch.instance then
+		fadeAndDestroyLocalFoamInstance(patch.instance)
 	end
 end
 
@@ -1480,7 +1577,9 @@ local function startCursorTracking()
 			if visualHitPet then
 				desiredPos = keepLocalToolOutsideSurface(desiredPos, toolSurfacePos, surfaceNormalForClearance)
 			end
-			desiredPos = clampLocalToolToControlWall(desiredPos, movePoint)
+			if not visualHitPet then
+				desiredPos = clampLocalToolToControlWall(desiredPos, movePoint)
+			end
 			if lastLocalToolPos then
 				local hitSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolHitSmoothness")) or CLIENT_TOOL_MOVE_SMOOTHNESS_HIT) or CLIENT_TOOL_MOVE_SMOOTHNESS_HIT
 				local airSmoothness = tonumber((currentPet and currentPet:GetAttribute("ShowerToolAirSmoothness")) or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS) or CLIENT_CONTROL_WALL_MOVE_SMOOTHNESS
@@ -1492,7 +1591,9 @@ local function startCursorTracking()
 				if visualHitPet then
 					desiredPos = keepLocalToolOutsideSurface(desiredPos, toolSurfacePos, surfaceNormalForClearance)
 				end
-				desiredPos = clampLocalToolToControlWall(desiredPos, movePoint)
+				if not visualHitPet then
+					desiredPos = clampLocalToolToControlWall(desiredPos, movePoint)
+				end
 			end
 			lastLocalToolPos = desiredPos
 			lastLocalToolNormal = normal
